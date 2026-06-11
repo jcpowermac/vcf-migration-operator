@@ -262,6 +262,33 @@ spec:
                   type: object
                 minItems: 1
                 type: array
+              image:
+                description: |-
+                  Image controls RHCOS OVA resolution and import into destination vCenter.
+                  When set, the operator downloads and imports the OVA as a VM template
+                  for each failure domain and populates topology.template automatically.
+                  When omitted, topology.template must be set manually in each failure domain.
+                properties:
+                  diskProvisioning:
+                    description: |-
+                      DiskProvisioning controls the VMDK disk provisioning type when importing
+                      the OVA. Matches the installer's behavior.
+                    enum:
+                    - thin
+                    - thick
+                    - eagerZeroedThick
+                    type: string
+                  ovaUrl:
+                    description: |-
+                      OVAUrl is a direct URL to the RHCOS OVA file. When set, the operator
+                      downloads from this URL instead of resolving via the coreos-bootimages
+                      ConfigMap delivered by CVO.
+                      Supports both direct .ova URLs and URLs with query parameters (e.g.
+                      integrity digests appended by stream metadata tooling).
+                      Required for air-gapped environments: point to an internal HTTP(S) mirror.
+                    pattern: ^https://.*\.ova(\?.*)?$
+                    type: string
+                type: object
               state:
                 default: Pending
                 description: |-
@@ -362,6 +389,31 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              image:
+                description: Image reports the RHCOS OVA import state.
+                properties:
+                  downloadComplete:
+                    description: |-
+                      DownloadComplete indicates the OVA has been successfully downloaded
+                      to the operator's scratch volume.
+                    type: boolean
+                  importedTemplates:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      ImportedTemplates maps failure domain names to the inventory paths
+                      of imported VM templates.
+                    type: object
+                  resolvedOVAUrl:
+                    description: ResolvedOVAUrl is the URL from which the OVA was
+                      (or will be) downloaded.
+                    type: string
+                  resolvedSHA256:
+                    description: |-
+                      ResolvedSHA256 is the expected sha256 digest of the OVA file, when
+                      resolved from stream metadata. Empty for user-provided URLs.
+                    type: string
+                type: object
               startTime:
                 description: StartTime is when the migration started.
                 format: date-time

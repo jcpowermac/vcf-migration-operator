@@ -622,6 +622,35 @@ func TestAttachClusterOwnershipTag(t *testing.T) {
 			}
 		})
 	})
+
+}
+
+func TestEnsureClusterTag(t *testing.T) {
+	t.Run("rejects incompatible existing category", func(t *testing.T) {
+		simulator.Test(func(ctx context.Context, c *vim25.Client) {
+			s := newTestSession(ctx, t, c)
+
+			createTestCategory(ctx, t, s, tags.Category{
+				Name:            "openshift-bad-infra",
+				Description:     "incompatible category",
+				Cardinality:     "SINGLE",
+				AssociableTypes: []string{datastoreType, folderType},
+			})
+
+			_, err := EnsureClusterTag(ctx, s, "bad-infra")
+			if err == nil {
+				t.Fatal("EnsureClusterTag succeeded, want incompatible category error")
+			}
+			if !strings.Contains(err.Error(), "missing required associable types") {
+				t.Fatalf("EnsureClusterTag error = %q, want missing associable types detail", err.Error())
+			}
+			for _, missingType := range []string{virtualMachineType, resourcePoolType, storagePodType} {
+				if !strings.Contains(err.Error(), missingType) {
+					t.Fatalf("EnsureClusterTag error = %q, want %q in missing types", err.Error(), missingType)
+				}
+			}
+		})
+	})
 }
 
 func createTestCategory(ctx context.Context, t *testing.T, s *Session, category tags.Category) string {

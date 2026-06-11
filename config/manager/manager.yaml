@@ -88,11 +88,16 @@ spec:
         resources:
           limits:
             cpu: 500m
-            memory: 128Mi
+            memory: 256Mi
           requests:
             cpu: 10m
             memory: 64Mi
-        volumeMounts: []
-      volumes: []
+        volumeMounts:
+        - name: scratch
+          mountPath: /tmp/ova-scratch
+      volumes:
+      - name: scratch
+        emptyDir:
+          sizeLimit: 2Gi
       serviceAccountName: controller-manager
       terminationGracePeriodSeconds: 10
