@@ -61,7 +61,7 @@ var _ = Describe(
 			infra, err = configClient.ConfigV1().Infrastructures().Get(ctx, "cluster", metav1.GetOptions{})
 			Expect(err).NotTo(HaveOccurred(), "failed to get Infrastructure CR")
 
-			if infra.Spec.PlatformSpec.Type != configv1.VSpherePlatformType {
+			if infra.Status.PlatformStatus == nil || infra.Status.PlatformStatus.Type != configv1.VSpherePlatformType {
 				Skip("skipping: cluster is not vSphere platform")
 			}
 

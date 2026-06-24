@@ -17,7 +17,7 @@ The test assumes a `VmwareCloudFoundationMigration` CR already exists in the clu
 Run `go get github.com/openshift-eng/openshift-tests-extension@latest` to add the OTE dependency to `go.mod`.
 
 Also add the OpenShift Ginkgo fork replacement in `go.mod` (required for `[OCPFeatureGate:...]` parsing):
-```
+```text
 replace github.com/onsi/ginkgo/v2 => github.com/openshift/onsi-ginkgo/v2 <version>
 ```
 
