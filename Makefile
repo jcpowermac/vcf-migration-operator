@@ -149,6 +149,14 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
+.PHONY: openshift-tests-extension
+openshift-tests-extension: ## Build the openshift-tests-extension binary for vSphere e2e tests.
+	go build -o bin/openshift-tests-extension ./cmd/openshift-tests-extension/
+
+.PHONY: e2e
+e2e: openshift-tests-extension ## Build and run the vSphere e2e tests against the current cluster.
+	./bin/openshift-tests-extension run-test --name "[sig-cluster-lifecycle][OCPFeatureGate:VSphereMultiVCenterDay2][platform:vsphere] Adding a second vCenter via VmwareCloudFoundationMigration should configure the cluster for multi-vCenter operation"
+
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
 	GOLANGCI_LINT_CACHE=$(LOCALBIN)/golangci-lint-cache $(GOLANGCI_LINT) run

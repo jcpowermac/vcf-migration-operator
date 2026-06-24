@@ -36,6 +36,10 @@ linters:
           - dupl
           - lll
         path: internal/*
+      - linters:
+          - staticcheck
+        path: test/e2e/*
+        text: "ST1001"
     paths:
       - third_party$
       - builtin$
