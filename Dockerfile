@@ -2,6 +2,7 @@ ARG BUILD_IMAGE=registry.access.redhat.com/ubi9/go-toolset:latest
 ARG RUNTIME_IMAGE=registry.access.redhat.com/ubi9/ubi-micro:latest
 FROM ${BUILD_IMAGE} as builder
 
+USER 0
 WORKDIR /workspace
 # Copy the Go Modules manifests
 COPY go.mod go.mod
