@@ -93,7 +93,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 	}
 	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Validating cluster readiness")
 	if support.UpgradeInProgress {
-		return "", fmt.Errorf("cluster upgrade is in progress; wait for ClusterVersion/version Progressing=False before starting migration")
+		return "", newTransientError(fmt.Errorf("cluster upgrade is in progress; wait for ClusterVersion/version Progressing=False before starting migration"))
 	}
 
 	opMgr := openshift.NewOperatorManager(r.ConfigClient)
@@ -102,7 +102,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 		return "", fmt.Errorf("checking cluster operator health: %w", err)
 	}
 	if !healthy {
-		return "", fmt.Errorf("cluster operators are not healthy; wait for operators to recover before starting migration: %s", strings.Join(unhealthyOperators, ", "))
+		return "", newTransientError(fmt.Errorf("cluster operators are not healthy; wait for operators to recover before starting migration: %s", strings.Join(unhealthyOperators, ", ")))
 	}
 
 	if err := checkNoVSphereCSIPersistentVolumes(ctx, r.KubeClient); err != nil {
