@@ -104,6 +104,23 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 		return ctrl.Result{}, fmt.Errorf("getting migration resource: %w", err)
 	}
 
+	if migration.Name != migrationv1alpha1.SingletonName {
+		cond := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionAccepted)
+		alreadyRecorded := cond != nil &&
+			cond.Status == metav1.ConditionFalse &&
+			cond.Reason == migrationv1alpha1.ReasonUnsupportedName &&
+			cond.ObservedGeneration == migration.Generation
+		if !alreadyRecorded {
+			log.Info("ignoring VmwareCloudFoundationMigration with unsupported name; only a single resource is reconciled", "expectedName", migrationv1alpha1.SingletonName, "actualName", migration.Name)
+			r.Recorder.Eventf(migration, "Warning", migrationv1alpha1.ReasonUnsupportedName, "this operator only reconciles a VmwareCloudFoundationMigration named %q; this resource will be ignored", migrationv1alpha1.SingletonName)
+			r.setCondition(migration, migrationv1alpha1.ConditionAccepted, metav1.ConditionFalse, migrationv1alpha1.ReasonUnsupportedName, fmt.Sprintf("only a VmwareCloudFoundationMigration named %q is reconciled by this operator", migrationv1alpha1.SingletonName))
+			if err := r.updateStatus(ctx, migration); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
 	if migration.Spec.State != migrationv1alpha1.MigrationStateRunning {
 		log.V(1).Info("migration not in Running state, skipping", "state", migration.Spec.State)
 		return ctrl.Result{}, nil

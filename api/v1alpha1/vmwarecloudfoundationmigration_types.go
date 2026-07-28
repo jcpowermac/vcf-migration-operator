@@ -33,6 +33,12 @@ const (
 	MigrationStatePaused MigrationState = "Paused"
 )
 
+// SingletonName is the only object name the operator will reconcile. Since a
+// single OpenShift cluster can only ever have one active vCenter migration,
+// this follows OpenShift's singleton config resource convention (e.g.
+// infrastructures.config.openshift.io/cluster).
+const SingletonName = "cluster"
+
 // SecretReference references a secret by name and namespace.
 type SecretReference struct {
 	// Name is the secret name.
@@ -109,6 +115,10 @@ const (
 	// ConditionReady indicates migration is 100% complete.
 	// This is an aggregate condition: all operators healthy, only target vCenters in Infrastructure.
 	ConditionReady = "Ready"
+
+	// ConditionAccepted indicates whether this object is the singleton instance
+	// (named SingletonName) that the operator will act on.
+	ConditionAccepted = "Accepted"
 )
 
 // Condition reason constants.
@@ -118,6 +128,10 @@ const (
 	ReasonFailed      = "Failed"
 	ReasonPaused      = "Paused"
 	ReasonPending     = "Pending"
+
+	// ReasonUnsupportedName indicates the object's name is not SingletonName,
+	// so the operator is ignoring it.
+	ReasonUnsupportedName = "UnsupportedName"
 )
 
 // +kubebuilder:object:root=true
