@@ -4,7 +4,7 @@ metadata:
   labels:
     app.kubernetes.io/name: vcf-migration-operator
     app.kubernetes.io/managed-by: kustomize
-  name: vcf-migration-sample
+  name: cluster
 spec:
   state: Pending
   targetVCenterCredentialsSecret:
