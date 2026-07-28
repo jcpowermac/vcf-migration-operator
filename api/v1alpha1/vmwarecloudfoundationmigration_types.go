@@ -245,6 +245,11 @@ const (
 	// ReasonPaused indicates migration has been paused because spec.state is set to Paused.
 	ReasonPaused = "Paused"
 
+	// ReasonRetrying indicates the operator hit a transient condition (e.g. an
+	// external resource is temporarily unhealthy) and will automatically retry.
+	// Unlike ReasonFailed, this is not a terminal state.
+	ReasonRetrying = "Retrying"
+
 	// ReasonUnsupportedName indicates the object's name is not SingletonName,
 	// so the operator is ignoring it.
 	ReasonUnsupportedName = "UnsupportedName"
