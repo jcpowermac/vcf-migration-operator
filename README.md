@@ -1,14 +1,10 @@
 # vcf-migration-operator
 
-Kubernetes operator and OpenShift Console plugin for orchestrating migration of OpenShift clusters between VMware vCenters (e.g. VMware Cloud Foundation / VCF). Use the operator to drive the migration lifecycle and the console plugin to create migrations, browse vCenter inventory, and monitor progress from the OpenShift web console.
+Kubernetes operator for orchestrating migration of OpenShift clusters between VMware vCenters (e.g. VMware Cloud Foundation / VCF). Use the operator to drive the migration lifecycle.
 
 ## Description
 
-vcf-migration-operator automates moving an OpenShift cluster from a source vCenter to a target vCenter. The project consists of:
-
-- **Operator**: A Kubebuilder-based controller that reconciles the `VmwareCloudFoundationMigration` custom resource. It prepares infrastructure (credentials, failure domains), initializes the destination, configures multi-site, migrates workload (machines/nodes), and cleans up the source. The operator uses the cluster's Machine API and OpenShift-specific resources; vSphere operations are performed via govmomi against the target vCenter.
-
-- **OpenShift Console Plugin**: A dynamic plugin that adds a "VCF Migration" section to the OpenShift console (Administrator perspective). It provides a list of migrations, a create wizard (credentials + vCenter browse for failure domains), and a detail view with condition progress, live event stream (SSE), and machine topology. The plugin backend is a Go HTTP server that serves the webpack-built frontend and exposes API routes for vCenter inventory browsing and event streaming; the UI uses the console SDK for all Kubernetes CRUD and watch operations.
+vcf-migration-operator automates moving an OpenShift cluster from a source vCenter to a target vCenter. It is a Kubebuilder-based controller that reconciles the `VmwareCloudFoundationMigration` custom resource. It prepares infrastructure (credentials, failure domains), initializes the destination, configures multi-site, migrates workload (machines/nodes), and cleans up the source. The operator uses the cluster's Machine API and OpenShift-specific resources; vSphere operations are performed via govmomi against the target vCenter.
 
 ## Destination Topology Tags
 
@@ -86,72 +82,16 @@ make uninstall
 make undeploy
 ```
 
-## OpenShift Console Plugin
-
-The console plugin runs as a separate Deployment and registers with the OpenShift console via a `ConsolePlugin` custom resource. It serves the UI and backend APIs (vCenter browse, event stream) over HTTPS.
-
-### Prerequisites (plugin)
-
-- Node.js 18+ and npm (for building the frontend)
-- Go 1.25+ (backend shares the repo's Go module and reuses `internal/vsphere`)
-
-### Build the plugin
-
-```sh
-# Frontend (webpack bundle into console-plugin/web/dist)
-make console-plugin-frontend
-
-# Backend (Go binary to bin/console-plugin)
-make console-plugin-backend
-
-# Container image (default tag: vcf-migration-console-plugin:latest)
-make console-plugin-image
-# Or with a custom tag:
-make console-plugin-image CONSOLE_PLUGIN_IMG=<registry>/vcf-migration-console-plugin:<tag>
-```
-
-### Push the plugin image
-
-```sh
-make console-plugin-push CONSOLE_PLUGIN_IMG=<registry>/vcf-migration-console-plugin:<tag>
-```
-
-### Deploy the plugin
-
-Ensure the plugin image is available to the cluster (e.g. push to the cluster's registry or load into Kind). Then:
-
-```sh
-make deploy-console-plugin CONSOLE_PLUGIN_IMG=<registry>/vcf-migration-console-plugin:<tag>
-```
-
-This applies the Kustomize manifests under `console-plugin/deploy/` (ConsolePlugin CR, Deployment, Service, RBAC). The image in the Deployment manifest is set to `CONSOLE_PLUGIN_IMG` via kustomize. The plugin appears in the Administrator perspective under **VCF Migration → Migrations**.
-
-### Undeploy the plugin
-
-```sh
-make undeploy-console-plugin
-```
-
-### Plugin layout
-
-- `console-plugin/cmd/plugin/` — Go entrypoint; TLS flags, Kube client, server startup
-- `console-plugin/pkg/server/` — HTTP server, route registration, static file serving
-- `console-plugin/pkg/handlers/` — vSphere API handlers (connect, datacenters, clusters, datastores, networks, resource pools, templates, folders) and SSE events handler
-- `console-plugin/web/` — React + TypeScript + PatternFly; `console-extensions.json` for nav/routes; SDK for K8s watch/create
-- `console-plugin/deploy/` — ConsolePlugin, Deployment, Service, RBAC, kustomization
-
 ## Container Images
 
-Both the operator and console plugin images are built with podman by default. The container tool can be overridden via `CONTAINER_TOOL`.
+The operator image is built with podman by default. The container tool can be overridden via `CONTAINER_TOOL`.
 
 | Target | Description |
 |--------|-------------|
 | `make operator-image IMG=...` | Build the operator image |
 | `make operator-push IMG=...` | Push the operator image |
-| `make console-plugin-image CONSOLE_PLUGIN_IMG=...` | Build the console plugin image |
-| `make console-plugin-push CONSOLE_PLUGIN_IMG=...` | Push the console plugin image |
 
-Both `make deploy` and `make deploy-console-plugin` use kustomize to set the image in the respective manifests before applying, so the deployed image always matches the variable you pass.
+`make deploy` uses kustomize to set the image in the manifests before applying, so the deployed image always matches the variable you pass.
 
 ## Project Distribution
 

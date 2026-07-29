@@ -462,10 +462,8 @@ These review notes came from checking the current `openshift/release` vSphere st
 
 4. **Network type**: Does VCF migration testing require a specific network type (e.g., `single-tenant` vs `multi-tenant`)?
 
-5. **Console plugin testing**: Should the e2e also test the console plugin? If so, a separate deploy step for the console plugin would be needed.
+5. **Upgrade testing**: Future consideration -- testing migration as part of an upgrade workflow.
 
-6. **Upgrade testing**: Future consideration -- testing migration as part of an upgrade workflow.
+6. **Periodic frequency**: The proposed periodic runs Monday and Thursday at 06:00 UTC. Adjust based on resource availability and team preferences.
 
-7. **Periodic frequency**: The proposed periodic runs Monday and Thursday at 06:00 UTC. Adjust based on resource availability and team preferences.
-
-8. **CustomNoUpgrade implications**: Using `FEATURE_SET: CustomNoUpgrade` prevents cluster upgrades. If future testing needs to combine migration with upgrade workflows, a different approach to enabling the feature gate may be needed (or wait for the gate to graduate to GA).
+7. **CustomNoUpgrade implications**: Using `FEATURE_SET: CustomNoUpgrade` prevents cluster upgrades. If future testing needs to combine migration with upgrade workflows, a different approach to enabling the feature gate may be needed (or wait for the gate to graduate to GA).

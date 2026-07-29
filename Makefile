@@ -188,35 +188,6 @@ build-installer: manifests generate kustomize ## Generate a consolidated YAML wi
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
 	$(KUSTOMIZE) build config/default > dist/install.yaml
 
-##@ Console Plugin
-
-CONSOLE_PLUGIN_IMG ?= vcf-migration-console-plugin:latest
-
-.PHONY: console-plugin-frontend
-console-plugin-frontend: ## Build the console plugin frontend (webpack bundle).
-	cd console-plugin/web && npm ci 2>/dev/null || npm install && npm run build
-
-.PHONY: console-plugin-backend
-console-plugin-backend: ## Build the console plugin Go binary.
-	go build -o bin/console-plugin ./console-plugin/cmd/plugin
-
-.PHONY: console-plugin-image
-console-plugin-image: ## Build the console plugin container image (context: repo root).
-	$(CONTAINER_TOOL) build -f console-plugin/Dockerfile -t $(CONSOLE_PLUGIN_IMG) .
-
-.PHONY: console-plugin-push
-console-plugin-push: ## Push the console plugin container image.
-	$(CONTAINER_TOOL) push $(CONSOLE_PLUGIN_IMG)
-
-.PHONY: deploy-console-plugin
-deploy-console-plugin: kustomize ## Deploy the console plugin to the cluster.
-	cd console-plugin/deploy && $(KUSTOMIZE) edit set image vcf-migration-console-plugin=${CONSOLE_PLUGIN_IMG}
-	$(KUSTOMIZE) build console-plugin/deploy | $(KUBECTL) apply -f -
-
-.PHONY: undeploy-console-plugin
-undeploy-console-plugin: kustomize ## Remove the console plugin from the cluster.
-	$(KUBECTL) delete -k console-plugin/deploy --ignore-not-found=true
-
 ##@ Deployment
 
 ifndef ignore-not-found
