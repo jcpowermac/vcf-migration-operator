@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,6 +39,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
@@ -71,6 +73,7 @@ var conditionOrder = []string{
 }
 
 const reasonWaitingForVSpherePods = "WaitingForVSpherePods"
+const reasonDeletionBlocked = "DeletionBlocked"
 
 // +kubebuilder:rbac:groups=migration.openshift.io,resources=vmwarecloudfoundationmigrations,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=migration.openshift.io,resources=vmwarecloudfoundationmigrations/status,verbs=get;update;patch
@@ -121,9 +124,17 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 		return ctrl.Result{}, nil
 	}
 
+	result, done, err := r.handleFinalizer(ctx, migration)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if done {
+		return result, nil
+	}
+
 	if migration.Spec.State != migrationv1alpha1.MigrationStateRunning {
 		log.V(1).Info("migration not in Running state, skipping", "state", migration.Spec.State)
-		return ctrl.Result{}, nil
+		return result, nil
 	}
 
 	// Set start time on first reconcile in Running state.
@@ -179,6 +190,59 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 	// All conditions True: migration complete.
 	log.Info("migration complete")
 	return ctrl.Result{}, nil
+}
+
+// handleFinalizer ensures the singleton migration carries the protection
+// finalizer while not being deleted, and guards deletion while a migration is
+// in progress. It returns done=true when the caller should return immediately
+// with the given result/error; done=false means the caller should continue
+// with normal reconciliation (e.g. a Running migration keeps progressing
+// toward Ready even while the object is Terminating, so it can finish and
+// finalize its own deletion).
+func (r *VmwareCloudFoundationMigrationReconciler) handleFinalizer(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) (ctrl.Result, bool, error) {
+	if migration.DeletionTimestamp.IsZero() {
+		if controllerutil.AddFinalizer(migration, migrationv1alpha1.Finalizer) {
+			if err := r.Update(ctx, migration); err != nil {
+				return ctrl.Result{}, true, fmt.Errorf("adding finalizer: %w", err)
+			}
+			return ctrl.Result{}, true, nil
+		}
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, false, nil
+	}
+
+	if !controllerutil.ContainsFinalizer(migration, migrationv1alpha1.Finalizer) {
+		return ctrl.Result{}, true, nil
+	}
+
+	blocked := migration.Status.StartTime != nil && !r.isConditionTrue(migration, migrationv1alpha1.ConditionReady)
+	forced := false
+	if val, ok := migration.Annotations[migrationv1alpha1.ForceDeleteAnnotation]; ok {
+		forced, _ = strconv.ParseBool(strings.TrimSpace(val))
+	}
+	if !blocked || forced {
+		controllerutil.RemoveFinalizer(migration, migrationv1alpha1.Finalizer)
+		if err := r.Update(ctx, migration); err != nil {
+			return ctrl.Result{}, true, fmt.Errorf("removing finalizer: %w", err)
+		}
+		return ctrl.Result{}, true, nil
+	}
+
+	cond := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionReady)
+	alreadyRecorded := cond != nil &&
+		cond.Status == metav1.ConditionFalse &&
+		cond.Reason == reasonDeletionBlocked
+	if !alreadyRecorded {
+		r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, reasonDeletionBlocked,
+			fmt.Sprintf("migration is in progress; deletion is deferred until it reaches %s, or add the %q annotation to force it",
+				migrationv1alpha1.ConditionReady, migrationv1alpha1.ForceDeleteAnnotation))
+		if err := r.updateStatus(ctx, migration); err != nil {
+			return ctrl.Result{}, true, fmt.Errorf("updating deletion-blocked status: %w", err)
+		}
+		r.Recorder.Eventf(migration, "Warning", reasonDeletionBlocked,
+			"migration is in progress; deletion is deferred until it reaches %s, or add the %q annotation to force it",
+			migrationv1alpha1.ConditionReady, migrationv1alpha1.ForceDeleteAnnotation)
+	}
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, false, nil
 }
 
 // ensureInfrastructurePrepared validates preflight checks and selects the

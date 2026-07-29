@@ -39,6 +39,17 @@ const (
 // infrastructures.config.openshift.io/cluster).
 const SingletonName = "cluster"
 
+// Finalizer is set on the singleton VmwareCloudFoundationMigration while a
+// migration is in progress, so the object is not removed out from under an
+// interrupted migration (e.g. a test timeout or accidental delete), leaving
+// the cluster split across vCenters with nothing left to track or finish it.
+const Finalizer = "migration.openshift.io/vcfm-protection"
+
+// ForceDeleteAnnotation, when set to "true" on the singleton
+// VmwareCloudFoundationMigration, allows the object to be deleted even while
+// a migration is in progress, abandoning it deliberately.
+const ForceDeleteAnnotation = "migration.openshift.io/force-delete"
+
 // SecretReference references a secret by name and namespace.
 type SecretReference struct {
 	// Name is the secret name.
