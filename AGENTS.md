@@ -1,6 +1,6 @@
 # AGENTS.md — vcf-migration-operator
 
-Kubernetes operator (Go / Kubebuilder v4) and OpenShift Console plugin for orchestrating OpenShift cluster migration between VMware vCenters. Operator uses controller-runtime, govmomi, OpenShift client-go, and Ginkgo/Gomega for tests. The console plugin is a separate Deployment (Go backend + React/TypeScript/PatternFly frontend) that registers with the OpenShift console and provides a UI for creating migrations and monitoring progress.
+Kubernetes operator (Go / Kubebuilder v4) for orchestrating OpenShift cluster migration between VMware vCenters. Operator uses controller-runtime, govmomi, OpenShift client-go, and Ginkgo/Gomega for tests.
 
 ## Build / Lint / Test Commands
 
@@ -42,26 +42,6 @@ make manifests            # generate CRDs, RBAC, webhooks
 make generate             # generate DeepCopy methods
 ```
 
-### Console Plugin
-
-```bash
-# Frontend (webpack bundle; output in console-plugin/web/dist)
-make console-plugin-frontend
-
-# Backend (Go binary to bin/console-plugin; uses same Go module, imports internal/vsphere)
-make console-plugin-backend
-
-# Container image (default: vcf-migration-console-plugin:latest)
-make console-plugin-image
-# Custom image: make console-plugin-image CONSOLE_PLUGIN_IMG=<registry>/vcf-migration-console-plugin:<tag>
-
-# Deploy plugin to cluster (ConsolePlugin CR + Deployment + Service + RBAC in openshift-console)
-make deploy-console-plugin
-
-# Remove plugin from cluster
-make undeploy-console-plugin
-```
-
 ## Project Layout
 
 ```
@@ -70,25 +50,12 @@ cmd/main.go            Operator entrypoint
 internal/
   controller/          Reconciler and helpers
   openshift/           OpenShift resource managers (secrets, infra, pods, machines, configmaps, operators)
-  vsphere/             vSphere operations (session, folder, tags); shared by operator and console plugin
+  vsphere/             vSphere operations (session, folder, tags)
   metadata/            Installer metadata generation
 config/                Kustomize manifests (CRDs, RBAC, manager deployment)
 hack/                  Boilerplate license header
 test/e2e/              End-to-end tests (Kind cluster)
 test/utils/            Test utility helpers
-
-console-plugin/        OpenShift Console dynamic plugin (separate Deployment)
-  cmd/plugin/          Go entrypoint (TLS, static serving, Kube client)
-  pkg/server/          HTTP server, routes, static file serving
-  pkg/handlers/        vSphere API (connect, datacenters, clusters, datastores, networks, etc.) and SSE events
-  web/                 React + TypeScript + PatternFly frontend
-    src/
-      app/             Pages (MigrationListPage, MigrationDetailPage, MigrationWizard), components, hooks
-      models.ts        K8s models and types for Migration, MachineSet, Machine, Node
-    console-extensions.json   Plugin nav and route registration
-    webpack.config.ts   ConsoleRemotePlugin (exposed module: migrationPlugin)
-  deploy/              ConsolePlugin CR, Deployment, Service, RBAC, kustomization.yaml
-  Dockerfile           Multi-stage: node build → Go build → alpine runtime
 ```
 
 ## Code Style

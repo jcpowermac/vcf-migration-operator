@@ -73,8 +73,6 @@ Update the operator so Phase 1 is a real preflight gate that surfaces blockers b
   - a compatibility fallback
   - an operator-action requirement
   - a documented manual prerequisite
-- Update `console-plugin/web/src/app/pages/MigrationDetailPage.tsx` only if needed so advisory and blocker messages remain visible and understandable in the progress stepper/details view.
-
 ### 6. Add focused TDD coverage
 
 - Add unit tests first for:
@@ -100,7 +98,6 @@ Update the operator so Phase 1 is a real preflight gate that surfaces blockers b
 - `internal/controller/preflight.go` (new) — extracted preflight check functions
 - `api/v1alpha1/vmwarecloudfoundationmigration_types.go` — add `status.migrationPath` field (`"Native"` / `"Legacy"`)
 - `config/rbac/role.yaml` — add `featuregates.config.openshift.io` get/list, `clusterversions.config.openshift.io` get
-- `console-plugin/web/src/app/pages/MigrationDetailPage.tsx` — if needed for advisory vs blocker display
 
 ## Reference PRs
 
@@ -137,7 +134,7 @@ Update the operator so Phase 1 is a real preflight gate that surfaces blockers b
    - `ensureSourceCleaned()` must choose `infraMgr.RemoveSourceVCenterWithCRDModification()` (legacy) vs `infraMgr.RemoveSourceVCenter()` (native). It also conditionally calls `enableCVO()`, which must be skipped on the native path since CVO was never disabled.
 
    Today `VmwareCloudFoundationMigrationStatus` has no field to carry this forward. Without one, each phase re-reads `ClusterVersion` + `FeatureGate`, adding API calls and risking a path switch if the cluster is upgraded or the gate is toggled mid-migration. Options:
-   - Add `status.migrationPath` (e.g., `"Native"` / `"Legacy"`) — set once during preflight, read by later phases to branch. Visible in `kubectl get` and console UI.
+   - Add `status.migrationPath` (e.g., `"Native"` / `"Legacy"`) — set once during preflight, read by later phases to branch. Visible in `kubectl get`.
    - Re-evaluate on every reconcile — simpler, but the operator could switch paths mid-migration if conditions change between phases.
 
 5. **Missing RBAC for new preflight checks.** The plan adds checks for `PersistentVolume` (CSI PV detection), `MachineHealthCheck`, `ClusterAutoscaler`, and `MachineAutoscaler`. Current RBAC markers don't cover:
@@ -164,7 +161,7 @@ Update the operator so Phase 1 is a real preflight gate that surfaces blockers b
 
 ## Follow-Up Questions (all resolved)
 
-1. **RESOLVED: Path persistence.** Persist in `status.migrationPath` (e.g., `"Native"` / `"Legacy"`). Set once during preflight in `ensureInfrastructurePrepared()`, read by `ensureMultiSiteConfigured()` and `ensureSourceCleaned()` to branch. Prevents mid-migration path switches. Visible in `kubectl get` and console UI. Requires adding the field to `VmwareCloudFoundationMigrationStatus` in `api/v1alpha1/vmwarecloudfoundationmigration_types.go`.
+1. **RESOLVED: Path persistence.** Persist in `status.migrationPath` (e.g., `"Native"` / `"Legacy"`). Set once during preflight in `ensureInfrastructurePrepared()`, read by `ensureMultiSiteConfigured()` and `ensureSourceCleaned()` to branch. Prevents mid-migration path switches. Visible in `kubectl get`. Requires adding the field to `VmwareCloudFoundationMigrationStatus` in `api/v1alpha1/vmwarecloudfoundationmigration_types.go`.
 
 2. **RESOLVED: CVO pause window on legacy path.** Disable CVO at the start of `ensureMultiSiteConfigured()` (before the first CRD mutation), keep paused through `WorkloadMigrated`, re-enable at the end of `ensureSourceCleaned()` (after source removal and CRD restoration). Move the `disableCVO()` call out of `ensureInfrastructurePrepared()` so preflight is purely non-disruptive.
 
