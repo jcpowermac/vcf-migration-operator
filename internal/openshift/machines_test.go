@@ -241,3 +241,121 @@ func TestIsCPMSGenerationObserved(t *testing.T) {
 		})
 	}
 }
+
+func TestUpdateMachineSetProviderSpecTagIDs(t *testing.T) {
+	baseProviderSpec := `{
+		"kind":"VSphereMachineProviderSpec",
+		"apiVersion":"machine.openshift.io/v1beta1",
+		"template":"/dc/vm/template",
+		"workspace":{"server":"vcenter.example.com","datacenter":"dc1"},
+		"network":{"devices":[{"networkName":"net1"}]}
+	}`
+
+	fd := &configv1.VSpherePlatformFailureDomainSpec{
+		Name:   "fd-1",
+		Server: "vcenter.example.com",
+		Topology: configv1.VSpherePlatformTopology{
+			Datacenter: "dc1",
+			Datastore:  "/dc1/datastore/ds1",
+			Folder:     "/dc1/vm/cluster-abc",
+			Networks:   []string{"net1"},
+		},
+	}
+
+	t.Run("appends ownership tag ID", func(t *testing.T) {
+		ms := &machinev1beta1.MachineSet{
+			Spec: machinev1beta1.MachineSetSpec{
+				Template: machinev1beta1.MachineTemplateSpec{
+					Spec: machinev1beta1.MachineSpec{
+						ProviderSpec: machinev1beta1.ProviderSpec{
+							Value: &runtime.RawExtension{Raw: []byte(baseProviderSpec)},
+						},
+					},
+				},
+			},
+		}
+		if err := updateMachineSetProviderSpec(ms, fd, "cluster-abc", "urn:vmomi:InventoryServiceTag:tag-1:GLOBAL"); err != nil {
+			t.Fatalf("updateMachineSetProviderSpec: %v", err)
+		}
+		ps, err := extractVSphereProviderSpec(ms)
+		if err != nil {
+			t.Fatalf("extractVSphereProviderSpec: %v", err)
+		}
+		if len(ps.TagIDs) != 1 || ps.TagIDs[0] != "urn:vmomi:InventoryServiceTag:tag-1:GLOBAL" {
+			t.Fatalf("TagIDs = %v, want [urn:vmomi:InventoryServiceTag:tag-1:GLOBAL]", ps.TagIDs)
+		}
+	})
+
+	t.Run("preserves existing tag IDs and does not duplicate", func(t *testing.T) {
+		withExisting := `{
+			"kind":"VSphereMachineProviderSpec",
+			"apiVersion":"machine.openshift.io/v1beta1",
+			"template":"/dc/vm/template",
+			"workspace":{"server":"vcenter.example.com","datacenter":"dc1"},
+			"network":{"devices":[{"networkName":"net1"}]},
+			"tagIDs":["urn:vmomi:InventoryServiceTag:existing:GLOBAL"]
+		}`
+		ms := &machinev1beta1.MachineSet{
+			Spec: machinev1beta1.MachineSetSpec{
+				Template: machinev1beta1.MachineTemplateSpec{
+					Spec: machinev1beta1.MachineSpec{
+						ProviderSpec: machinev1beta1.ProviderSpec{
+							Value: &runtime.RawExtension{Raw: []byte(withExisting)},
+						},
+					},
+				},
+			},
+		}
+		ownershipID := "urn:vmomi:InventoryServiceTag:ownership:GLOBAL"
+		if err := updateMachineSetProviderSpec(ms, fd, "cluster-abc", ownershipID); err != nil {
+			t.Fatalf("updateMachineSetProviderSpec: %v", err)
+		}
+		ps, err := extractVSphereProviderSpec(ms)
+		if err != nil {
+			t.Fatalf("extractVSphereProviderSpec: %v", err)
+		}
+		if len(ps.TagIDs) != 2 {
+			t.Fatalf("TagIDs len = %d, want 2: %v", len(ps.TagIDs), ps.TagIDs)
+		}
+		if ps.TagIDs[0] != "urn:vmomi:InventoryServiceTag:existing:GLOBAL" {
+			t.Fatalf("TagIDs[0] = %q, want existing", ps.TagIDs[0])
+		}
+		if ps.TagIDs[1] != ownershipID {
+			t.Fatalf("TagIDs[1] = %q, want %q", ps.TagIDs[1], ownershipID)
+		}
+		if err := updateMachineSetProviderSpec(ms, fd, "cluster-abc", ownershipID); err != nil {
+			t.Fatalf("updateMachineSetProviderSpec second: %v", err)
+		}
+		ps, err = extractVSphereProviderSpec(ms)
+		if err != nil {
+			t.Fatalf("extractVSphereProviderSpec second: %v", err)
+		}
+		if len(ps.TagIDs) != 2 {
+			t.Fatalf("TagIDs after second call = %v, want length 2", ps.TagIDs)
+		}
+	})
+
+	t.Run("skips empty ownership tag ID", func(t *testing.T) {
+		ms := &machinev1beta1.MachineSet{
+			Spec: machinev1beta1.MachineSetSpec{
+				Template: machinev1beta1.MachineTemplateSpec{
+					Spec: machinev1beta1.MachineSpec{
+						ProviderSpec: machinev1beta1.ProviderSpec{
+							Value: &runtime.RawExtension{Raw: []byte(baseProviderSpec)},
+						},
+					},
+				},
+			},
+		}
+		if err := updateMachineSetProviderSpec(ms, fd, "cluster-abc", ""); err != nil {
+			t.Fatalf("updateMachineSetProviderSpec: %v", err)
+		}
+		ps, err := extractVSphereProviderSpec(ms)
+		if err != nil {
+			t.Fatalf("extractVSphereProviderSpec: %v", err)
+		}
+		if len(ps.TagIDs) != 0 {
+			t.Fatalf("TagIDs = %v, want empty", ps.TagIDs)
+		}
+	})
+}

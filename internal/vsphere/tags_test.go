@@ -458,6 +458,150 @@ func TestObjectHasTagInCategory(t *testing.T) {
 	})
 }
 
+func TestEnsureClusterOwnershipTag(t *testing.T) {
+	t.Run("rejects nil session", func(t *testing.T) {
+		_, err := EnsureClusterOwnershipTag(context.Background(), nil, "test-infra-abc")
+		if err == nil {
+			t.Fatal("EnsureClusterOwnershipTag succeeded, want nil session error")
+		}
+		if !strings.Contains(err.Error(), "session and TagManager must not be nil") {
+			t.Fatalf("EnsureClusterOwnershipTag error = %q, want nil session detail", err.Error())
+		}
+	})
+
+	t.Run("rejects empty infraID", func(t *testing.T) {
+		_, err := EnsureClusterOwnershipTag(context.Background(), &Session{}, "")
+		if err == nil {
+			t.Fatal("EnsureClusterOwnershipTag succeeded, want empty infraID error")
+		}
+		if !strings.Contains(err.Error(), "infraID") {
+			t.Fatalf("EnsureClusterOwnershipTag error = %q, want infraID detail", err.Error())
+		}
+	})
+
+	t.Run("creates and reuses ownership category and tag", func(t *testing.T) {
+		simulator.Test(func(ctx context.Context, c *vim25.Client) {
+			s := newTestSession(ctx, t, c)
+			infraID := "cluster-abc123"
+
+			tagID, err := EnsureClusterOwnershipTag(ctx, s, infraID)
+			if err != nil {
+				t.Fatalf("EnsureClusterOwnershipTag: %v", err)
+			}
+			if tagID == "" {
+				t.Fatal("expected non-empty tag ID")
+			}
+
+			categoryName := ClusterOwnershipCategoryName(infraID)
+			cat, err := s.TagManager.GetCategory(ctx, categoryName)
+			if err != nil {
+				t.Fatalf("GetCategory %q: %v", categoryName, err)
+			}
+			if cat.Description != ClusterOwnershipDescription {
+				t.Fatalf("category description = %q, want %q", cat.Description, ClusterOwnershipDescription)
+			}
+			if cat.Cardinality != "SINGLE" {
+				t.Fatalf("category cardinality = %q, want SINGLE", cat.Cardinality)
+			}
+			for _, wantType := range clusterOwnershipAssociableTypes {
+				found := false
+				for _, gotType := range cat.AssociableTypes {
+					if gotType == wantType {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("category AssociableTypes = %v, want to include %q", cat.AssociableTypes, wantType)
+				}
+			}
+
+			tag, err := s.TagManager.GetTag(ctx, tagID)
+			if err != nil {
+				t.Fatalf("GetTag: %v", err)
+			}
+			if tag.Name != infraID {
+				t.Fatalf("tag name = %q, want %q", tag.Name, infraID)
+			}
+			if tag.Description != ClusterOwnershipDescription {
+				t.Fatalf("tag description = %q, want %q", tag.Description, ClusterOwnershipDescription)
+			}
+
+			tagID2, err := EnsureClusterOwnershipTag(ctx, s, infraID)
+			if err != nil {
+				t.Fatalf("EnsureClusterOwnershipTag (second call): %v", err)
+			}
+			if tagID2 != tagID {
+				t.Fatalf("expected same tag ID, got %q and %q", tagID, tagID2)
+			}
+		})
+	})
+
+	t.Run("surfaces incompatible existing category", func(t *testing.T) {
+		simulator.Test(func(ctx context.Context, c *vim25.Client) {
+			s := newTestSession(ctx, t, c)
+			infraID := "cluster-bad"
+			createTestCategory(ctx, t, s, tags.Category{
+				Name:            ClusterOwnershipCategoryName(infraID),
+				Description:     ClusterOwnershipDescription,
+				Cardinality:     "MULTIPLE",
+				AssociableTypes: append([]string(nil), clusterOwnershipAssociableTypes...),
+			})
+
+			_, err := EnsureClusterOwnershipTag(ctx, s, infraID)
+			if err == nil {
+				t.Fatal("EnsureClusterOwnershipTag succeeded, want cardinality mismatch error")
+			}
+			if !strings.Contains(err.Error(), "incompatible") {
+				t.Fatalf("EnsureClusterOwnershipTag error = %q, want incompatible detail", err.Error())
+			}
+		})
+	})
+}
+
+func TestAttachClusterOwnershipTag(t *testing.T) {
+	t.Run("rejects nil folder", func(t *testing.T) {
+		err := AttachClusterOwnershipTag(context.Background(), &Session{}, "tag-id", nil)
+		if err == nil {
+			t.Fatal("AttachClusterOwnershipTag succeeded, want nil folder error")
+		}
+		if !strings.Contains(err.Error(), "folder is nil") {
+			t.Fatalf("AttachClusterOwnershipTag error = %q, want nil folder detail", err.Error())
+		}
+	})
+
+	t.Run("attaches ownership tag to folder and is idempotent", func(t *testing.T) {
+		simulator.Test(func(ctx context.Context, c *vim25.Client) {
+			s := newTestSession(ctx, t, c)
+			infraID := "cluster-folder-tag"
+
+			tagID, err := EnsureClusterOwnershipTag(ctx, s, infraID)
+			if err != nil {
+				t.Fatalf("EnsureClusterOwnershipTag: %v", err)
+			}
+
+			folder, err := CreateVMFolder(ctx, s, infraID)
+			if err != nil {
+				t.Fatalf("CreateVMFolder: %v", err)
+			}
+
+			if err := AttachClusterOwnershipTag(ctx, s, tagID, folder); err != nil {
+				t.Fatalf("AttachClusterOwnershipTag: %v", err)
+			}
+
+			attached, err := s.TagManager.ListAttachedTags(ctx, folder.Reference())
+			if err != nil {
+				t.Fatalf("listing attached folder tags: %v", err)
+			}
+			assertTagAttached(t, attached, tagID)
+
+			if err := AttachClusterOwnershipTag(ctx, s, tagID, folder); err != nil {
+				t.Fatalf("AttachClusterOwnershipTag (second call): %v", err)
+			}
+		})
+	})
+}
+
 func createTestCategory(ctx context.Context, t *testing.T, s *Session, category tags.Category) string {
 	t.Helper()
 

@@ -41,8 +41,9 @@ func NewMachineManager(kubeClient kubernetes.Interface, machineClient machinecli
 
 // CreateWorkerMachineSet creates a new worker MachineSet from the given template,
 // configured for the specified failure domain. The new MachineSet is created in the
-// openshift-machine-api namespace.
-func (m *MachineManager) CreateWorkerMachineSet(ctx context.Context, name string, replicas int32, failureDomain *configv1.VSpherePlatformFailureDomainSpec, template *machinev1beta1.MachineSet, infraID string) (*machinev1beta1.MachineSet, error) {
+// openshift-machine-api namespace. ownershipTagID is the vSphere cluster ownership
+// tag ID to set on providerSpec.tagIDs (empty skips tagging).
+func (m *MachineManager) CreateWorkerMachineSet(ctx context.Context, name string, replicas int32, failureDomain *configv1.VSpherePlatformFailureDomainSpec, template *machinev1beta1.MachineSet, infraID, ownershipTagID string) (*machinev1beta1.MachineSet, error) {
 	if template == nil {
 		return nil, fmt.Errorf("template MachineSet must not be nil")
 	}
@@ -74,7 +75,7 @@ func (m *MachineManager) CreateWorkerMachineSet(ctx context.Context, name string
 	newMS.Spec.Template.Labels["machine.openshift.io/cluster-api-cluster"] = infraID
 
 	// Update the provider spec with the failure domain topology.
-	if err := updateMachineSetProviderSpec(newMS, failureDomain, infraID); err != nil {
+	if err := updateMachineSetProviderSpec(newMS, failureDomain, infraID, ownershipTagID); err != nil {
 		return nil, fmt.Errorf("updating provider spec for machineset %q: %w", name, err)
 	}
 
@@ -381,8 +382,9 @@ func (m *MachineManager) CheckNodesDeletedForMachines(ctx context.Context, machi
 // updateMachineSetProviderSpec updates the VSphereMachineProviderSpec in the
 // MachineSet template with the topology from the given failure domain. When the
 // failure domain does not specify a folder, the default /<datacenter>/vm/<infraID>
-// path is used.
-func updateMachineSetProviderSpec(ms *machinev1beta1.MachineSet, fd *configv1.VSpherePlatformFailureDomainSpec, infraID string) error {
+// path is used. ownershipTagID is appended to providerSpec.TagIDs when non-empty
+// and not already present (max 10 tag IDs per Machine API).
+func updateMachineSetProviderSpec(ms *machinev1beta1.MachineSet, fd *configv1.VSpherePlatformFailureDomainSpec, infraID, ownershipTagID string) error {
 	if ms == nil {
 		return fmt.Errorf("machineset must not be nil")
 	}
@@ -431,6 +433,8 @@ func updateMachineSetProviderSpec(ms *machinev1beta1.MachineSet, fd *configv1.VS
 		}
 	}
 
+	providerSpec.TagIDs = ensureTagIDPresent(providerSpec.TagIDs, ownershipTagID)
+
 	raw, err := json.Marshal(providerSpec)
 	if err != nil {
 		return fmt.Errorf("marshalling updated provider spec: %w", err)
@@ -438,6 +442,25 @@ func updateMachineSetProviderSpec(ms *machinev1beta1.MachineSet, fd *configv1.VS
 
 	ms.Spec.Template.Spec.ProviderSpec.Value = &runtime.RawExtension{Raw: raw}
 	return nil
+}
+
+const maxVSphereTagIDs = 10
+
+// ensureTagIDPresent appends tagID to existing when non-empty and not already
+// present, respecting the Machine API maximum of 10 tag IDs.
+func ensureTagIDPresent(existing []string, tagID string) []string {
+	if tagID == "" {
+		return existing
+	}
+	for _, id := range existing {
+		if id == tagID {
+			return existing
+		}
+	}
+	if len(existing) >= maxVSphereTagIDs {
+		return existing
+	}
+	return append(existing, tagID)
 }
 
 // extractVSphereProviderSpec extracts the VSphereMachineProviderSpec from a MachineSet.

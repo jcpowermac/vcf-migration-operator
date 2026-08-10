@@ -19,6 +19,17 @@ During the `DestinationInitialized` phase, after preflight confirms the target v
 
 The category ownership model is intentionally shared per vCenter rather than cluster-specific. If `openshift-region` or `openshift-zone` already exists, the operator reuses it and never deletes or rewrites it. Brownfield reuse is validated before proceeding: the category must keep `SINGLE` cardinality and must allow at least `Datacenter` and `ClusterComputeResource`. Extra associable types and different descriptions are tolerated. If an existing category is incompatible, the operator fails with an error that tells the administrator to update the category in the vSphere UI or delete it and let the operator recreate it.
 
+## Destination Cluster Ownership Tags
+
+Separate from topology tags, the operator also mirrors the OpenShift installer’s **cluster ownership** tagging on each destination vCenter (used for inventory ownership and destroy/cleanup):
+
+- Category `openshift-<infraID>` and tag `<infraID>` are created with description `Added by openshift-install do not remove` and `SINGLE` cardinality.
+- Associable types match the installer: `VirtualMachine`, `ResourcePool`, `Folder`, `Datastore`, and `StoragePod` (URN-prefixed).
+- The ownership tag is attached to the destination infraID VM folder during `DestinationInitialized`.
+- Destination worker MachineSets created by the operator include the ownership tag ID in `providerSpec.tagIDs` so new VMs are tagged.
+
+This is distinct from `openshift-region` / `openshift-zone`. Topology tags describe failure domains; ownership tags mark cluster-owned inventory.
+
 ## Getting Started
 
 ### Prerequisites

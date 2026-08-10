@@ -27,6 +27,10 @@ const (
 	// TagCategoryZoneDescription describes the zone tag category.
 	TagCategoryZoneDescription = "OpenShift zone for failure domain topology"
 
+	// ClusterOwnershipDescription matches the OpenShift installer cluster
+	// ownership tag/category description.
+	ClusterOwnershipDescription = "Added by openshift-install do not remove"
+
 	// datacenterType is the vSphere associable type name for datacenters.
 	datacenterType = "Datacenter"
 	// clusterComputeResourceType is the vSphere associable type name for clusters.
@@ -48,7 +52,29 @@ var (
 		datacenterType,
 		clusterComputeResourceType,
 	}
+
+	// clusterOwnershipAssociableTypes matches the installer createClusterTagID
+	// category associable types (URN-prefixed inventory types).
+	clusterOwnershipAssociableTypes = []string{
+		"urn:vim25:VirtualMachine",
+		"urn:vim25:ResourcePool",
+		"urn:vim25:Folder",
+		"urn:vim25:Datastore",
+		"urn:vim25:StoragePod",
+	}
+	// requiredClusterOwnershipAssociableTypes are the minimum types needed to
+	// attach ownership tags to folders and VMs.
+	requiredClusterOwnershipAssociableTypes = []string{
+		"urn:vim25:VirtualMachine",
+		"urn:vim25:Folder",
+	}
 )
+
+// ClusterOwnershipCategoryName returns the installer-style cluster ownership
+// tag category name for the given infrastructure ID.
+func ClusterOwnershipCategoryName(infraID string) string {
+	return fmt.Sprintf("openshift-%s", infraID)
+}
 
 // isAlreadyExists returns true if the error indicates the resource already exists
 // (e.g. vSphere API returns already_exists).
@@ -56,14 +82,14 @@ func isAlreadyExists(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "already_exists")
 }
 
-func validateExistingCategory(category *tags.Category, name, cardinality string) error {
+func validateExistingCategory(category *tags.Category, name, cardinality string, requiredTypes []string) error {
 	var incompatibilities []string
 
 	if category.Cardinality != cardinality {
 		incompatibilities = append(incompatibilities, fmt.Sprintf("cardinality %q does not match required %q", category.Cardinality, cardinality))
 	}
 
-	missingTypes := missingAssociableTypes(category.AssociableTypes, requiredTagCategoryAssociableTypes)
+	missingTypes := missingAssociableTypes(category.AssociableTypes, requiredTypes)
 	if len(missingTypes) > 0 {
 		incompatibilities = append(incompatibilities, fmt.Sprintf("missing required associable types %s", strings.Join(missingTypes, ", ")))
 	}
@@ -144,8 +170,13 @@ func ObjectHasTagInCategory(ctx context.Context, s *Session, categoryName string
 // EnsureTagCategory returns the vSphere tag category ID for the given name,
 // creating the category if it does not exist. If the category already exists
 // (e.g. from a previous run or another cluster), it is looked up and its ID is
-// returned so creation is idempotent.
+// returned so creation is idempotent. Categories are created with the OpenShift
+// topology associable types (Datacenter, ClusterComputeResource, Datastore, Folder).
 func EnsureTagCategory(ctx context.Context, s *Session, name, description, cardinality string) (string, error) {
+	return ensureTagCategory(ctx, s, name, description, cardinality, tagCategoryAssociableTypes, requiredTagCategoryAssociableTypes)
+}
+
+func ensureTagCategory(ctx context.Context, s *Session, name, description, cardinality string, associableTypes, requiredTypes []string) (string, error) {
 	if s == nil || s.TagManager == nil {
 		return "", fmt.Errorf("session and TagManager must not be nil")
 	}
@@ -154,7 +185,7 @@ func EnsureTagCategory(ctx context.Context, s *Session, name, description, cardi
 
 	existing, err := s.TagManager.GetCategory(ctx, name)
 	if err == nil && existing != nil && existing.ID != "" {
-		if err := validateExistingCategory(existing, name, cardinality); err != nil {
+		if err := validateExistingCategory(existing, name, cardinality, requiredTypes); err != nil {
 			return "", err
 		}
 		log.V(2).Info("using existing tag category", "name", name, "id", existing.ID)
@@ -165,7 +196,7 @@ func EnsureTagCategory(ctx context.Context, s *Session, name, description, cardi
 		Name:            name,
 		Description:     description,
 		Cardinality:     cardinality,
-		AssociableTypes: tagCategoryAssociableTypes,
+		AssociableTypes: associableTypes,
 	}
 
 	id, err := s.TagManager.CreateCategory(ctx, &cat)
@@ -175,7 +206,7 @@ func EnsureTagCategory(ctx context.Context, s *Session, name, description, cardi
 			if getErr != nil {
 				return "", fmt.Errorf("creating tag category %q (already exists but get failed): %w", name, getErr)
 			}
-			if err := validateExistingCategory(existing, name, cardinality); err != nil {
+			if err := validateExistingCategory(existing, name, cardinality, requiredTypes); err != nil {
 				return "", err
 			}
 			log.V(2).Info("tag category already existed, using existing", "name", name, "id", existing.ID)
@@ -186,6 +217,54 @@ func EnsureTagCategory(ctx context.Context, s *Session, name, description, cardi
 
 	log.V(2).Info("created tag category", "name", name, "id", id)
 	return id, nil
+}
+
+// EnsureClusterOwnershipTag ensures the installer-style cluster ownership tag
+// category (openshift-<infraID>) and tag (<infraID>) exist on the vCenter,
+// creating them if necessary. It returns the tag ID for use in MachineSet
+// providerSpec.tagIDs. Idempotent when the category or tag already exists.
+func EnsureClusterOwnershipTag(ctx context.Context, s *Session, infraID string) (string, error) {
+	if infraID == "" {
+		return "", fmt.Errorf("infraID must not be empty")
+	}
+	log := klog.FromContext(ctx)
+	categoryName := ClusterOwnershipCategoryName(infraID)
+	log.V(1).Info("ensuring cluster ownership tag", "infraID", infraID, "category", categoryName)
+
+	catID, err := ensureTagCategory(ctx, s, categoryName, ClusterOwnershipDescription, "SINGLE",
+		clusterOwnershipAssociableTypes, requiredClusterOwnershipAssociableTypes)
+	if err != nil {
+		return "", fmt.Errorf("creating cluster ownership tag category: %w", err)
+	}
+
+	tagID, err := EnsureTag(ctx, s, catID, infraID, ClusterOwnershipDescription)
+	if err != nil {
+		return "", fmt.Errorf("creating cluster ownership tag: %w", err)
+	}
+
+	log.V(1).Info("ensured cluster ownership tag", "infraID", infraID, "tagID", tagID)
+	return tagID, nil
+}
+
+// AttachClusterOwnershipTag attaches the cluster ownership tag to the given
+// VM folder. Idempotent when the tag is already attached.
+func AttachClusterOwnershipTag(ctx context.Context, s *Session, tagID string, folder *object.Folder) error {
+	if folder == nil {
+		return fmt.Errorf("cannot attach cluster ownership tag: folder is nil")
+	}
+	log := klog.FromContext(ctx)
+	ref := folder.Reference()
+
+	attached, err := AttachTag(ctx, s, tagID, folder)
+	if err != nil {
+		return fmt.Errorf("attaching cluster ownership tag to folder %s: %w", ref, err)
+	}
+	if attached {
+		log.V(1).Info("ensured cluster ownership tag attached to folder", "tagID", tagID, "folder", ref)
+	} else {
+		log.V(1).Info("cluster ownership tag already attached to folder", "tagID", tagID, "folder", ref)
+	}
+	return nil
 }
 
 // EnsureTag returns the vSphere tag ID for the given name in the category,
