@@ -548,7 +548,6 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigrated(ctx co
 		}
 		template := existingMachineSets[0]
 		createdAny := false
-		ownershipTagByServer := make(map[string]string)
 		for i := range migration.Spec.FailureDomains {
 			fd := &migration.Spec.FailureDomains[i]
 			msName := workerMachineSetName(infraID, fd.Name)
@@ -563,23 +562,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigrated(ctx co
 					replicas = 1
 				}
 			}
-			ownershipTagID, ok := ownershipTagByServer[fd.Server]
-			if !ok {
-				username, password, err := getTargetCredentials(ctx, r.KubeClient, migration, fd.Server)
-				if err != nil {
-					return ctrl.Result{}, fmt.Errorf("getting credentials for %s: %w", fd.Server, err)
-				}
-				session, err := getVSphereSession(ctx, fd.Server, fd.Topology.Datacenter, username, password)
-				if err != nil {
-					return ctrl.Result{}, fmt.Errorf("connecting to %s/%s: %w", fd.Server, fd.Topology.Datacenter, err)
-				}
-				ownershipTagID, err = vsphere.EnsureClusterOwnershipTag(ctx, session, infraID)
-				if err != nil {
-					return ctrl.Result{}, fmt.Errorf("ensuring cluster ownership tag for %q on %s: %w", infraID, fd.Server, err)
-				}
-				ownershipTagByServer[fd.Server] = ownershipTagID
-			}
-			if _, err := machineMgr.CreateWorkerMachineSet(ctx, msName, replicas, fd, template, infraID, ownershipTagID); err != nil {
+			if _, err := machineMgr.CreateWorkerMachineSet(ctx, msName, replicas, fd, template, infraID); err != nil {
 				return ctrl.Result{}, fmt.Errorf("creating worker MachineSet %q: %w", msName, err)
 			}
 			createdAny = true

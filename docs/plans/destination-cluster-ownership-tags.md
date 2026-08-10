@@ -19,23 +19,23 @@ Source: `openshift/installer` `pkg/infrastructure/vsphere/clusterapi/tags.go` (`
 Installer attachments:
 
 - Tag attached to the VM folder when the installer creates it
-- Tag ID injected into machine provider `TagIDs` (and template VM)
+- Tag attached to template VMs during OVA import
 
-## Current Baseline
+## Machine API attachment (not this operator)
 
-- `ensureDestinationInitialized` creates the infraID VM folder and topology tags only
-- `updateMachineSetProviderSpec` never sets `TagIDs`
-- Machine API expects `tagIDs` as vSphere tag IDs (URN-notation), max 10
+`openshift/machine-api-operator` `pkg/controller/vsphere/reconciler.go` `reconcileTags` attaches the cluster ID tag to VMs using the machine label `machine.openshift.io/cluster-api-cluster` (the infraID) as the tag **name**. It expects the tag/category to already exist (created by installer or administrator). Optional extra tags come from `providerSpec.tagIDs`; the cluster ownership tag itself is **not** driven by `tagIDs`.
+
+Therefore this operator must create the category and tag on the destination, but must **not** set MachineSet `providerSpec.tagIDs` for ownership.
 
 ## Design Decisions
 
-1. Create ownership category/tag, attach to destination VM folder, and set MachineSet `tagIDs`
+1. Create ownership category/tag and attach to destination VM folder
 2. Match installer naming, description, and associable types exactly
-3. Scope MachineSet wiring to destination worker MachineSets created by this operator (not CPMS)
+3. Do not set ownership tag via MachineSet `tagIDs` — MAO `reconcileTags` handles VM attachment
 4. Reuse `EnsureTag` / `AttachTag`; add `EnsureClusterOwnershipTag` orchestrator
 5. Validate existing categories for `SINGLE` cardinality and required associable types (at least Folder + VirtualMachine)
 
-## Implementation Plan
+## Implementation
 
 ### 1. vSphere helpers (`internal/vsphere/tags.go`)
 
@@ -51,23 +51,18 @@ After folder create/verify per server/datacenter:
 2. Attach to infraID VM folder
 3. Dedup per vCenter within reconcile
 
-### 3. Worker MachineSets
+### 3. Docs
 
-Extend provider-spec update to append ownership tag ID to `TagIDs` (preserve existing, max 10). Caller ensures/looks up tag ID before create.
-
-### 4. Docs
-
-README subsection distinguishing topology vs ownership tags.
+README subsection distinguishing topology vs ownership tags, and clarifying MAO owns VM attachment.
 
 ## Out of Scope
 
-- Attaching ownership tag to already-running / live-migrated VMs
-- CPMS / control-plane providerSpec `tagIDs`
+- Setting `providerSpec.tagIDs` on MachineSets / CPMS
+- Attaching ownership tag to already-running / live-migrated VMs (MAO attaches on reconcile for machines it manages)
 - Deleting ownership tags
 - Changing topology tag behavior
 
 ## Test Plan
 
 - `go test ./internal/vsphere/ -run 'TestEnsureClusterOwnership|TestAttachCluster'`
-- `go test ./internal/openshift/` (TagIDs on provider spec)
-- Manual: `govc tags.attached.ls` on destination folder and new worker VMs
+- Manual: after DestinationInitialized, `govc tags.ls` shows `openshift-<infraID>` / `<infraID>`; folder has the tag attached; new machines get the tag via MAO

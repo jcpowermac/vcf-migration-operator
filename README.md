@@ -26,7 +26,7 @@ Separate from topology tags, the operator also mirrors the OpenShift installerâ€
 - Category `openshift-<infraID>` and tag `<infraID>` are created with description `Added by openshift-install do not remove` and `SINGLE` cardinality.
 - Associable types match the installer: `VirtualMachine`, `ResourcePool`, `Folder`, `Datastore`, and `StoragePod` (URN-prefixed).
 - The ownership tag is attached to the destination infraID VM folder during `DestinationInitialized`.
-- Destination worker MachineSets created by the operator include the ownership tag ID in `providerSpec.tagIDs` so new VMs are tagged.
+- The machine-api-operator vSphere reconciler (`reconcileTags`) attaches the cluster ID tag to VMs by name from the machine cluster-ID label; this operator does **not** set `providerSpec.tagIDs`.
 
 This is distinct from `openshift-region` / `openshift-zone`. Topology tags describe failure domains; ownership tags mark cluster-owned inventory.
 
