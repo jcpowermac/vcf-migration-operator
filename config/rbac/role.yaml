@@ -131,3 +131,10 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - operator.openshift.io
+  resources:
+  - clustercsidrivers
+  - storages
+  verbs:
+  - get
