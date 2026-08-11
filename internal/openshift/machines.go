@@ -98,10 +98,15 @@ func (m *MachineManager) GetMachineSet(ctx context.Context, name string) (*machi
 }
 
 // GetMachineSetsByVCenter returns all MachineSets whose provider spec references
-// the given vCenter server. If vcenterServer is empty, all MachineSets are returned.
+// the given vCenter server. An empty vcenterServer is rejected so callers cannot
+// accidentally match every MachineSet (for example before scaling source workers).
 func (m *MachineManager) GetMachineSetsByVCenter(ctx context.Context, vcenterServer string) ([]*machinev1beta1.MachineSet, error) {
 	log := klog.FromContext(ctx)
 	log.V(2).Info("listing machinesets", "vcenterServer", vcenterServer)
+
+	if vcenterServer == "" {
+		return nil, fmt.Errorf("vcenter server must not be empty")
+	}
 
 	msList, err := m.machineClient.MachineV1beta1().MachineSets(MachineAPINamespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -111,11 +116,6 @@ func (m *MachineManager) GetMachineSetsByVCenter(ctx context.Context, vcenterSer
 	var result []*machinev1beta1.MachineSet
 	for i := range msList.Items {
 		ms := &msList.Items[i]
-
-		if vcenterServer == "" {
-			result = append(result, ms)
-			continue
-		}
 
 		providerSpec, err := extractVSphereProviderSpec(ms)
 		if err != nil {

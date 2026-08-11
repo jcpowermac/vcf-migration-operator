@@ -258,6 +258,34 @@ func newTestMachineSet(name string, replicas int32) *machinev1beta1.MachineSet {
 	}
 }
 
+func TestGetMachineSetsByVCenter_emptyServerCausesNoMachineSetUpdates(t *testing.T) {
+	ctx := context.Background()
+	source := newTestMachineSetForVCenter("source-worker", "source.example.com", 3)
+	target := newTestMachineSetForVCenter("target-worker", "target.example.com", 3)
+	machineClient := fakemachineclient.NewClientset(source, target)
+	mgr := NewMachineManager(fakekube.NewClientset(), machineClient, nil)
+
+	_, err := mgr.GetMachineSetsByVCenter(ctx, "")
+	if err == nil {
+		t.Fatal("expected error for empty vcenter server")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("error %q should mention empty server", err)
+	}
+
+	// Simulate Step 6: only scale when listing succeeds. Empty server must not
+	// lead to any MachineSet updates.
+	for _, name := range []string{"source-worker", "target-worker"} {
+		got, getErr := machineClient.MachineV1beta1().MachineSets(MachineAPINamespace).Get(ctx, name, metav1.GetOptions{})
+		if getErr != nil {
+			t.Fatalf("getting machineset %q: %v", name, getErr)
+		}
+		if got.Spec.Replicas == nil || *got.Spec.Replicas != 3 {
+			t.Fatalf("machineset %q replicas = %v, want 3 (unchanged)", name, got.Spec.Replicas)
+		}
+	}
+}
+
 func TestDeleteMachineSet(t *testing.T) {
 	ctx := context.Background()
 
