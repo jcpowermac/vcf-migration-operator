@@ -2,6 +2,7 @@ package openshift
 
 import (
 	"context"
+	"sort"
 	"testing"
 
 	configv1 "github.com/openshift/api/config/v1"
@@ -243,12 +244,12 @@ func TestIsOperatorHealthyExported(t *testing.T) {
 
 func TestCheckAllOperatorsStable(t *testing.T) {
 	tests := []struct {
-		name                   string
-		operators              []*configv1.ClusterOperator
-		wantStable             bool
-		wantUnavailableCount   int
-		wantProgressingCount   int
-		wantDegradedCount      int
+		name                     string
+		operators                []*configv1.ClusterOperator
+		wantStable               bool
+		wantUnavailableOperators []string
+		wantProgressingOperators []string
+		wantDegradedOperators    []string
 	}{
 		{
 			name: "all stable",
@@ -256,20 +257,20 @@ func TestCheckAllOperatorsStable(t *testing.T) {
 				newTestClusterOperatorWithProgressing("etcd", true, false, false),
 				newTestClusterOperatorWithProgressing("kube-apiserver", true, false, false),
 			},
-			wantStable:           true,
-			wantUnavailableCount: 0,
-			wantProgressingCount: 0,
-			wantDegradedCount:    0,
+			wantStable:               true,
+			wantUnavailableOperators: nil,
+			wantProgressingOperators: nil,
+			wantDegradedOperators:    nil,
 		},
 		{
 			name: "progressing blocks stability",
 			operators: []*configv1.ClusterOperator{
 				newTestClusterOperatorWithProgressing("etcd", true, true, false),
 			},
-			wantStable:           false,
-			wantUnavailableCount: 0,
-			wantProgressingCount: 1,
-			wantDegradedCount:    0,
+			wantStable:               false,
+			wantUnavailableOperators: nil,
+			wantProgressingOperators: []string{"etcd"},
+			wantDegradedOperators:    nil,
 		},
 		{
 			name: "unavailable degraded and progressing are categorized",
@@ -278,10 +279,10 @@ func TestCheckAllOperatorsStable(t *testing.T) {
 				newTestClusterOperatorWithProgressing("kube-apiserver", true, true, false),
 				newTestClusterOperatorWithProgressing("ingress", true, false, true),
 			},
-			wantStable:           false,
-			wantUnavailableCount: 1,
-			wantProgressingCount: 1,
-			wantDegradedCount:    1,
+			wantStable:               false,
+			wantUnavailableOperators: []string{"etcd"},
+			wantProgressingOperators: []string{"kube-apiserver"},
+			wantDegradedOperators:    []string{"ingress"},
 		},
 		{
 			name: "missing progressing condition blocks stability",
@@ -296,20 +297,76 @@ func TestCheckAllOperatorsStable(t *testing.T) {
 					},
 				},
 			},
-			wantStable:           false,
-			wantUnavailableCount: 0,
-			wantProgressingCount: 1,
-			wantDegradedCount:    0,
+			wantStable:               false,
+			wantUnavailableOperators: nil,
+			wantProgressingOperators: []string{"etcd"},
+			wantDegradedOperators:    nil,
+		},
+		{
+			name: "missing available condition marks unavailable",
+			operators: []*configv1.ClusterOperator{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "etcd"},
+					Status: configv1.ClusterOperatorStatus{
+						Conditions: []configv1.ClusterOperatorStatusCondition{
+							{Type: configv1.OperatorProgressing, Status: configv1.ConditionFalse, Message: "test"},
+							{Type: configv1.OperatorDegraded, Status: configv1.ConditionFalse, Message: "test"},
+						},
+					},
+				},
+			},
+			wantStable:               false,
+			wantUnavailableOperators: []string{"etcd"},
+			wantProgressingOperators: nil,
+			wantDegradedOperators:    nil,
 		},
 		{
 			name: "unknown condition statuses block stability",
 			operators: []*configv1.ClusterOperator{
 				newTestClusterOperatorWithStatuses("etcd", configv1.ConditionTrue, configv1.ConditionUnknown, configv1.ConditionUnknown),
 			},
-			wantStable:           false,
-			wantUnavailableCount: 0,
-			wantProgressingCount: 1,
-			wantDegradedCount:    1,
+			wantStable:               false,
+			wantUnavailableOperators: nil,
+			wantProgressingOperators: []string{"etcd"},
+			wantDegradedOperators:    []string{"etcd"},
+		},
+		{
+			name: "unknown available status marks unavailable",
+			operators: []*configv1.ClusterOperator{
+				newTestClusterOperatorWithStatuses("etcd", configv1.ConditionUnknown, configv1.ConditionFalse, configv1.ConditionFalse),
+			},
+			wantStable:               false,
+			wantUnavailableOperators: []string{"etcd"},
+			wantProgressingOperators: nil,
+			wantDegradedOperators:    nil,
+		},
+		{
+			name: "missing degraded condition marks degraded",
+			operators: []*configv1.ClusterOperator{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "etcd"},
+					Status: configv1.ClusterOperatorStatus{
+						Conditions: []configv1.ClusterOperatorStatusCondition{
+							{Type: configv1.OperatorAvailable, Status: configv1.ConditionTrue, Message: "test"},
+							{Type: configv1.OperatorProgressing, Status: configv1.ConditionFalse, Message: "test"},
+						},
+					},
+				},
+			},
+			wantStable:               false,
+			wantUnavailableOperators: nil,
+			wantProgressingOperators: nil,
+			wantDegradedOperators:    []string{"etcd"},
+		},
+		{
+			name: "unknown degraded status marks degraded",
+			operators: []*configv1.ClusterOperator{
+				newTestClusterOperatorWithStatuses("etcd", configv1.ConditionTrue, configv1.ConditionFalse, configv1.ConditionUnknown),
+			},
+			wantStable:               false,
+			wantUnavailableOperators: nil,
+			wantProgressingOperators: nil,
+			wantDegradedOperators:    []string{"etcd"},
 		},
 	}
 
@@ -332,15 +389,34 @@ func TestCheckAllOperatorsStable(t *testing.T) {
 			if stable != tt.wantStable {
 				t.Fatalf("stable = %v, want %v", stable, tt.wantStable)
 			}
-			if len(summary.UnavailableOperators) != tt.wantUnavailableCount {
-				t.Fatalf("UnavailableOperators count = %d, want %d", len(summary.UnavailableOperators), tt.wantUnavailableCount)
+			if !equalStringSlices(summary.UnavailableOperators, tt.wantUnavailableOperators) {
+				t.Fatalf("UnavailableOperators = %v, want %v", summary.UnavailableOperators, tt.wantUnavailableOperators)
 			}
-			if len(summary.ProgressingOperators) != tt.wantProgressingCount {
-				t.Fatalf("ProgressingOperators count = %d, want %d", len(summary.ProgressingOperators), tt.wantProgressingCount)
+			if !equalStringSlices(summary.ProgressingOperators, tt.wantProgressingOperators) {
+				t.Fatalf("ProgressingOperators = %v, want %v", summary.ProgressingOperators, tt.wantProgressingOperators)
 			}
-			if len(summary.DegradedOperators) != tt.wantDegradedCount {
-				t.Fatalf("DegradedOperators count = %d, want %d", len(summary.DegradedOperators), tt.wantDegradedCount)
+			if !equalStringSlices(summary.DegradedOperators, tt.wantDegradedOperators) {
+				t.Fatalf("DegradedOperators = %v, want %v", summary.DegradedOperators, tt.wantDegradedOperators)
 			}
 		})
 	}
+}
+
+func equalStringSlices(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+
+	gotCopy := append([]string(nil), got...)
+	wantCopy := append([]string(nil), want...)
+	sort.Strings(gotCopy)
+	sort.Strings(wantCopy)
+
+	for i := range gotCopy {
+		if gotCopy[i] != wantCopy[i] {
+			return false
+		}
+	}
+
+	return true
 }
