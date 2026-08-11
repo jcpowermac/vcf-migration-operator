@@ -172,8 +172,14 @@ func (m *MachineManager) DeleteMachineSet(ctx context.Context, name string) erro
 // DeleteMachineSetsByVCenter deletes MachineSets whose providerSpec references the
 // given vCenter. MachineSets with nil or positive replicas are refused so scale-down
 // must complete first. Returns the names of MachineSets that were deleted.
+// An empty vcenterServer is rejected so GetMachineSetsByVCenter cannot match all
+// MachineSets and delete destination objects.
 func (m *MachineManager) DeleteMachineSetsByVCenter(ctx context.Context, vcenterServer string) ([]string, error) {
 	log := klog.FromContext(ctx)
+
+	if vcenterServer == "" {
+		return nil, fmt.Errorf("vcenter server must not be empty")
+	}
 
 	machineSets, err := m.GetMachineSetsByVCenter(ctx, vcenterServer)
 	if err != nil {
@@ -196,7 +202,7 @@ func (m *MachineManager) DeleteMachineSetsByVCenter(ctx context.Context, vcenter
 			return deleted, err
 		}
 		deleted = append(deleted, ms.Name)
-		log.V(1).Info("deleted source machineset", "name", ms.Name, "vcenterServer", vcenterServer)
+		log.V(1).Info("deleted source machineset", "name", ms.Name)
 	}
 	return deleted, nil
 }

@@ -51,23 +51,25 @@ func (m *MachineManager) DeleteMachineSetsByVCenter(ctx context.Context, vcenter
 
 After Step 7 (`allDeleted == true`), before setting `WorkloadMigrated=True`:
 
-1. Re-list source MachineSets via `GetMachineSetsByVCenter`
-2. For each remaining MS, call `DeleteMachineSet`
-3. If any were present, set progressing message `"Deleting source MachineSets"` and event `SourceWorkersDeleted`
-4. Requeue briefly (10s) if deletes were issued, then confirm list is empty on next pass (or confirm NotFound per name in the same reconcile — prefer same-reconcile delete + empty check)
-5. Only then set `ConditionWorkloadMigrated=True` with `"Workload migrated to target vCenter"`
+1. Call `DeleteMachineSetsByVCenter(sourceVC)` (refuses nil/`>0` replicas; NotFound is success)
+2. If any were deleted, emit event `SourceWorkersDeleted`
+3. Re-list source MachineSets via `GetMachineSetsByVCenter`
+4. While any remain, keep `WorkloadMigrated=False` with message `"Deleting source MachineSets"` and requeue after 10s
+5. Only when the list is empty, set `ConditionWorkloadMigrated=True` with `"Workload migrated to target vCenter"`
 
-Recommended same-reconcile flow (implemented):
+Implemented empty-list confirmation flow:
 
 ```text
 all machines/nodes gone
-→ DeleteMachineSetsByVCenter(sourceVC) (refuses replicas > 0; ignore NotFound)
+→ DeleteMachineSetsByVCenter(sourceVC)
 → if delete API failed → return error
 → event SourceWorkersDeleted when any deleted
+→ GetMachineSetsByVCenter(sourceVC)
+→ if any remain → WorkloadMigrated=False, requeue 10s
 → set WorkloadMigrated=True
 ```
 
-Safety: refuse to delete a MachineSet whose `spec.replicas` is nil or `> 0`.
+Safety: refuse to delete a MachineSet whose `spec.replicas` is nil or `> 0`. Empty `vcenterServer` is rejected so destination MachineSets cannot be matched.
 
 ### 3. Tests
 
@@ -76,7 +78,7 @@ Safety: refuse to delete a MachineSet whose `spec.replicas` is nil or `> 0`.
 
 ### 4. Docs / status messaging
 
-- Progress message may briefly show `"Deleting source MachineSets"` if we requeue; otherwise completion message stays unchanged
+- While source MachineSets remain after delete, condition message is `"Deleting source MachineSets"` with a 10s requeue
 - Event: `SourceWorkersDeleted` — `"Source worker MachineSets deleted"`
 
 ## Out of Scope

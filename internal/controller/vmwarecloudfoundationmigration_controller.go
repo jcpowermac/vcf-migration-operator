@@ -683,7 +683,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigratedRollout
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	// Step 8: Delete empty source MachineSets (idempotent).
+	// Step 8: Delete empty source MachineSets, then confirm none remain.
 	deleted, err := machineMgr.DeleteMachineSetsByVCenter(ctx, sourceVC.Server)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("deleting source MachineSets: %w", err)
@@ -691,6 +691,20 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigratedRollout
 	if len(deleted) > 0 {
 		log.V(1).Info("deleted source MachineSets", "names", deleted)
 		r.Recorder.Event(migration, "Normal", "SourceWorkersDeleted", "Source worker MachineSets deleted")
+	}
+
+	remaining, err := machineMgr.GetMachineSetsByVCenter(ctx, sourceVC.Server)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("listing source MachineSets after delete: %w", err)
+	}
+	if len(remaining) > 0 {
+		names := make([]string, 0, len(remaining))
+		for _, ms := range remaining {
+			names = append(names, ms.Name)
+		}
+		log.V(1).Info("source MachineSets still present after delete", "names", names)
+		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Deleting source MachineSets")
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
 	r.setCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Workload migrated to target vCenter")
