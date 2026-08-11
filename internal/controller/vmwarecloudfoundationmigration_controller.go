@@ -248,7 +248,8 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationInitialized(
 			return ctrl.Result{}, fmt.Errorf("connecting to %s/%s: %w", fd.Server, fd.Topology.Datacenter, err)
 		}
 
-		// Create VM folder per unique server/datacenter.
+		// Create VM folder per unique server/datacenter, then ensure the
+		// installer-style cluster ownership tag is attached to that folder.
 		if !folderCreated[key] {
 			r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
 				fmt.Sprintf("Creating VM folder %q on %s/%s", infraID, fd.Server, fd.Topology.Datacenter))
@@ -266,9 +267,21 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationInitialized(
 			}
 
 			// Verify folder is accessible.
-			if _, err := vsphere.GetVMFolder(ctx, session, infraID); err != nil {
+			folder, err = vsphere.GetVMFolder(ctx, session, infraID)
+			if err != nil {
 				return ctrl.Result{}, fmt.Errorf("verifying VM folder %q on %s/%s: %w", infraID, fd.Server, fd.Topology.Datacenter, err)
 			}
+
+			r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
+				fmt.Sprintf("Creating cluster ownership tag for %q on %s", infraID, fd.Server))
+			ownershipTagID, err := vsphere.EnsureClusterOwnershipTag(ctx, session, infraID)
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("ensuring cluster ownership tag for %q on %s: %w", infraID, fd.Server, err)
+			}
+			if err := vsphere.AttachClusterOwnershipTag(ctx, session, ownershipTagID, folder); err != nil {
+				return ctrl.Result{}, fmt.Errorf("attaching cluster ownership tag to folder %q on %s/%s: %w", infraID, fd.Server, fd.Topology.Datacenter, err)
+			}
+
 			folderCreated[key] = true
 		}
 
