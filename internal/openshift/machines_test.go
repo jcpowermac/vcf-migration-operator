@@ -2,15 +2,19 @@ package openshift
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	configv1 "github.com/openshift/api/config/v1"
 	machinev1 "github.com/openshift/api/machine/v1"
 	machinev1beta1 "github.com/openshift/api/machine/v1beta1"
 	fakemachineclient "github.com/openshift/client-go/machine/clientset/versioned/fake"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	fakekube "k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
 )
 
 // newTestCPMS creates a ControlPlaneMachineSet for testing with the given state
@@ -240,4 +244,200 @@ func TestIsCPMSGenerationObserved(t *testing.T) {
 			}
 		})
 	}
+}
+
+func newTestMachineSet(name string, replicas int32) *machinev1beta1.MachineSet {
+	return &machinev1beta1.MachineSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: MachineAPINamespace,
+		},
+		Spec: machinev1beta1.MachineSetSpec{
+			Replicas: &replicas,
+		},
+	}
+}
+
+func TestGetMachineSetsByVCenter_emptyServerCausesNoMachineSetUpdates(t *testing.T) {
+	ctx := context.Background()
+	source := newTestMachineSetForVCenter("source-worker", "source.example.com", 3)
+	target := newTestMachineSetForVCenter("target-worker", "target.example.com", 3)
+	machineClient := fakemachineclient.NewClientset(source, target)
+	mgr := NewMachineManager(fakekube.NewClientset(), machineClient, nil)
+
+	_, err := mgr.GetMachineSetsByVCenter(ctx, "")
+	if err == nil {
+		t.Fatal("expected error for empty vcenter server")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("error %q should mention empty server", err)
+	}
+
+	// Simulate Step 6: only scale when listing succeeds. Empty server must not
+	// lead to any MachineSet updates.
+	for _, name := range []string{"source-worker", "target-worker"} {
+		got, getErr := machineClient.MachineV1beta1().MachineSets(MachineAPINamespace).Get(ctx, name, metav1.GetOptions{})
+		if getErr != nil {
+			t.Fatalf("getting machineset %q: %v", name, getErr)
+		}
+		if got.Spec.Replicas == nil || *got.Spec.Replicas != 3 {
+			t.Fatalf("machineset %q replicas = %v, want 3 (unchanged)", name, got.Spec.Replicas)
+		}
+	}
+}
+
+func TestDeleteMachineSet(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("deletes existing machineset", func(t *testing.T) {
+		ms := newTestMachineSet("source-worker", 0)
+		machineClient := fakemachineclient.NewClientset(ms)
+		mgr := NewMachineManager(fakekube.NewClientset(), machineClient, nil)
+
+		if err := mgr.DeleteMachineSet(ctx, ms.Name); err != nil {
+			t.Fatalf("DeleteMachineSet: %v", err)
+		}
+
+		_, err := machineClient.MachineV1beta1().MachineSets(MachineAPINamespace).Get(ctx, ms.Name, metav1.GetOptions{})
+		if err == nil {
+			t.Fatal("expected machineset to be deleted")
+		}
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("expected NotFound after delete, got: %v", err)
+		}
+	})
+
+	t.Run("not found is success", func(t *testing.T) {
+		machineClient := fakemachineclient.NewClientset()
+		mgr := NewMachineManager(fakekube.NewClientset(), machineClient, nil)
+
+		if err := mgr.DeleteMachineSet(ctx, "missing-ms"); err != nil {
+			t.Fatalf("DeleteMachineSet: %v", err)
+		}
+	})
+
+	t.Run("propagates non-notfound errors", func(t *testing.T) {
+		machineClient := fakemachineclient.NewClientset()
+		machineClient.PrependReactor("delete", "machinesets", func(action clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, fmt.Errorf("apiserver unavailable")
+		})
+		mgr := NewMachineManager(fakekube.NewClientset(), machineClient, nil)
+
+		err := mgr.DeleteMachineSet(ctx, "source-worker")
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if !strings.Contains(err.Error(), "deleting machineset") {
+			t.Fatalf("error %q should wrap deleting machineset context", err)
+		}
+		if !strings.Contains(err.Error(), "apiserver unavailable") {
+			t.Fatalf("error %q should include underlying cause", err)
+		}
+	})
+}
+
+func newTestMachineSetForVCenter(name, vcenter string, replicas int32) *machinev1beta1.MachineSet {
+	ms := newTestMachineSet(name, replicas)
+	raw := []byte(fmt.Sprintf(
+		`{"kind":"VSphereMachineProviderSpec","apiVersion":"machine.openshift.io/v1beta1","workspace":{"server":%q}}`,
+		vcenter,
+	))
+	ms.Spec.Template.Spec.ProviderSpec.Value = &runtime.RawExtension{Raw: raw}
+	return ms
+}
+
+func TestDeleteMachineSetsByVCenter(t *testing.T) {
+	ctx := context.Background()
+	sourceVC := "source.example.com"
+	targetVC := "target.example.com"
+
+	t.Run("deletes zero-replica source machinesets only", func(t *testing.T) {
+		source := newTestMachineSetForVCenter("source-worker", sourceVC, 0)
+		target := newTestMachineSetForVCenter("target-worker", targetVC, 3)
+		machineClient := fakemachineclient.NewClientset(source, target)
+		mgr := NewMachineManager(fakekube.NewClientset(), machineClient, nil)
+
+		deleted, err := mgr.DeleteMachineSetsByVCenter(ctx, sourceVC)
+		if err != nil {
+			t.Fatalf("DeleteMachineSetsByVCenter: %v", err)
+		}
+		if len(deleted) != 1 || deleted[0] != "source-worker" {
+			t.Fatalf("deleted = %v, want [source-worker]", deleted)
+		}
+
+		if _, err := machineClient.MachineV1beta1().MachineSets(MachineAPINamespace).Get(ctx, "source-worker", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+			t.Fatalf("expected source machineset deleted, got: %v", err)
+		}
+		if _, err := machineClient.MachineV1beta1().MachineSets(MachineAPINamespace).Get(ctx, "target-worker", metav1.GetOptions{}); err != nil {
+			t.Fatalf("target machineset should remain: %v", err)
+		}
+	})
+
+	t.Run("refuses when replicas greater than zero", func(t *testing.T) {
+		source := newTestMachineSetForVCenter("source-worker", sourceVC, 2)
+		machineClient := fakemachineclient.NewClientset(source)
+		mgr := NewMachineManager(fakekube.NewClientset(), machineClient, nil)
+
+		_, err := mgr.DeleteMachineSetsByVCenter(ctx, sourceVC)
+		if err == nil {
+			t.Fatal("expected error when replicas > 0")
+		}
+		if !strings.Contains(err.Error(), "source-worker") {
+			t.Fatalf("error %q should name the machineset", err)
+		}
+
+		if _, err := machineClient.MachineV1beta1().MachineSets(MachineAPINamespace).Get(ctx, "source-worker", metav1.GetOptions{}); err != nil {
+			t.Fatalf("machineset should not be deleted on refusal: %v", err)
+		}
+	})
+
+	t.Run("refuses when replicas is nil", func(t *testing.T) {
+		source := newTestMachineSetForVCenter("source-worker", sourceVC, 0)
+		source.Spec.Replicas = nil
+		machineClient := fakemachineclient.NewClientset(source)
+		mgr := NewMachineManager(fakekube.NewClientset(), machineClient, nil)
+
+		_, err := mgr.DeleteMachineSetsByVCenter(ctx, sourceVC)
+		if err == nil {
+			t.Fatal("expected error when replicas is nil")
+		}
+		if !strings.Contains(err.Error(), "source-worker") {
+			t.Fatalf("error %q should name the machineset", err)
+		}
+
+		if _, err := machineClient.MachineV1beta1().MachineSets(MachineAPINamespace).Get(ctx, "source-worker", metav1.GetOptions{}); err != nil {
+			t.Fatalf("machineset should not be deleted on refusal: %v", err)
+		}
+	})
+
+	t.Run("rejects empty vcenter server without deleting", func(t *testing.T) {
+		source := newTestMachineSetForVCenter("source-worker", sourceVC, 0)
+		machineClient := fakemachineclient.NewClientset(source)
+		mgr := NewMachineManager(fakekube.NewClientset(), machineClient, nil)
+
+		_, err := mgr.DeleteMachineSetsByVCenter(ctx, "")
+		if err == nil {
+			t.Fatal("expected error for empty vcenter server")
+		}
+		if !strings.Contains(err.Error(), "empty") {
+			t.Fatalf("error %q should mention empty server", err)
+		}
+
+		if _, err := machineClient.MachineV1beta1().MachineSets(MachineAPINamespace).Get(ctx, "source-worker", metav1.GetOptions{}); err != nil {
+			t.Fatalf("machineset should not be deleted: %v", err)
+		}
+	})
+
+	t.Run("idempotent when none remain", func(t *testing.T) {
+		machineClient := fakemachineclient.NewClientset()
+		mgr := NewMachineManager(fakekube.NewClientset(), machineClient, nil)
+
+		deleted, err := mgr.DeleteMachineSetsByVCenter(ctx, sourceVC)
+		if err != nil {
+			t.Fatalf("DeleteMachineSetsByVCenter: %v", err)
+		}
+		if len(deleted) != 0 {
+			t.Fatalf("deleted = %v, want empty", deleted)
+		}
+	})
 }

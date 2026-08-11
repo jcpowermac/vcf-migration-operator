@@ -598,8 +598,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigrated(ctx co
 	return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 }
 
-// ensureWorkloadMigratedRolloutAndScaleDown runs Steps 5–7: wait for control plane
-// rollout, scale old MachineSets to 0, wait for old machines/nodes to be deleted.
+// ensureWorkloadMigratedRolloutAndScaleDown runs Steps 5–8: wait for control plane
+// rollout, scale old MachineSets to 0, wait for old machines/nodes to be deleted,
+// then delete the empty source MachineSets.
 // Progress is derived from cluster state so it is idempotent. Call when condition
 // message indicates we are past "CPMS updated" (e.g. "Control plane rollout" or
 // "Old workers" or we have observed generation and rollout complete).
@@ -681,6 +682,31 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigratedRollout
 		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Old workers scaled down, waiting for deletion")
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
+
+	// Step 8: Delete empty source MachineSets, then confirm none remain.
+	deleted, err := machineMgr.DeleteMachineSetsByVCenter(ctx, sourceVC.Server)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("deleting source MachineSets: %w", err)
+	}
+	if len(deleted) > 0 {
+		log.V(1).Info("deleted source MachineSets", "names", deleted)
+		r.Recorder.Event(migration, "Normal", "SourceWorkersDeleted", "Source worker MachineSets deleted")
+	}
+
+	remaining, err := machineMgr.GetMachineSetsByVCenter(ctx, sourceVC.Server)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("listing source MachineSets after delete: %w", err)
+	}
+	if len(remaining) > 0 {
+		names := make([]string, 0, len(remaining))
+		for _, ms := range remaining {
+			names = append(names, ms.Name)
+		}
+		log.V(1).Info("source MachineSets still present after delete", "names", names)
+		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Deleting source MachineSets")
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
 	r.setCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Workload migrated to target vCenter")
 	r.Recorder.Event(migration, "Normal", "WorkloadMigrated", "All workloads migrated to target vCenter")
 	return ctrl.Result{}, nil
