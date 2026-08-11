@@ -10,6 +10,7 @@ import (
 	machinev1beta1 "github.com/openshift/api/machine/v1beta1"
 	machineclient "github.com/openshift/client-go/machine/clientset/versioned"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic"
@@ -147,6 +148,57 @@ func (m *MachineManager) ScaleMachineSet(ctx context.Context, name string, repli
 
 	log.V(2).Info("scaled machineset", "name", name, "replicas", replicas)
 	return nil
+}
+
+// DeleteMachineSet deletes the named MachineSet from openshift-machine-api.
+// NotFound is treated as success (idempotent).
+func (m *MachineManager) DeleteMachineSet(ctx context.Context, name string) error {
+	log := klog.FromContext(ctx)
+	log.V(2).Info("deleting machineset", "name", name)
+
+	err := m.machineClient.MachineV1beta1().MachineSets(MachineAPINamespace).Delete(ctx, name, metav1.DeleteOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			log.V(2).Info("machineset already deleted", "name", name)
+			return nil
+		}
+		return fmt.Errorf("deleting machineset %q: %w", name, err)
+	}
+
+	log.V(2).Info("deleted machineset", "name", name)
+	return nil
+}
+
+// DeleteMachineSetsByVCenter deletes MachineSets whose providerSpec references the
+// given vCenter. MachineSets with nil or positive replicas are refused so scale-down
+// must complete first. Returns the names of MachineSets that were deleted.
+func (m *MachineManager) DeleteMachineSetsByVCenter(ctx context.Context, vcenterServer string) ([]string, error) {
+	log := klog.FromContext(ctx)
+
+	machineSets, err := m.GetMachineSetsByVCenter(ctx, vcenterServer)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, ms := range machineSets {
+		if ms.Spec.Replicas == nil || *ms.Spec.Replicas > 0 {
+			replicas := int32(-1)
+			if ms.Spec.Replicas != nil {
+				replicas = *ms.Spec.Replicas
+			}
+			return nil, fmt.Errorf("refusing to delete machineset %q with replicas %d", ms.Name, replicas)
+		}
+	}
+
+	deleted := make([]string, 0, len(machineSets))
+	for _, ms := range machineSets {
+		if err := m.DeleteMachineSet(ctx, ms.Name); err != nil {
+			return deleted, err
+		}
+		deleted = append(deleted, ms.Name)
+		log.V(1).Info("deleted source machineset", "name", ms.Name, "vcenterServer", vcenterServer)
+	}
+	return deleted, nil
 }
 
 // GetControlPlaneMachineSet retrieves the ControlPlaneMachineSet named "cluster"
