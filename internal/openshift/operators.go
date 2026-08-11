@@ -86,14 +86,18 @@ func (o *OperatorManager) CheckAllOperatorsStable(ctx context.Context) (stable b
 			continue
 		}
 
-		available, progressing, degraded := operatorConditionState(co)
-		if !available {
+		availableStatus, hasAvailable := getOperatorConditionStatus(co, configv1.OperatorAvailable)
+		if !hasAvailable || availableStatus != configv1.ConditionTrue {
 			summary.UnavailableOperators = append(summary.UnavailableOperators, co.Name)
 		}
-		if progressing {
+
+		progressingStatus, hasProgressing := getOperatorConditionStatus(co, configv1.OperatorProgressing)
+		if !hasProgressing || progressingStatus != configv1.ConditionFalse {
 			summary.ProgressingOperators = append(summary.ProgressingOperators, co.Name)
 		}
-		if degraded {
+
+		degradedStatus, hasDegraded := getOperatorConditionStatus(co, configv1.OperatorDegraded)
+		if !hasDegraded || degradedStatus != configv1.ConditionFalse {
 			summary.DegradedOperators = append(summary.DegradedOperators, co.Name)
 		}
 	}
@@ -170,4 +174,14 @@ func operatorConditionState(co *configv1.ClusterOperator) (available, progressin
 	}
 
 	return available, progressing, degraded
+}
+
+func getOperatorConditionStatus(co *configv1.ClusterOperator, conditionType configv1.ClusterStatusConditionType) (configv1.ConditionStatus, bool) {
+	for _, cond := range co.Status.Conditions {
+		if cond.Type == conditionType {
+			return cond.Status, true
+		}
+	}
+
+	return "", false
 }

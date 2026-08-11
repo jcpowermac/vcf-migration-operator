@@ -54,6 +54,19 @@ func newTestClusterOperatorWithProgressing(name string, available, progressing, 
 	}
 }
 
+func newTestClusterOperatorWithStatuses(name string, available, progressing, degraded configv1.ConditionStatus) *configv1.ClusterOperator {
+	return &configv1.ClusterOperator{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Status: configv1.ClusterOperatorStatus{
+			Conditions: []configv1.ClusterOperatorStatusCondition{
+				{Type: configv1.OperatorAvailable, Status: available, Message: "test"},
+				{Type: configv1.OperatorProgressing, Status: progressing, Message: "test"},
+				{Type: configv1.OperatorDegraded, Status: degraded, Message: "test"},
+			},
+		},
+	}
+}
+
 func TestIsOperatorHealthyHelper(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -267,6 +280,34 @@ func TestCheckAllOperatorsStable(t *testing.T) {
 			},
 			wantStable:           false,
 			wantUnavailableCount: 1,
+			wantProgressingCount: 1,
+			wantDegradedCount:    1,
+		},
+		{
+			name: "missing progressing condition blocks stability",
+			operators: []*configv1.ClusterOperator{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "etcd"},
+					Status: configv1.ClusterOperatorStatus{
+						Conditions: []configv1.ClusterOperatorStatusCondition{
+							{Type: configv1.OperatorAvailable, Status: configv1.ConditionTrue, Message: "test"},
+							{Type: configv1.OperatorDegraded, Status: configv1.ConditionFalse, Message: "test"},
+						},
+					},
+				},
+			},
+			wantStable:           false,
+			wantUnavailableCount: 0,
+			wantProgressingCount: 1,
+			wantDegradedCount:    0,
+		},
+		{
+			name: "unknown condition statuses block stability",
+			operators: []*configv1.ClusterOperator{
+				newTestClusterOperatorWithStatuses("etcd", configv1.ConditionTrue, configv1.ConditionUnknown, configv1.ConditionUnknown),
+			},
+			wantStable:           false,
+			wantUnavailableCount: 0,
 			wantProgressingCount: 1,
 			wantDegradedCount:    1,
 		},
