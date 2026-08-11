@@ -10,6 +10,10 @@ import (
 )
 
 func newTestClusterOperator(name string, available, degraded bool) *configv1.ClusterOperator {
+	return newTestClusterOperatorWithProgressing(name, available, false, degraded)
+}
+
+func newTestClusterOperatorWithProgressing(name string, available, progressing, degraded bool) *configv1.ClusterOperator {
 	conditions := []configv1.ClusterOperatorStatusCondition{}
 
 	availableStatus := configv1.ConditionFalse
@@ -29,6 +33,16 @@ func newTestClusterOperator(name string, available, degraded bool) *configv1.Clu
 	conditions = append(conditions, configv1.ClusterOperatorStatusCondition{
 		Type:    configv1.OperatorDegraded,
 		Status:  degradedStatus,
+		Message: "test",
+	})
+
+	progressingStatus := configv1.ConditionFalse
+	if progressing {
+		progressingStatus = configv1.ConditionTrue
+	}
+	conditions = append(conditions, configv1.ClusterOperatorStatusCondition{
+		Type:    configv1.OperatorProgressing,
+		Status:  progressingStatus,
 		Message: "test",
 	})
 
@@ -209,6 +223,82 @@ func TestIsOperatorHealthyExported(t *testing.T) {
 
 			if msg == "" {
 				t.Fatal("expected non-empty message")
+			}
+		})
+	}
+}
+
+func TestCheckAllOperatorsStable(t *testing.T) {
+	tests := []struct {
+		name                   string
+		operators              []*configv1.ClusterOperator
+		wantStable             bool
+		wantUnavailableCount   int
+		wantProgressingCount   int
+		wantDegradedCount      int
+	}{
+		{
+			name: "all stable",
+			operators: []*configv1.ClusterOperator{
+				newTestClusterOperatorWithProgressing("etcd", true, false, false),
+				newTestClusterOperatorWithProgressing("kube-apiserver", true, false, false),
+			},
+			wantStable:           true,
+			wantUnavailableCount: 0,
+			wantProgressingCount: 0,
+			wantDegradedCount:    0,
+		},
+		{
+			name: "progressing blocks stability",
+			operators: []*configv1.ClusterOperator{
+				newTestClusterOperatorWithProgressing("etcd", true, true, false),
+			},
+			wantStable:           false,
+			wantUnavailableCount: 0,
+			wantProgressingCount: 1,
+			wantDegradedCount:    0,
+		},
+		{
+			name: "unavailable degraded and progressing are categorized",
+			operators: []*configv1.ClusterOperator{
+				newTestClusterOperatorWithProgressing("etcd", false, false, false),
+				newTestClusterOperatorWithProgressing("kube-apiserver", true, true, false),
+				newTestClusterOperatorWithProgressing("ingress", true, false, true),
+			},
+			wantStable:           false,
+			wantUnavailableCount: 1,
+			wantProgressingCount: 1,
+			wantDegradedCount:    1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := configfake.NewClientset(tt.operators[0])
+			for _, op := range tt.operators[1:] {
+				_, err := client.ConfigV1().ClusterOperators().Create(context.Background(), op, metav1.CreateOptions{})
+				if err != nil {
+					t.Fatalf("failed to create test operator %s: %v", op.Name, err)
+				}
+			}
+
+			mgr := NewOperatorManager(client)
+			stable, summary, err := mgr.CheckAllOperatorsStable(context.Background())
+			if err != nil {
+				t.Fatalf("CheckAllOperatorsStable error = %v", err)
+			}
+
+			if stable != tt.wantStable {
+				t.Fatalf("stable = %v, want %v", stable, tt.wantStable)
+			}
+			if len(summary.UnavailableOperators) != tt.wantUnavailableCount {
+				t.Fatalf("UnavailableOperators count = %d, want %d", len(summary.UnavailableOperators), tt.wantUnavailableCount)
+			}
+			if len(summary.ProgressingOperators) != tt.wantProgressingCount {
+				t.Fatalf("ProgressingOperators count = %d, want %d", len(summary.ProgressingOperators), tt.wantProgressingCount)
+			}
+			if len(summary.DegradedOperators) != tt.wantDegradedCount {
+				t.Fatalf("DegradedOperators count = %d, want %d", len(summary.DegradedOperators), tt.wantDegradedCount)
 			}
 		})
 	}

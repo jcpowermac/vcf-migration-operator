@@ -804,15 +804,29 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureReady(ctx context.Conte
 
 	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Verifying final cluster state")
 
-	// Check all operators healthy.
+	// Check all operators stable.
 	opMgr := openshift.NewOperatorManager(r.ConfigClient)
-	healthy, unhealthy, err := opMgr.CheckAllOperatorsHealthy(ctx)
+	stable, summary, err := opMgr.CheckAllOperatorsStable(ctx)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("checking operator health: %w", err)
+		return ctrl.Result{}, fmt.Errorf("checking operator stability: %w", err)
 	}
-	if !healthy {
-		msg := fmt.Sprintf("Unhealthy operators: %s", strings.Join(unhealthy, ", "))
-		log.V(1).Info("operators not all healthy", "unhealthy", unhealthy)
+	if !stable {
+		blockers := make([]string, 0, 3)
+		if len(summary.UnavailableOperators) > 0 {
+			blockers = append(blockers, fmt.Sprintf("unavailable=%s", strings.Join(summary.UnavailableOperators, ", ")))
+		}
+		if len(summary.ProgressingOperators) > 0 {
+			blockers = append(blockers, fmt.Sprintf("progressing=%s", strings.Join(summary.ProgressingOperators, ", ")))
+		}
+		if len(summary.DegradedOperators) > 0 {
+			blockers = append(blockers, fmt.Sprintf("degraded=%s", strings.Join(summary.DegradedOperators, ", ")))
+		}
+		msg := fmt.Sprintf("Operators not stable: %s", strings.Join(blockers, "; "))
+		log.V(1).Info("operators not yet stable",
+			"unavailable", summary.UnavailableOperators,
+			"progressing", summary.ProgressingOperators,
+			"degraded", summary.DegradedOperators,
+		)
 		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, msg)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
