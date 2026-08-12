@@ -43,7 +43,7 @@ metadata:
         }
       ]
     capabilities: Basic Install
-    createdAt: "2026-07-28T14:17:12Z"
+    createdAt: "2026-08-12T12:41:49Z"
     features.operators.openshift.io/disconnected: "true"
     features.operators.openshift.io/fips-compliant: "false"
     features.operators.openshift.io/proxy-aware: "false"
@@ -204,6 +204,13 @@ spec:
           - get
           - patch
           - update
+        - apiGroups:
+          - operator.openshift.io
+          resources:
+          - clustercsidrivers
+          - storages
+          verbs:
+          - get
         - apiGroups:
           - authentication.k8s.io
           resources:

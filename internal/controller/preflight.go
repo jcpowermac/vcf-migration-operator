@@ -13,6 +13,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -30,6 +31,8 @@ var (
 	machineHealthCheckGVR = schema.GroupVersionResource{Group: "machine.openshift.io", Version: "v1beta1", Resource: "machinehealthchecks"}
 	clusterAutoscalerGVR  = schema.GroupVersionResource{Group: "autoscaling.openshift.io", Version: "v1", Resource: "clusterautoscalers"}
 	machineAutoscalerGVR  = schema.GroupVersionResource{Group: "autoscaling.openshift.io", Version: "v1beta1", Resource: "machineautoscalers"}
+	clusterCSIDriverGVR   = schema.GroupVersionResource{Group: "operator.openshift.io", Version: "v1", Resource: "clustercsidrivers"}
+	storageOperatorGVR    = schema.GroupVersionResource{Group: "operator.openshift.io", Version: "v1", Resource: "storages"}
 )
 
 // platformMachineHealthChecks lists MHCs that do not interfere with cross-vCenter migration.
@@ -105,6 +108,10 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 	if err := checkNoVSphereCSIPersistentVolumes(ctx, r.KubeClient); err != nil {
 		return "", err
 	}
+	storageWarning, err := checkVSphereStorageManagement(ctx, r.DynamicClient)
+	if err != nil {
+		return "", err
+	}
 	if err := checkInterferingRolloutResources(ctx, r.DynamicClient); err != nil {
 		return "", err
 	}
@@ -166,7 +173,11 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 		log.V(1).Info("target failure domain validated", "name", fd.Name, "server", fd.Server)
 	}
 
-	return "Preflight validation passed", nil
+	message := "Preflight validation passed"
+	if storageWarning != "" {
+		message = fmt.Sprintf("%s; warning: %s", message, storageWarning)
+	}
+	return message, nil
 }
 
 func validateFailureDomain(ctx context.Context, fd *configv1.VSpherePlatformFailureDomainSpec, creds credentials) error {
@@ -267,6 +278,47 @@ func checkNoVSphereCSIPersistentVolumes(ctx context.Context, kubeClient kubernet
 
 	sort.Strings(blocked)
 	return fmt.Errorf("vSphere CSI-backed persistent volumes are not supported for migration; remove PersistentVolumes using driver %q: %s", vsphereCSIDriverName, strings.Join(blocked, ", "))
+}
+
+func checkVSphereStorageManagement(ctx context.Context, dynamicClient dynamic.Interface) (string, error) {
+	log := klog.FromContext(ctx)
+
+	csiState, err := getManagementState(ctx, dynamicClient, clusterCSIDriverGVR, vsphereCSIDriverName)
+	if err != nil {
+		return "", fmt.Errorf("vSphere CSI driver is not supported for migration; unable to read ClusterCSIDriver/%s: %w", vsphereCSIDriverName, err)
+	}
+	log.V(1).Info("checked vSphere CSI driver management state", "clusterCSIDriver", vsphereCSIDriverName, "managementState", csiState)
+	if csiState != "Removed" {
+		return "", fmt.Errorf("vSphere CSI driver is not supported for migration; set ClusterCSIDriver/%s spec.managementState to Removed (current: %s)", vsphereCSIDriverName, csiState)
+	}
+
+	storageState, err := getManagementState(ctx, dynamicClient, storageOperatorGVR, "cluster")
+	if err != nil {
+		log.V(1).Info("unable to read Storage/cluster management state", "error", err)
+		return "unable to read Storage/cluster managementState; consider setting Unmanaged or Removed (only ClusterCSIDriver Removed is required)", nil
+	}
+	log.V(1).Info("checked Storage operator management state", "storage", "cluster", "managementState", storageState)
+	switch storageState {
+	case "Unmanaged", "Removed":
+		return "", nil
+	default:
+		return fmt.Sprintf("Storage/cluster managementState is %s; consider setting Unmanaged or Removed (only ClusterCSIDriver Removed is required)", storageState), nil
+	}
+}
+
+func getManagementState(ctx context.Context, dynamicClient dynamic.Interface, gvr schema.GroupVersionResource, name string) (string, error) {
+	obj, err := dynamicClient.Resource(gvr).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return "", err
+	}
+	state, found, err := unstructured.NestedString(obj.Object, "spec", "managementState")
+	if err != nil {
+		return "", fmt.Errorf("reading spec.managementState: %w", err)
+	}
+	if !found || state == "" {
+		return "", fmt.Errorf("spec.managementState not set")
+	}
+	return state, nil
 }
 
 func checkInterferingRolloutResources(ctx context.Context, dynamicClient dynamic.Interface) error {

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"net/url"
 	"reflect"
 	"strings"
@@ -103,6 +104,124 @@ func TestCheckNoVSphereCSIPersistentVolumes(t *testing.T) {
 				if strings.Contains(err.Error(), unwanted) {
 					t.Fatalf("checkNoVSphereCSIPersistentVolumes error %q unexpectedly contains %q", err.Error(), unwanted)
 				}
+			}
+		})
+	}
+}
+
+func TestCheckVSphereStorageManagement(t *testing.T) {
+	tests := []struct {
+		name           string
+		objects        []runtime.Object
+		getErrors      map[schema.GroupVersionResource]error
+		wantErr        bool
+		wantErrContain []string
+		wantWarning    string
+	}{
+		{
+			name: "passes when csi removed and storage removed",
+			objects: []runtime.Object{
+				newManagementStateResource("ClusterCSIDriver", vsphereCSIDriverName, "Removed"),
+				newManagementStateResource("Storage", "cluster", "Removed"),
+			},
+			wantErr:     false,
+			wantWarning: "",
+		},
+		{
+			name: "passes when csi removed and storage unmanaged",
+			objects: []runtime.Object{
+				newManagementStateResource("ClusterCSIDriver", vsphereCSIDriverName, "Removed"),
+				newManagementStateResource("Storage", "cluster", "Unmanaged"),
+			},
+			wantErr:     false,
+			wantWarning: "",
+		},
+		{
+			name: "warns when csi removed and storage managed",
+			objects: []runtime.Object{
+				newManagementStateResource("ClusterCSIDriver", vsphereCSIDriverName, "Removed"),
+				newManagementStateResource("Storage", "cluster", "Managed"),
+			},
+			wantErr:     false,
+			wantWarning: "Storage/cluster managementState is Managed",
+		},
+		{
+			name: "warns when csi removed and storage missing",
+			objects: []runtime.Object{
+				newManagementStateResource("ClusterCSIDriver", vsphereCSIDriverName, "Removed"),
+			},
+			wantErr:     false,
+			wantWarning: "Storage/cluster",
+		},
+		{
+			name: "fails when csi managed",
+			objects: []runtime.Object{
+				newManagementStateResource("ClusterCSIDriver", vsphereCSIDriverName, "Managed"),
+				newManagementStateResource("Storage", "cluster", "Removed"),
+			},
+			wantErr:        true,
+			wantErrContain: []string{"ClusterCSIDriver", vsphereCSIDriverName, "Removed", "Managed"},
+		},
+		{
+			name: "fails when csi unmanaged",
+			objects: []runtime.Object{
+				newManagementStateResource("ClusterCSIDriver", vsphereCSIDriverName, "Unmanaged"),
+				newManagementStateResource("Storage", "cluster", "Removed"),
+			},
+			wantErr:        true,
+			wantErrContain: []string{"ClusterCSIDriver", vsphereCSIDriverName, "Removed", "Unmanaged"},
+		},
+		{
+			name: "fails when csi missing",
+			objects: []runtime.Object{
+				newManagementStateResource("Storage", "cluster", "Removed"),
+			},
+			wantErr:        true,
+			wantErrContain: []string{"ClusterCSIDriver", vsphereCSIDriverName},
+		},
+		{
+			name: "fails when csi api unavailable",
+			getErrors: map[schema.GroupVersionResource]error{
+				clusterCSIDriverGVR: &apimeta.NoResourceMatchError{PartialResource: clusterCSIDriverGVR},
+			},
+			wantErr:        true,
+			wantErrContain: []string{"ClusterCSIDriver", vsphereCSIDriverName},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, preflightListKinds(), tt.objects...)
+			if len(tt.getErrors) > 0 {
+				client.PrependReactor("get", "*", func(action ktesting.Action) (bool, runtime.Object, error) {
+					if err, ok := tt.getErrors[action.GetResource()]; ok {
+						return true, nil, err
+					}
+					return false, nil, nil
+				})
+			}
+
+			warning, err := checkVSphereStorageManagement(context.Background(), client)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("checkVSphereStorageManagement error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err != nil {
+				for _, want := range tt.wantErrContain {
+					if !strings.Contains(err.Error(), want) {
+						t.Fatalf("checkVSphereStorageManagement error %q does not contain %q", err.Error(), want)
+					}
+				}
+				return
+			}
+			if tt.wantWarning == "" {
+				if warning != "" {
+					t.Fatalf("checkVSphereStorageManagement warning = %q, want empty", warning)
+				}
+				return
+			}
+			if !strings.Contains(warning, tt.wantWarning) {
+				t.Fatalf("checkVSphereStorageManagement warning = %q, want substring %q", warning, tt.wantWarning)
 			}
 		})
 	}
@@ -357,6 +476,7 @@ func TestRunPreflightChecks(t *testing.T) {
 		progressing               bool
 		pvs                       []runtime.Object
 		dynamicObjects            []runtime.Object
+		omitDefaultStorageOps     bool
 		extraConfigObjects        []runtime.Object
 		mutateMigration           func(*migrationv1alpha1.VmwareCloudFoundationMigration)
 		wantMessageContains       string
@@ -392,9 +512,24 @@ func TestRunPreflightChecks(t *testing.T) {
 				},
 			},
 			mutateMigration: func(migration *migrationv1alpha1.VmwareCloudFoundationMigration) {
-				migration.Spec.FailureDomains[0].Topology.Datastore = "/missing-datastore"
+				migration.Spec.FailureDomains[0].Topology.Datastore = missingDatastorePath
 			},
 			wantErrContains:           "vsphere-csi-pv",
+			wantTargetSecretReadCount: 1,
+		},
+		{
+			name:                  "csi managed blocker short circuits before target validation",
+			version:               "5.0.0",
+			gateEnabled:           true,
+			omitDefaultStorageOps: true,
+			dynamicObjects: []runtime.Object{
+				newManagementStateResource("ClusterCSIDriver", vsphereCSIDriverName, "Managed"),
+				newManagementStateResource("Storage", "cluster", "Removed"),
+			},
+			mutateMigration: func(migration *migrationv1alpha1.VmwareCloudFoundationMigration) {
+				migration.Spec.FailureDomains[0].Topology.Datastore = missingDatastorePath
+			},
+			wantErrContains:           "ClusterCSIDriver/" + vsphereCSIDriverName,
 			wantTargetSecretReadCount: 1,
 		},
 		{
@@ -405,7 +540,7 @@ func TestRunPreflightChecks(t *testing.T) {
 				newUnstructuredResource("machine.openshift.io/v1beta1", "MachineHealthCheck", "openshift-machine-api", "worker-mhc"),
 			},
 			mutateMigration: func(migration *migrationv1alpha1.VmwareCloudFoundationMigration) {
-				migration.Spec.FailureDomains[0].Topology.Datastore = "/missing-datastore"
+				migration.Spec.FailureDomains[0].Topology.Datastore = missingDatastorePath
 			},
 			wantErrContains:           "MachineHealthCheck resources: openshift-machine-api/worker-mhc",
 			wantTargetSecretReadCount: 1,
@@ -454,6 +589,18 @@ func TestRunPreflightChecks(t *testing.T) {
 			wantErrContains:           "checking cluster readiness",
 			wantTargetSecretReadCount: 1,
 		},
+		{
+			name:                  "storage managed warns but does not block",
+			version:               "5.0.0",
+			gateEnabled:           true,
+			omitDefaultStorageOps: true,
+			dynamicObjects: []runtime.Object{
+				newManagementStateResource("ClusterCSIDriver", vsphereCSIDriverName, "Removed"),
+				newManagementStateResource("Storage", "cluster", "Managed"),
+			},
+			wantMessageContains:       "Storage/cluster managementState is Managed",
+			wantTargetSecretReadCount: 2,
+		},
 	}
 
 	for _, tt := range tests {
@@ -493,7 +640,14 @@ func TestRunPreflightChecks(t *testing.T) {
 			configClient := configfake.NewClientset(configObjects...)
 
 			scheme := runtime.NewScheme()
-			dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, preflightListKinds(), tt.dynamicObjects...)
+			dynamicObjects := tt.dynamicObjects
+			if !tt.omitDefaultStorageOps {
+				dynamicObjects = append([]runtime.Object{
+					newManagementStateResource("ClusterCSIDriver", vsphereCSIDriverName, "Removed"),
+					newManagementStateResource("Storage", "cluster", "Removed"),
+				}, dynamicObjects...)
+			}
+			dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, preflightListKinds(), dynamicObjects...)
 
 			reconciler := &VmwareCloudFoundationMigrationReconciler{
 				KubeClient:    kubeClient,
@@ -539,11 +693,23 @@ func newUnstructuredResource(apiVersion, kind, namespace, name string) *unstruct
 	return obj
 }
 
+const missingDatastorePath = "/missing-datastore"
+
+func newManagementStateResource(kind, name, managementState string) *unstructured.Unstructured {
+	obj := newUnstructuredResource("operator.openshift.io/v1", kind, "", name)
+	if err := unstructured.SetNestedField(obj.Object, managementState, "spec", "managementState"); err != nil {
+		panic(fmt.Sprintf("newManagementStateResource(%s/%s): setting spec.managementState: %v", kind, name, err))
+	}
+	return obj
+}
+
 func preflightListKinds() map[schema.GroupVersionResource]string {
 	return map[schema.GroupVersionResource]string{
 		machineHealthCheckGVR: "MachineHealthCheckList",
 		clusterAutoscalerGVR:  "ClusterAutoscalerList",
 		machineAutoscalerGVR:  "MachineAutoscalerList",
+		clusterCSIDriverGVR:   "ClusterCSIDriverList",
+		storageOperatorGVR:    "StorageList",
 	}
 }
 
