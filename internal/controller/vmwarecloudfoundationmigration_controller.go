@@ -18,13 +18,12 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
-	configv1 "github.com/openshift/api/config/v1"
-	configclient "github.com/openshift/client-go/config/clientset/versioned"
-	machineclient "github.com/openshift/client-go/machine/clientset/versioned"
+	"github.com/vmware/govmomi/find"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -39,6 +38,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	configv1 "github.com/openshift/api/config/v1"
+	configclient "github.com/openshift/client-go/config/clientset/versioned"
+	machineclient "github.com/openshift/client-go/machine/clientset/versioned"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
 	"github.com/openshift/vcf-migration-operator/internal/metadata"
@@ -90,6 +93,18 @@ const reasonWaitingForVSpherePods = "WaitingForVSpherePods"
 // +kubebuilder:rbac:groups=operator.openshift.io,resources=clustercsidrivers;storages,verbs=get
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 
+// serverDC identifies a vCenter server and datacenter pair, the unit at which
+// VM folders are created on the target.
+type serverDC struct {
+	server, datacenter string
+}
+
+// tagTarget identifies a specific tag attachment (object plus tag value) so
+// per-reconcile deduplication can skip already-handled tags.
+type tagTarget struct {
+	server, datacenter, objectType, objectName, tagValue string
+}
+
 // Reconcile drives the migration workflow by checking conditions in order and
 // executing the work for the first incomplete condition. It is idempotent and
 // safe to restart at any point.
@@ -105,6 +120,10 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 		return ctrl.Result{}, fmt.Errorf("getting migration resource: %w", err)
 	}
 
+	// Snapshot the status this reconcile starts from; updateStatus only
+	// persists the fields changed relative to this snapshot.
+	baseStatus := *migration.Status.DeepCopy()
+
 	if migration.Name != migrationv1alpha1.SingletonName {
 		cond := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionAccepted)
 		alreadyRecorded := cond != nil &&
@@ -115,7 +134,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 			log.Info("ignoring VmwareCloudFoundationMigration with unsupported name; only a single resource is reconciled", "expectedName", migrationv1alpha1.SingletonName, "actualName", migration.Name)
 			r.Recorder.Eventf(migration, "Warning", migrationv1alpha1.ReasonUnsupportedName, "this operator only reconciles a VmwareCloudFoundationMigration named %q; this resource will be ignored", migrationv1alpha1.SingletonName)
 			r.setCondition(migration, migrationv1alpha1.ConditionAccepted, metav1.ConditionFalse, migrationv1alpha1.ReasonUnsupportedName, fmt.Sprintf("only a VmwareCloudFoundationMigration named %q is reconciled by this operator", migrationv1alpha1.SingletonName))
-			if err := r.updateStatus(ctx, migration); err != nil {
+			if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
 				return ctrl.Result{}, err
 			}
 		}
@@ -132,7 +151,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 		now := metav1.Now()
 		migration.Status.StartTime = &now
 		r.Recorder.Event(migration, "Normal", "MigrationStarted", "Migration workflow started")
-		if err := r.updateStatus(ctx, migration); err != nil {
+		if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -166,7 +185,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 		}
 
 		// Always persist status after processing a condition.
-		if statusErr := r.updateStatus(ctx, migration); statusErr != nil {
+		if statusErr := r.updateStatus(ctx, migration, baseStatus); statusErr != nil {
 			log.Error(statusErr, "failed to update status")
 			return ctrl.Result{}, statusErr
 		}
@@ -212,13 +231,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationInitialized(
 	}
 
 	// Track which server/datacenter pairs have had folders created to avoid duplicates.
-	type serverDC struct {
-		server, datacenter string
-	}
 	folderCreated := make(map[serverDC]bool)
-	type tagTarget struct {
-		server, datacenter, objectType, objectName, tagValue string
-	}
 	tagAttached := make(map[tagTarget]bool)
 
 	for i := range migration.Spec.FailureDomains {
@@ -251,39 +264,14 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationInitialized(
 
 		// Create VM folder per unique server/datacenter, then ensure the
 		// installer-style cluster ownership tag is attached to that folder.
+		// Skip re-creating and re-validating both when a prior reconcile already
+		// attached the tag: EnsureClusterOwnershipTag re-validates the category's
+		// associable types on every call, and a second, unnecessary call can fail
+		// even though the folder is already fully configured.
 		if !folderCreated[key] {
-			r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
-				fmt.Sprintf("Creating VM folder %q on %s/%s", infraID, fd.Server, fd.Topology.Datacenter))
-
-			folder, err := vsphere.CreateVMFolder(ctx, session, infraID)
-			if err != nil {
-				// Folder may already exist; try to get it.
-				folder, getErr := vsphere.GetVMFolder(ctx, session, infraID)
-				if getErr != nil {
-					return ctrl.Result{}, fmt.Errorf("creating VM folder %q on %s/%s: %w", infraID, fd.Server, fd.Topology.Datacenter, err)
-				}
-				log.V(1).Info("VM folder already exists", "path", folder.InventoryPath)
-			} else {
-				log.V(1).Info("created VM folder", "path", folder.InventoryPath)
+			if err := r.ensureFolderAndOwnership(ctx, migration, session, fd, infraID, key, folderCreated); err != nil {
+				return ctrl.Result{}, err
 			}
-
-			// Verify folder is accessible.
-			folder, err = vsphere.GetVMFolder(ctx, session, infraID)
-			if err != nil {
-				return ctrl.Result{}, fmt.Errorf("verifying VM folder %q on %s/%s: %w", infraID, fd.Server, fd.Topology.Datacenter, err)
-			}
-
-			r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
-				fmt.Sprintf("Creating cluster ownership tag for %q on %s", infraID, fd.Server))
-			ownershipTagID, err := vsphere.EnsureClusterOwnershipTag(ctx, session, infraID)
-			if err != nil {
-				return ctrl.Result{}, fmt.Errorf("ensuring cluster ownership tag for %q on %s: %w", infraID, fd.Server, err)
-			}
-			if err := vsphere.AttachClusterOwnershipTag(ctx, session, ownershipTagID, folder); err != nil {
-				return ctrl.Result{}, fmt.Errorf("attaching cluster ownership tag to folder %q on %s/%s: %w", infraID, fd.Server, fd.Topology.Datacenter, err)
-			}
-
-			folderCreated[key] = true
 		}
 
 		// Find datacenter and cluster objects for tag checks and attachment.
@@ -373,6 +361,78 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationInitialized(
 	r.setCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Destination vCenter initialized with folders and tags")
 	r.Recorder.Event(migration, "Normal", "DestinationInitialized", "VM folders and tags created on target vCenter")
 	return ctrl.Result{}, nil
+}
+
+// ensureFolderAndOwnership creates the per-target VM folder and ensures the
+// installer-style cluster ownership tag is attached to it. When the folder
+// already carries the ownership tag, the target is marked done and the method
+// returns without re-validating the category.
+//
+// Correctness under concurrent reconciles (e.g. the brief window during a
+// rollout where an outgoing leader finishes an in-flight reconcile while the
+// incoming leader starts one) rests entirely on idempotency against vCenter
+// state, not on in-process locking: those reconciles run in different
+// processes, so a mutex could not serialize them. Every vSphere operation
+// below tolerates concurrent/repeat execution — GetVMFolder/CreateVMFolder
+// fall back to lookup, and EnsureClusterOwnershipTag/AttachClusterOwnershipTag
+// treat already-exists and already-attached as success.
+func (r *VmwareCloudFoundationMigrationReconciler) ensureFolderAndOwnership(
+	ctx context.Context,
+	migration *migrationv1alpha1.VmwareCloudFoundationMigration,
+	session *vsphere.Session,
+	fd *configv1.VSpherePlatformFailureDomainSpec,
+	infraID string,
+	key serverDC,
+	folderCreated map[serverDC]bool,
+) error {
+	log := klog.FromContext(ctx)
+	condType := migrationv1alpha1.ConditionDestinationInitialized
+
+	existing, getErr := vsphere.GetVMFolder(ctx, session, infraID)
+	if getErr != nil {
+		var notFound *find.NotFoundError
+		if !errors.As(getErr, &notFound) {
+			return fmt.Errorf("checking for existing VM folder %q on %s/%s: %w", infraID, fd.Server, fd.Topology.Datacenter, getErr)
+		}
+	} else {
+		hasOwnership, err := vsphere.ObjectHasTagInCategory(ctx, session, vsphere.ClusterOwnershipCategoryName(infraID), existing)
+		if err != nil {
+			return fmt.Errorf("checking ownership tag on folder %q on %s/%s: %w", infraID, fd.Server, fd.Topology.Datacenter, err)
+		}
+		if hasOwnership {
+			log.V(1).Info("VM folder and ownership tag already configured", "failureDomain", fd.Name)
+			folderCreated[key] = true
+			return nil
+		}
+	}
+
+	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
+		fmt.Sprintf("Creating VM folder %q on %s/%s", infraID, fd.Server, fd.Topology.Datacenter))
+
+	folder, err := vsphere.CreateVMFolder(ctx, session, infraID)
+	if err != nil {
+		// Folder may already exist; try to get it.
+		folder, getErr = vsphere.GetVMFolder(ctx, session, infraID)
+		if getErr != nil {
+			return fmt.Errorf("creating VM folder %q on %s/%s: %w", infraID, fd.Server, fd.Topology.Datacenter, err)
+		}
+		log.V(1).Info("VM folder already exists", "path", folder.InventoryPath)
+	} else {
+		log.V(1).Info("created VM folder", "path", folder.InventoryPath)
+	}
+
+	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
+		fmt.Sprintf("Creating cluster ownership tag for %q on %s", infraID, fd.Server))
+	ownershipTagID, err := vsphere.EnsureClusterOwnershipTag(ctx, session, infraID)
+	if err != nil {
+		return fmt.Errorf("ensuring cluster ownership tag for %q on %s: %w", infraID, fd.Server, err)
+	}
+	if err := vsphere.AttachClusterOwnershipTag(ctx, session, ownershipTagID, folder); err != nil {
+		return fmt.Errorf("attaching cluster ownership tag to folder %q on %s/%s: %w", infraID, fd.Server, fd.Topology.Datacenter, err)
+	}
+
+	folderCreated[key] = true
+	return nil
 }
 
 // ensureMultiSiteConfigured adds target vCenter to cluster configuration
@@ -907,16 +967,66 @@ func (r *VmwareCloudFoundationMigrationReconciler) isConditionTrue(migration *mi
 	return cond != nil && cond.Status == metav1.ConditionTrue
 }
 
-// updateStatus persists the migration status subresource. It retries on conflict by
-// re-fetching the latest resource and re-applying the desired status.
-func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) error {
-	desiredStatus := migration.Status.DeepCopy()
+// statusConditionChanged reports whether two conditions of the same type
+// differ in any field this operator writes. It identifies which conditions a
+// reconcile actually changed relative to the status it started from.
+func statusConditionChanged(prev, next metav1.Condition) bool {
+	return prev.Status != next.Status ||
+		prev.Reason != next.Reason ||
+		prev.Message != next.Message ||
+		prev.ObservedGeneration != next.ObservedGeneration ||
+		!prev.LastTransitionTime.Equal(&next.LastTransitionTime)
+}
+
+// updateStatus persists this reconcile's status changes using optimistic
+// concurrency. It re-fetches the latest resource and applies only the
+// conditions and timestamps this reconcile changed relative to baseStatus (the
+// snapshot taken when the reconcile started), retrying on conflict.
+//
+// Applying only changed conditions onto the freshly fetched copy merges
+// cleanly with a concurrent reconcile — inevitable during a leader handoff,
+// where the two reconciles run in separate processes — that committed a
+// different condition in the meantime: conditions this reconcile did not touch
+// are left as the other writer set them. As a final guard, a committed True is
+// never downgraded by a stale False or Unknown from a reconcile that started
+// before the success was recorded (it self-heals on the next reconcile anyway,
+// but this avoids a visible flap).
+func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus) error {
+	log := klog.FromContext(ctx)
+
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &migrationv1alpha1.VmwareCloudFoundationMigration{}
 		if err := r.Get(ctx, client.ObjectKeyFromObject(migration), latest); err != nil {
 			return err
 		}
-		latest.Status = *desiredStatus
+		for i := range migration.Status.Conditions {
+			cond := migration.Status.Conditions[i]
+			// Skip conditions this reconcile did not change, so a concurrent
+			// writer's conditions survive.
+			if prev := apimeta.FindStatusCondition(baseStatus.Conditions, cond.Type); prev != nil && !statusConditionChanged(*prev, cond) {
+				continue
+			}
+			// Skip deltas from a reconcile that started before the current
+			// resource generation; a newer writer may have already committed
+			// up-to-date conditions for this type.
+			if cond.ObservedGeneration < latest.Generation {
+				log.V(1).Info("skipping stale generation condition update", "condition", cond.Type, "observedGeneration", cond.ObservedGeneration, "latestGeneration", latest.Generation)
+				continue
+			}
+			// Never downgrade a success another reconcile already committed.
+			if existing := apimeta.FindStatusCondition(latest.Status.Conditions, cond.Type); existing != nil &&
+				existing.Status == metav1.ConditionTrue && cond.Status != metav1.ConditionTrue {
+				log.V(1).Info("keeping committed condition success over stale update", "condition", cond.Type)
+				continue
+			}
+			apimeta.SetStatusCondition(&latest.Status.Conditions, cond)
+		}
+		if migration.Status.StartTime != nil && latest.Status.StartTime == nil {
+			latest.Status.StartTime = migration.Status.StartTime
+		}
+		if migration.Status.CompletionTime != nil && latest.Status.CompletionTime == nil {
+			latest.Status.CompletionTime = migration.Status.CompletionTime
+		}
 		return r.Status().Update(ctx, latest)
 	})
 	if err != nil {

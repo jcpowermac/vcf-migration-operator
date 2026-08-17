@@ -104,17 +104,25 @@ func validateExistingCategory(category *tags.Category, name, cardinality string,
 func missingAssociableTypes(existingTypes, requiredTypes []string) []string {
 	existing := make(map[string]struct{}, len(existingTypes))
 	for _, associableType := range existingTypes {
-		existing[associableType] = struct{}{}
+		existing[normalizeAssociableType(associableType)] = struct{}{}
 	}
 
 	missing := make([]string, 0, len(requiredTypes))
 	for _, requiredType := range requiredTypes {
-		if _, ok := existing[requiredType]; !ok {
+		if _, ok := existing[normalizeAssociableType(requiredType)]; !ok {
 			missing = append(missing, requiredType)
 		}
 	}
 
 	return missing
+}
+
+// normalizeAssociableType strips the "urn:vim25:" prefix used by the
+// installer's inventory-service-style associable types, so that comparisons
+// tolerate vCenter tagging APIs that return bare type names (e.g.
+// "VirtualMachine" instead of "urn:vim25:VirtualMachine") on read-back.
+func normalizeAssociableType(associableType string) string {
+	return strings.TrimPrefix(associableType, "urn:vim25:")
 }
 
 // ObjectHasTagInCategory reports whether the given vSphere managed object

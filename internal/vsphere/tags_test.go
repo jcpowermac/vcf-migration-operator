@@ -557,6 +557,28 @@ func TestEnsureClusterOwnershipTag(t *testing.T) {
 			}
 		})
 	})
+
+	t.Run("accepts existing category whose associable types lack the urn:vim25 prefix", func(t *testing.T) {
+		// Real vCenter's tagging service is suspected to return associable types
+		// without the "urn:vim25:" prefix that the installer uses on create, even
+		// though the govmomi simulator round-trips them verbatim. Validation must
+		// tolerate this so a second reconcile doesn't treat the installer-style
+		// category it just created as incompatible.
+		simulator.Test(func(ctx context.Context, c *vim25.Client) {
+			s := newTestSession(ctx, t, c)
+			infraID := "cluster-unprefixed"
+			createTestCategory(ctx, t, s, tags.Category{
+				Name:            ClusterOwnershipCategoryName(infraID),
+				Description:     ClusterOwnershipDescription,
+				Cardinality:     "SINGLE",
+				AssociableTypes: []string{"VirtualMachine", "ResourcePool", "Folder", "Datastore", "StoragePod"},
+			})
+
+			if _, err := EnsureClusterOwnershipTag(ctx, s, infraID); err != nil {
+				t.Fatalf("EnsureClusterOwnershipTag: %v", err)
+			}
+		})
+	})
 }
 
 func TestAttachClusterOwnershipTag(t *testing.T) {
