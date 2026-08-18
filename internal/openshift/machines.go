@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"sort"
 
 	configv1 "github.com/openshift/api/config/v1"
 	machinev1 "github.com/openshift/api/machine/v1"
@@ -280,16 +282,64 @@ func (m *MachineManager) CheckControlPlaneRolloutStatus(ctx context.Context) (co
 	return complete, replicas, updatedReplicas, readyReplicas, nil
 }
 
-// IsCPMSGenerationObserved checks whether the ControlPlaneMachineSet's observed
-// generation matches its metadata generation, indicating the controller has processed
-// the latest spec change.
-func (m *MachineManager) IsCPMSGenerationObserved(ctx context.Context) (bool, error) {
+// IsCPMSUpdatedForFailureDomains reports whether the ControlPlaneMachineSet's spec
+// already targets the given failure domain names with state Active. It detects that
+// the CPMS update step of workload migration has completed.
+func (m *MachineManager) IsCPMSUpdatedForFailureDomains(ctx context.Context, failureDomainNames []string) (bool, error) {
 	cpms, err := m.GetControlPlaneMachineSet(ctx)
 	if err != nil {
 		return false, err
 	}
 
-	return cpms.Generation == cpms.Status.ObservedGeneration, nil
+	if cpms.Spec.State != machinev1.ControlPlaneMachineSetStateActive {
+		return false, nil
+	}
+
+	tmpl := cpms.Spec.Template.OpenShiftMachineV1Beta1Machine
+	if tmpl == nil || tmpl.FailureDomains == nil {
+		return false, nil
+	}
+
+	current := make([]string, 0, len(tmpl.FailureDomains.VSphere))
+	for i := range tmpl.FailureDomains.VSphere {
+		current = append(current, tmpl.FailureDomains.VSphere[i].Name)
+	}
+
+	target := slices.Clone(failureDomainNames)
+	sort.Strings(current)
+	sort.Strings(target)
+	return slices.Equal(current, target), nil
+}
+
+// ListControlPlaneMachines lists Machines in openshift-machine-api carrying a
+// control-plane role label (master or control-plane).
+func (m *MachineManager) ListControlPlaneMachines(ctx context.Context) ([]*machinev1beta1.Machine, error) {
+	machines, err := m.machineClient.MachineV1beta1().Machines(MachineAPINamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "machine.openshift.io/cluster-api-machine-role in (master,control-plane)",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing control plane machines: %w", err)
+	}
+
+	result := make([]*machinev1beta1.Machine, len(machines.Items))
+	for i := range machines.Items {
+		result[i] = &machines.Items[i]
+	}
+	return result, nil
+}
+
+// IsCPMSGenerationObserved checks whether the ControlPlaneMachineSet's observed
+// generation matches its metadata generation, indicating the controller has processed
+// the latest spec change. It also returns both generation values for reporting.
+func (m *MachineManager) IsCPMSGenerationObserved(ctx context.Context) (observed bool, generation, observedGeneration int64, err error) {
+	cpms, err := m.GetControlPlaneMachineSet(ctx)
+	if err != nil {
+		return false, 0, 0, err
+	}
+
+	generation = cpms.Generation
+	observedGeneration = cpms.Status.ObservedGeneration
+	return generation == observedGeneration, generation, observedGeneration, nil
 }
 
 // machinesetSelectorLabel returns the label value used to select machines for the

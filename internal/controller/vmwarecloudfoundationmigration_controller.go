@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	machinev1beta1 "github.com/openshift/api/machine/v1beta1"
 	"github.com/vmware/govmomi/find"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -558,14 +559,6 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigrated(ctx co
 		}
 	}
 
-	// If we are past Step 3 (CPMS updated), run Steps 4–6 (rollout and scale-down) from cluster state.
-	if c := apimeta.FindStatusCondition(migration.Status.Conditions, condType); c != nil {
-		pastCPMSUpdate := strings.HasPrefix(c.Message, "CPMS updated") || strings.Contains(c.Message, "Control plane rollout") || strings.Contains(c.Message, "Old workers")
-		if pastCPMSUpdate {
-			return r.ensureWorkloadMigratedRolloutAndScaleDown(ctx, migration)
-		}
-	}
-
 	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient)
 	infraID, err := infraMgr.GetInfrastructureID(ctx)
 	if err != nil {
@@ -578,6 +571,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigrated(ctx co
 	}
 
 	machineMgr := openshift.NewMachineManager(r.KubeClient, r.MachineClient, r.DynamicClient)
+	targetFDNames := failureDomainNames(migration.Spec.FailureDomains)
 
 	// Step 1: Ensure target worker MachineSets exist (idempotent: create only missing ones).
 	allTargetMSExist := true
@@ -646,15 +640,30 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigrated(ctx co
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
+	// Once target workers are ready and the CPMS already targets the target failure
+	// domains, the CPMS update step is done: continue from the rollout and scale-down
+	// path, derived entirely from cluster state.
+	cpmsUpdated, err := machineMgr.IsCPMSUpdatedForFailureDomains(ctx, targetFDNames)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("checking CPMS update state: %w", err)
+	}
+	if cpmsUpdated {
+		return r.ensureWorkloadMigratedRolloutAndScaleDown(ctx, migration)
+	}
+
 	// Step 3: Update CPMS with target failure domains and set state to Active.
 	// The CPMS is updated in place — no delete/recreate needed. The CPMS operator
 	// resolves failure domain topology from the Infrastructure resource and triggers
 	// a rolling replacement of control plane machines.
-	targetFDNames := failureDomainNames(migration.Spec.FailureDomains)
 	if err := machineMgr.UpdateCPMSFailureDomain(ctx, targetFDNames); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating CPMS failure domains: %w", err)
 	}
-	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "CPMS updated, waiting for generation observed")
+	_, generation, observedGeneration, err := machineMgr.IsCPMSGenerationObserved(ctx)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("checking CPMS generation: %w", err)
+	}
+	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
+		fmt.Sprintf("Waiting for control plane rollout to start (CPMS generation %d/%d observed)", generation, observedGeneration))
 	r.Recorder.Event(migration, "Normal", "CPMSUpdated", fmt.Sprintf("CPMS updated with failure domains %v", targetFDNames))
 	return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 }
@@ -662,9 +671,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigrated(ctx co
 // ensureWorkloadMigratedRolloutAndScaleDown runs Steps 5–8: wait for control plane
 // rollout, scale old MachineSets to 0, wait for old machines/nodes to be deleted,
 // then delete the empty source MachineSets.
-// Progress is derived from cluster state so it is idempotent. Call when condition
-// message indicates we are past "CPMS updated" (e.g. "Control plane rollout" or
-// "Old workers" or we have observed generation and rollout complete).
+// Progress is derived from cluster state so it is idempotent. Called from
+// ensureWorkloadMigrated when target workers are ready and the CPMS already targets
+// the target failure domains.
 func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigratedRolloutAndScaleDown(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) (ctrl.Result, error) {
 	log := klog.FromContext(ctx)
 	condType := migrationv1alpha1.ConditionWorkloadMigrated
@@ -676,13 +685,15 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigratedRollout
 	machineMgr := openshift.NewMachineManager(r.KubeClient, r.MachineClient, r.DynamicClient)
 
 	// Step 5: Wait for CPMS generation observed and rollout complete.
-	observed, err := machineMgr.IsCPMSGenerationObserved(ctx)
+	observed, generation, observedGeneration, err := machineMgr.IsCPMSGenerationObserved(ctx)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("checking CPMS generation: %w", err)
 	}
 	if !observed {
-		log.V(1).Info("CPMS generation not yet observed")
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "CPMS updated, waiting for generation observed")
+		log.V(1).Info("CPMS generation not yet observed", "generation", generation, "observedGeneration", observedGeneration)
+		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
+			fmt.Sprintf("Waiting for control plane rollout to start (CPMS generation %d/%d observed)", generation, observedGeneration))
+		r.Recorder.Eventf(migration, "Normal", "ControlPlaneRollout", "waiting for rollout to start (CPMS generation %d/%d observed)", generation, observedGeneration)
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 	complete, replicas, updated, ready, err := machineMgr.CheckControlPlaneRolloutStatus(ctx)
@@ -692,7 +703,15 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigratedRollout
 	if !complete {
 		log.V(1).Info("control plane rollout in progress", "replicas", replicas, "updated", updated, "ready", ready)
 		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
-			fmt.Sprintf("CPMS updated, control plane rolling out (%d/%d ready)", ready, replicas))
+			fmt.Sprintf("Control plane rolling out (%d/%d updated, %d/%d ready)", updated, replicas, ready, replicas))
+		r.Recorder.Eventf(migration, "Normal", "ControlPlaneRollout", "control plane rolling out (%d/%d updated, %d/%d ready)", updated, replicas, ready, replicas)
+		if machines, merr := machineMgr.ListControlPlaneMachines(ctx); merr != nil {
+			log.V(2).Info("listing control plane machines failed", "err", merr)
+		} else {
+			for _, machine := range machines {
+				logControlPlaneMachine(log, machine)
+			}
+		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
@@ -1105,4 +1124,31 @@ func checkWorkerReadiness(ctx context.Context, machineMgr *openshift.MachineMana
 		}
 	}
 	return true, nil
+}
+
+// logControlPlaneMachine logs the status of a single control plane Machine so that
+// rollout progress and stalled machines can be diagnosed from operator logs.
+func logControlPlaneMachine(log klog.Logger, machine *machinev1beta1.Machine) {
+	phase := ""
+	if machine.Status.Phase != nil {
+		phase = *machine.Status.Phase
+	}
+	kv := []interface{}{
+		"machine", machine.Name,
+		"phase", phase,
+		"age", time.Since(machine.CreationTimestamp.Time).Round(time.Second),
+	}
+	if machine.Status.NodeRef != nil {
+		kv = append(kv, "node", machine.Status.NodeRef.Name)
+	}
+	if machine.Status.LastUpdated != nil {
+		kv = append(kv, "lastUpdated", machine.Status.LastUpdated.Time)
+	}
+	if machine.Status.ErrorReason != nil {
+		kv = append(kv, "errorReason", string(*machine.Status.ErrorReason))
+	}
+	if machine.Status.ErrorMessage != nil {
+		kv = append(kv, "errorMessage", *machine.Status.ErrorMessage)
+	}
+	log.V(1).Info("control plane machine status", kv...)
 }
