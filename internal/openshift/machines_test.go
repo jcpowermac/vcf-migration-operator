@@ -235,12 +235,18 @@ func TestIsCPMSGenerationObserved(t *testing.T) {
 			machineClient := fakemachineclient.NewClientset(cpms)
 			mgr := NewMachineManager(fakekube.NewClientset(), machineClient, nil)
 
-			got, err := mgr.IsCPMSGenerationObserved(context.Background())
+			got, gen, obsGen, err := mgr.IsCPMSGenerationObserved(context.Background())
 			if err != nil {
 				t.Fatalf("IsCPMSGenerationObserved: %v", err)
 			}
 			if got != tt.want {
 				t.Errorf("observed = %v, want %v", got, tt.want)
+			}
+			if gen != tt.generation {
+				t.Errorf("generation = %d, want %d", gen, tt.generation)
+			}
+			if obsGen != tt.observedGeneration {
+				t.Errorf("observedGeneration = %d, want %d", obsGen, tt.observedGeneration)
 			}
 		})
 	}
@@ -440,4 +446,160 @@ func TestDeleteMachineSetsByVCenter(t *testing.T) {
 			t.Fatalf("deleted = %v, want empty", deleted)
 		}
 	})
+}
+
+func TestIsCPMSUpdatedForFailureDomains(t *testing.T) {
+	tests := []struct {
+		name      string
+		cpms      *machinev1.ControlPlaneMachineSet
+		wantNames []string
+		want      bool
+		wantErr   string
+	}{
+		{
+			name: "active with matching failure domains",
+			cpms: newTestCPMS(machinev1.ControlPlaneMachineSetStateActive, &machinev1.FailureDomains{
+				Platform: configv1.VSpherePlatformType,
+				VSphere: []machinev1.VSphereFailureDomain{
+					{Name: "a"},
+					{Name: "b"},
+				},
+			}),
+			wantNames: []string{"a", "b"},
+			want:      true,
+		},
+		{
+			name: "active with matching failure domains different order",
+			cpms: newTestCPMS(machinev1.ControlPlaneMachineSetStateActive, &machinev1.FailureDomains{
+				Platform: configv1.VSpherePlatformType,
+				VSphere: []machinev1.VSphereFailureDomain{
+					{Name: "a"},
+					{Name: "b"},
+				},
+			}),
+			wantNames: []string{"b", "a"},
+			want:      true,
+		},
+		{
+			name: "active with mismatched failure domains",
+			cpms: newTestCPMS(machinev1.ControlPlaneMachineSetStateActive, &machinev1.FailureDomains{
+				Platform: configv1.VSpherePlatformType,
+				VSphere: []machinev1.VSphereFailureDomain{
+					{Name: "a"},
+				},
+			}),
+			wantNames: []string{"b"},
+			want:      false,
+		},
+		{
+			name: "inactive with matching failure domains",
+			cpms: newTestCPMS(machinev1.ControlPlaneMachineSetStateInactive, &machinev1.FailureDomains{
+				Platform: configv1.VSpherePlatformType,
+				VSphere: []machinev1.VSphereFailureDomain{
+					{Name: "a"},
+				},
+			}),
+			wantNames: []string{"a"},
+			want:      false,
+		},
+		{
+			name:      "active with nil failure domains",
+			cpms:      newTestCPMS(machinev1.ControlPlaneMachineSetStateActive, nil),
+			wantNames: []string{"a"},
+			want:      false,
+		},
+		{
+			name:      "no CPMS in clientset",
+			cpms:      nil,
+			wantNames: []string{"a"},
+			wantErr:   "getting ControlPlaneMachineSet",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var machineClient *fakemachineclient.Clientset
+			if tt.cpms != nil {
+				machineClient = fakemachineclient.NewClientset(tt.cpms)
+			} else {
+				machineClient = fakemachineclient.NewClientset()
+			}
+			mgr := NewMachineManager(fakekube.NewClientset(), machineClient, nil)
+
+			got, err := mgr.IsCPMSUpdatedForFailureDomains(context.Background(), tt.wantNames)
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %q, want substring %q", err.Error(), tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("IsCPMSUpdatedForFailureDomains: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("updated = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestListControlPlaneMachines(t *testing.T) {
+	machines := []*machinev1beta1.Machine{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "cp-1",
+				Namespace: MachineAPINamespace,
+				Labels:    map[string]string{"machine.openshift.io/cluster-api-machine-role": "master"},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "cp-2",
+				Namespace: MachineAPINamespace,
+				Labels:    map[string]string{"machine.openshift.io/cluster-api-machine-role": "control-plane"},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "worker-1",
+				Namespace: MachineAPINamespace,
+				Labels:    map[string]string{"machine.openshift.io/cluster-api-machine-role": "worker"},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "unlabeled",
+				Namespace: MachineAPINamespace,
+			},
+		},
+	}
+
+	objs := make([]runtime.Object, len(machines))
+	for i, m := range machines {
+		objs[i] = m
+	}
+	machineClient := fakemachineclient.NewClientset(objs...)
+	mgr := NewMachineManager(fakekube.NewClientset(), machineClient, nil)
+
+	got, err := mgr.ListControlPlaneMachines(context.Background())
+	if err != nil {
+		t.Fatalf("ListControlPlaneMachines: %v", err)
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+
+	names := make(map[string]struct{}, len(got))
+	for _, m := range got {
+		names[m.Name] = struct{}{}
+	}
+	for _, want := range []string{"cp-1", "cp-2"} {
+		if _, ok := names[want]; !ok {
+			t.Errorf("missing machine %q in result", want)
+		}
+	}
 }
