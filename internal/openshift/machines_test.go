@@ -603,3 +603,108 @@ func TestListControlPlaneMachines(t *testing.T) {
 		}
 	}
 }
+
+func TestListMachinesForMachineSet(t *testing.T) {
+	tests := []struct {
+		name        string
+		machineSets []*machinev1beta1.MachineSet
+		machines    []*machinev1beta1.Machine
+		lookupName  string
+		wantNames   []string
+	}{
+		{
+			name:       "returns machines selected by the machineset selector",
+			lookupName: "workers-a",
+			machineSets: []*machinev1beta1.MachineSet{
+				testSelectorMachineSet("workers-a"),
+			},
+			machines: []*machinev1beta1.Machine{
+				testMachineWithMSLabel("worker-a-0", "workers-a"),
+				testMachineWithMSLabel("worker-b-0", "workers-b"),
+			},
+			wantNames: []string{"worker-a-0"},
+		},
+		{
+			name:       "falls back to machineset name when selector label is absent",
+			lookupName: "legacy-workers",
+			machineSets: []*machinev1beta1.MachineSet{
+				newTestMachineSet("legacy-workers", 1),
+			},
+			machines: []*machinev1beta1.Machine{
+				testMachineWithMSLabel("legacy-worker-0", "legacy-workers"),
+			},
+			wantNames: []string{"legacy-worker-0"},
+		},
+		{
+			name:       "returns an empty list when no machines match",
+			lookupName: "workers-empty",
+			machineSets: []*machinev1beta1.MachineSet{
+				newTestMachineSet("workers-empty", 0),
+			},
+			wantNames: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			objects := make([]runtime.Object, 0, len(tt.machineSets)+len(tt.machines))
+			for _, ms := range tt.machineSets {
+				objects = append(objects, ms)
+			}
+			for _, m := range tt.machines {
+				objects = append(objects, m)
+			}
+			machineClient := fakemachineclient.NewClientset(objects...)
+			mgr := NewMachineManager(fakekube.NewClientset(), machineClient, nil)
+
+			got, err := mgr.ListMachinesForMachineSet(context.Background(), tt.lookupName)
+			if err != nil {
+				t.Fatalf("ListMachinesForMachineSet: %v", err)
+			}
+
+			names := make([]string, 0, len(got))
+			for _, m := range got {
+				names = append(names, m.Name)
+			}
+			if len(names) != len(tt.wantNames) {
+				t.Fatalf("machine names = %v, want %v", names, tt.wantNames)
+			}
+			for i := range names {
+				if names[i] != tt.wantNames[i] {
+					t.Fatalf("machine names = %v, want %v", names, tt.wantNames)
+				}
+			}
+		})
+	}
+}
+
+// testSelectorMachineSet creates a MachineSet whose selector carries the
+// cluster-api-machineset label, matching how real worker MachineSets are labeled.
+func testSelectorMachineSet(name string) *machinev1beta1.MachineSet {
+	replicas := int32(1)
+	return &machinev1beta1.MachineSet{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: MachineAPINamespace},
+		Spec: machinev1beta1.MachineSetSpec{
+			Replicas: &replicas,
+			Selector: metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"machine.openshift.io/cluster-api-machineset": name,
+				},
+			},
+		},
+	}
+}
+
+// testMachineWithMSLabel creates a Machine carrying the cluster-api-machineset
+// label with the given value.
+func testMachineWithMSLabel(name, labelValue string) *machinev1beta1.Machine {
+	return &machinev1beta1.Machine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: MachineAPINamespace,
+			Labels: map[string]string{
+				"machine.openshift.io/cluster-api-machineset": labelValue,
+			},
+		},
+	}
+}

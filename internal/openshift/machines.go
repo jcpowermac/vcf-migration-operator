@@ -486,6 +486,28 @@ func (m *MachineManager) CheckNodesDeletedForMachines(ctx context.Context, machi
 	return allDeleted, remaining, nil
 }
 
+// ListMachinesForMachineSet lists the full Machine objects (metadata and status)
+// selected by the given MachineSet's selector. Callers that need per-machine
+// detail (names, ages, error reasons) use this instead of CheckMachinesDeleted.
+func (m *MachineManager) ListMachinesForMachineSet(ctx context.Context, machineSetName string) ([]*machinev1beta1.Machine, error) {
+	labelValue, err := m.machinesetSelectorLabel(ctx, machineSetName)
+	if err != nil {
+		return nil, err
+	}
+	machines, err := m.machineClient.MachineV1beta1().Machines(MachineAPINamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("machine.openshift.io/cluster-api-machineset=%s", labelValue),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing machines for machineset %q: %w", machineSetName, err)
+	}
+
+	result := make([]*machinev1beta1.Machine, len(machines.Items))
+	for i := range machines.Items {
+		result[i] = &machines.Items[i]
+	}
+	return result, nil
+}
+
 // updateMachineSetProviderSpec updates the VSphereMachineProviderSpec in the
 // MachineSet template with the topology from the given failure domain. When the
 // failure domain does not specify a folder, the default /<datacenter>/vm/<infraID>

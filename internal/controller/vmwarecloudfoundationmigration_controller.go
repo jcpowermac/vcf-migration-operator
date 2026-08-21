@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -61,6 +62,14 @@ type VmwareCloudFoundationMigrationReconciler struct {
 	MachineClient machineclient.Interface
 	DynamicClient dynamic.Interface
 	Recorder      record.EventRecorder
+
+	// lastStallEventKey identifies the set of old worker machines described by the
+	// most recent OldWorkersStalled Warning event; lastStallEventTime is when that
+	// event was recorded. Together they debounce the event to at most one per
+	// five minutes per distinct machine set. In-memory by design: a leader
+	// restart may re-emit one event, which is harmless.
+	lastStallEventKey  string
+	lastStallEventTime time.Time
 }
 
 // conditionOrder defines the sequence in which conditions are evaluated.
@@ -75,6 +84,14 @@ var conditionOrder = []string{
 }
 
 const reasonWaitingForVSpherePods = "WaitingForVSpherePods"
+
+const stallEventInterval = 5 * time.Minute
+
+const (
+	maxConditionMessageBytes  = 32768
+	maxEventNoteBytes         = 1024
+	oldWorkerStallEventPrefix = "Old worker deletion stalled: "
+)
 
 // +kubebuilder:rbac:groups=migration.openshift.io,resources=vmwarecloudfoundationmigrations,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=migration.openshift.io,resources=vmwarecloudfoundationmigrations/status,verbs=get;update;patch
@@ -631,12 +648,13 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigrated(ctx co
 	}
 
 	// Step 2: Wait for target worker machines and nodes to be ready (cluster state).
-	allReady, err := checkWorkerReadiness(ctx, machineMgr, migration.Spec.FailureDomains, infraID)
+	readiness, err := checkWorkerReadiness(ctx, machineMgr, migration.Spec.FailureDomains, infraID)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if !allReady {
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Workers created, waiting for machines ready")
+	if !readiness.Ready {
+		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
+			fmt.Sprintf("Waiting for target workers (machines %d/%d ready, nodes %d/%d ready)", readiness.MachinesReady, readiness.MachinesTotal, readiness.NodesReady, readiness.NodesTotal))
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
@@ -709,7 +727,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigratedRollout
 			log.V(2).Info("listing control plane machines failed", "err", merr)
 		} else {
 			for _, machine := range machines {
-				logControlPlaneMachine(log, machine)
+				logMachineDetail(log, machine)
 			}
 		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
@@ -759,7 +777,18 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigratedRollout
 		}
 	}
 	if !allDeleted {
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Old workers scaled down, waiting for deletion")
+		detail, eventNote, key, err := oldWorkerStallDetail(ctx, log, machineMgr, oldMachineSets)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("building old worker stall detail: %w", err)
+		}
+		log.V(1).Info("old worker deletion in progress", "detail", detail)
+		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
+			boundConditionMessage("Waiting for old worker deletion: "+detail))
+		if key != r.lastStallEventKey || time.Since(r.lastStallEventTime) >= stallEventInterval {
+			r.Recorder.Event(migration, "Warning", "OldWorkersStalled", eventNote)
+			r.lastStallEventKey = key
+			r.lastStallEventTime = time.Now()
+		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
@@ -1099,36 +1128,294 @@ func workerMachineSetName(infraID, fdName string) string {
 	return fmt.Sprintf("%s-worker-%s", infraID, sanitized)
 }
 
-// checkWorkerReadiness verifies that all machines and nodes for the target worker
-// MachineSets are in a ready state. It returns true when every MachineSet's machines
-// are Running with a NodeRef and the corresponding nodes have condition Ready=True.
-func checkWorkerReadiness(ctx context.Context, machineMgr *openshift.MachineManager, fds []configv1.VSpherePlatformFailureDomainSpec, infraID string) (bool, error) {
-	log := klog.FromContext(ctx)
-	for i := range fds {
-		msName := workerMachineSetName(infraID, fds[i].Name)
-		machinesReady, readyCount, totalCount, err := machineMgr.CheckMachinesReady(ctx, msName)
-		if err != nil {
-			return false, fmt.Errorf("checking machines for %q: %w", msName, err)
-		}
-		if !machinesReady {
-			log.V(1).Info("machines not ready", "machineSet", msName, "ready", readyCount, "total", totalCount)
-			return false, nil
-		}
-		nodesReady, nodeReadyCount, nodeTotalCount, err := machineMgr.CheckNodesReady(ctx, msName)
-		if err != nil {
-			return false, fmt.Errorf("checking nodes for %q: %w", msName, err)
-		}
-		if !nodesReady {
-			log.V(1).Info("nodes not ready", "machineSet", msName, "ready", nodeReadyCount, "total", nodeTotalCount)
-			return false, nil
-		}
-	}
-	return true, nil
+// workerReadinessStatus holds aggregate readiness for target worker MachineSets.
+type workerReadinessStatus struct {
+	Ready         bool
+	MachinesReady int32
+	MachinesTotal int32
+	NodesReady    int32
+	NodesTotal    int32
 }
 
-// logControlPlaneMachine logs the status of a single control plane Machine so that
-// rollout progress and stalled machines can be diagnosed from operator logs.
-func logControlPlaneMachine(log klog.Logger, machine *machinev1beta1.Machine) {
+// checkWorkerReadiness verifies that all machines and nodes for the target worker
+// MachineSets are in a ready state. It returns aggregate readiness counts across
+// all target MachineSets, which callers use to report rollout progress.
+func checkWorkerReadiness(ctx context.Context, machineMgr *openshift.MachineManager, fds []configv1.VSpherePlatformFailureDomainSpec, infraID string) (workerReadinessStatus, error) {
+	log := klog.FromContext(ctx)
+	status := workerReadinessStatus{Ready: true}
+	for i := range fds {
+		msName := workerMachineSetName(infraID, fds[i].Name)
+		machinesOK, machineReadyCount, machineTotalCount, merr := machineMgr.CheckMachinesReady(ctx, msName)
+		if merr != nil {
+			return workerReadinessStatus{}, fmt.Errorf("checking machines for %q: %w", msName, merr)
+		}
+		status.MachinesReady += machineReadyCount
+		status.MachinesTotal += machineTotalCount
+		if !machinesOK {
+			log.V(1).Info("machines not ready", "machineSet", msName, "ready", machineReadyCount, "total", machineTotalCount)
+			status.Ready = false
+		}
+		nodesOK, nodeReadyCount, nodeTotalCount, nerr := machineMgr.CheckNodesReady(ctx, msName)
+		if nerr != nil {
+			return workerReadinessStatus{}, fmt.Errorf("checking nodes for %q: %w", msName, nerr)
+		}
+		status.NodesReady += nodeReadyCount
+		status.NodesTotal += nodeTotalCount
+		if !nodesOK {
+			log.V(1).Info("nodes not ready", "machineSet", msName, "ready", nodeReadyCount, "total", nodeTotalCount)
+			status.Ready = false
+		}
+	}
+	return status, nil
+}
+
+type stallDetailPart struct {
+	machineSetName string
+	text           string
+	machineNames   []string
+}
+
+// oldWorkerStallDetail formats per-MachineSet detail for old worker machines and
+// nodes that are still being deleted (typically a PDB blocking node drain):
+// machine names with age and error reason, plus the remaining node count. It also
+// returns a bounded Warning event note and a stable key (machine set name plus
+// sorted machine names) identifying the exact set of lingering machines, used
+// to debounce Warning events.
+func oldWorkerStallDetail(ctx context.Context, log klog.Logger, machineMgr *openshift.MachineManager, machineSets []*machinev1beta1.MachineSet) (string, string, string, error) {
+	parts := make([]stallDetailPart, 0, len(machineSets))
+	keyParts := make([]string, 0, len(machineSets))
+	for _, ms := range machineSets {
+		machines, err := machineMgr.ListMachinesForMachineSet(ctx, ms.Name)
+		if err != nil {
+			return "", "", "", err
+		}
+		if len(machines) == 0 {
+			continue
+		}
+		sort.Slice(machines, func(i, j int) bool {
+			return machines[i].Name < machines[j].Name
+		})
+		names := make([]string, 0, len(machines))
+		keyNames := make([]string, 0, len(machines))
+		partMachineNames := make([]string, 0, len(machines))
+		for _, machine := range machines {
+			logStalledWorkerMachine(log, ms.Name, machine)
+			age := time.Since(machine.CreationTimestamp.Time).Round(time.Second)
+			entry := fmt.Sprintf("%s (%s old", machine.Name, age)
+			if machine.Status.ErrorReason != nil {
+				entry += fmt.Sprintf(", %s", *machine.Status.ErrorReason)
+			}
+			entry += ")"
+			names = append(names, entry)
+			keyNames = append(keyNames, machine.Name)
+			partMachineNames = append(partMachineNames, machine.Name)
+		}
+		_, nodeRemaining, err := machineMgr.CheckNodesDeletedForMachines(ctx, ms.Name)
+		if err != nil {
+			return "", "", "", err
+		}
+		parts = append(parts, stallDetailPart{
+			machineSetName: ms.Name,
+			text:           fmt.Sprintf("%s has %d machine(s) [%s] and %d node(s) remaining", ms.Name, len(machines), strings.Join(names, ", "), nodeRemaining),
+			machineNames:   partMachineNames,
+		})
+		sort.Strings(keyNames)
+		keyParts = append(keyParts, ms.Name+"="+strings.Join(keyNames, ","))
+	}
+	sort.Strings(keyParts)
+	sort.Slice(parts, func(i, j int) bool {
+		return parts[i].machineSetName < parts[j].machineSetName
+	})
+	detail := joinStallDetailParts(parts)
+	return detail, boundOldWorkerStallEventNote(parts), strings.Join(keyParts, "|"), nil
+}
+
+func joinStallDetailParts(parts []stallDetailPart) string {
+	texts := make([]string, len(parts))
+	for i, part := range parts {
+		texts[i] = part.text
+	}
+	return strings.Join(texts, "; ")
+}
+
+// boundOldWorkerStallEventNote formats a Warning event note capped at
+// maxEventNoteBytes. Full detail remains in the condition message and
+// oldWorkerStallDetail log output; omitted machines are summarized.
+func boundOldWorkerStallEventNote(parts []stallDetailPart) string {
+	allNames := make([]string, 0)
+	for _, part := range parts {
+		allNames = append(allNames, part.machineNames...)
+	}
+
+	fullDetail := joinStallDetailParts(parts)
+	note := oldWorkerStallEventPrefix + fullDetail
+	if len(note) <= maxEventNoteBytes {
+		return note
+	}
+
+	included := make([]stallDetailPart, 0, len(parts))
+	includedNameCount := 0
+	for _, part := range parts {
+		trialIncluded := append(included, part)
+		trialDetail := joinStallDetailParts(trialIncluded)
+		omitted := allNames[includedNameCount+len(part.machineNames):]
+		suffix := stallOmitSuffix(omitted)
+		if len(oldWorkerStallEventPrefix+trialDetail+suffix) <= maxEventNoteBytes {
+			included = trialIncluded
+			includedNameCount += len(part.machineNames)
+			continue
+		}
+		break
+	}
+
+	detail := joinStallDetailParts(included)
+	omitted := allNames[includedNameCount:]
+	maxSuffixBytes := maxEventNoteBytes - len(oldWorkerStallEventPrefix+detail)
+	return oldWorkerStallEventPrefix + detail + stallOmitSuffixFit(omitted, maxSuffixBytes)
+}
+
+func stallOmitSuffix(omitted []string) string {
+	if len(omitted) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("; ... and %d more machine(s) omitted: [%s]", len(omitted), strings.Join(omitted, ", "))
+}
+
+func stallOmitSuffixFit(omitted []string, maxSuffixBytes int) string {
+	if len(omitted) == 0 {
+		return ""
+	}
+	if maxSuffixBytes <= 0 {
+		return truncateToBytes(stallOmitSuffix(omitted), maxSuffixBytes)
+	}
+
+	suffix := stallOmitSuffix(omitted)
+	if len(suffix) <= maxSuffixBytes {
+		return suffix
+	}
+
+	countPrefix := fmt.Sprintf("; ... and %d more machine(s) omitted: [", len(omitted))
+	suffixSuffix := "]"
+	available := maxSuffixBytes - len(countPrefix) - len(suffixSuffix)
+	if available <= 0 {
+		return truncateToBytes(fmt.Sprintf("; ... and %d more machine(s) omitted", len(omitted)), maxSuffixBytes)
+	}
+
+	names := append([]string(nil), omitted...)
+	for len(names) > 0 {
+		trial := countPrefix + strings.Join(names, ", ") + suffixSuffix
+		if len(trial) <= maxSuffixBytes {
+			return trial
+		}
+		names = names[:len(names)-1]
+	}
+
+	return truncateToBytes(fmt.Sprintf("; ... and %d more machine(s) omitted", len(omitted)), maxSuffixBytes)
+}
+
+// boundConditionMessage ensures a condition message does not exceed
+// maxConditionMessageBytes (32768 characters), preserving the message
+// when within the limit and truncating with an omitted machine count when exceeded.
+func boundConditionMessage(msg string) string {
+	if len(msg) <= maxConditionMessageBytes {
+		return msg
+	}
+
+	totalMachines := countMachinesInMessage(msg)
+	const countPrefix = "; ... and "
+	const countSuffix = " more machine(s) omitted"
+	suffixEst := fmt.Sprintf("%s%d%s", countPrefix, totalMachines, countSuffix)
+	maxPrefixLen := maxConditionMessageBytes - len(suffixEst)
+	if maxPrefixLen <= 0 {
+		return truncateToBytes(suffixEst, maxConditionMessageBytes)
+	}
+
+	prefix := msg[:maxPrefixLen]
+	if lastSemi := strings.LastIndex(prefix, "; "); lastSemi > 0 {
+		prefix = prefix[:lastSemi]
+	} else if lastComma := strings.LastIndex(prefix, ", "); lastComma > 0 {
+		prefix = prefix[:lastComma]
+	}
+
+	preservedMachines := countMachinesInMessage(prefix)
+	omitted := totalMachines - preservedMachines
+	if omitted <= 0 {
+		omitted = 1
+	}
+
+	suffix := fmt.Sprintf("%s%d%s", countPrefix, omitted, countSuffix)
+	if len(prefix)+len(suffix) > maxConditionMessageBytes {
+		prefix = truncateToBytes(prefix, maxConditionMessageBytes-len(suffix))
+	}
+
+	return prefix + suffix
+}
+
+func countMachinesInMessage(msg string) int {
+	count := 0
+	start := 0
+	for {
+		open := strings.Index(msg[start:], "[")
+		if open == -1 {
+			break
+		}
+		openIdx := start + open + 1
+		close := strings.Index(msg[openIdx:], "]")
+		if close == -1 {
+			count += countMachineEntries(msg[openIdx:])
+			break
+		}
+		closeIdx := openIdx + close
+		count += countMachineEntries(msg[openIdx:closeIdx])
+		start = closeIdx + 1
+	}
+	return count
+}
+
+func countMachineEntries(s string) int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	c := strings.Count(s, ")")
+	if c > 0 {
+		return c
+	}
+	return strings.Count(s, ",") + 1
+}
+
+func truncateToBytes(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(s) <= maxBytes {
+		return s
+	}
+	return s[:maxBytes]
+}
+
+// logStalledWorkerMachine logs allow-listed diagnostics for a stalled old worker
+// Machine. Node names and raw error messages are omitted.
+func logStalledWorkerMachine(log klog.Logger, machineSetName string, machine *machinev1beta1.Machine) {
+	phase := ""
+	if machine.Status.Phase != nil {
+		phase = *machine.Status.Phase
+	}
+	kv := []interface{}{
+		"machineSet", machineSetName,
+		"machine", machine.Name,
+		"age", time.Since(machine.CreationTimestamp.Time).Round(time.Second),
+		"phase", phase,
+	}
+	if machine.Status.ErrorReason != nil {
+		kv = append(kv, "errorReason", string(*machine.Status.ErrorReason))
+	}
+	log.V(1).Info("stalled old worker machine", kv...)
+}
+
+// logMachineDetail logs the status of a single Machine so that rollout progress
+// and stalled machines can be diagnosed from operator logs.
+func logMachineDetail(log klog.Logger, machine *machinev1beta1.Machine) {
 	phase := ""
 	if machine.Status.Phase != nil {
 		phase = *machine.Status.Phase
@@ -1139,7 +1426,7 @@ func logControlPlaneMachine(log klog.Logger, machine *machinev1beta1.Machine) {
 		"age", time.Since(machine.CreationTimestamp.Time).Round(time.Second),
 	}
 	if machine.Status.NodeRef != nil {
-		kv = append(kv, "node", machine.Status.NodeRef.Name)
+		kv = append(kv, "hasNodeRef", true)
 	}
 	if machine.Status.LastUpdated != nil {
 		kv = append(kv, "lastUpdated", machine.Status.LastUpdated.Time)
@@ -1148,7 +1435,7 @@ func logControlPlaneMachine(log klog.Logger, machine *machinev1beta1.Machine) {
 		kv = append(kv, "errorReason", string(*machine.Status.ErrorReason))
 	}
 	if machine.Status.ErrorMessage != nil {
-		kv = append(kv, "errorMessage", *machine.Status.ErrorMessage)
+		kv = append(kv, "hasErrorMessage", true)
 	}
-	log.V(1).Info("control plane machine status", kv...)
+	log.V(1).Info("machine status", kv...)
 }
