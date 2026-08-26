@@ -238,6 +238,42 @@ func TestEnsureReadyResetsStabilityCounterOnUnstableObservation(t *testing.T) {
 	}
 }
 
+func TestEnsureReadyResetsCounterAfterLongEnsureReadyGap(t *testing.T) {
+	reconciler := newReadyTestReconciler(
+		configfake.NewClientset(newStableReadyTestOperator("etcd"), newInfrastructureForReadyTest([]string{"target.example.com"})),
+		machineconfigfake.NewClientset(newConvergedReadyTestPool("master")),
+	)
+	migration := newMigrationForReadyTest([]string{"target.example.com"})
+	ctx := context.Background()
+
+	assertWaiting := func(call string, count int) {
+		result, err := reconciler.ensureReady(ctx, migration)
+		if err != nil {
+			t.Fatalf("ensureReady (%s) returned error: %v", call, err)
+		}
+		if result.RequeueAfter != 30*time.Second {
+			t.Fatalf("ensureReady (%s) RequeueAfter = %s, want %s", call, result.RequeueAfter, 30*time.Second)
+		}
+		cond := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionReady)
+		if cond == nil || cond.Status != metav1.ConditionFalse {
+			t.Fatalf("ensureReady (%s) ready condition = %+v, want False", call, cond)
+		}
+		wantMsg := fmt.Sprintf("Waiting for sustained cluster stability (%d/%d)", count, readyStabilityThreshold)
+		if cond.Message != wantMsg {
+			t.Fatalf("ensureReady (%s) message = %q, want %q", call, cond.Message, wantMsg)
+		}
+	}
+
+	// Accumulate two stable observations on the normal ~30s cadence.
+	assertWaiting("stable 1", 1)
+	assertWaiting("stable 2", 2)
+
+	// Simulate reconciles that bypassed ensureReady for longer than
+	// readyStabilityCheckGap; the counter must restart from zero.
+	reconciler.lastReadyStabilityCheck = time.Now().Add(-2 * readyStabilityCheckGap)
+	assertWaiting("after long gap", 1)
+}
+
 func newMigrationForReadyTest(targetServers []string) *migrationv1alpha1.VmwareCloudFoundationMigration {
 	fds := make([]configv1.VSpherePlatformFailureDomainSpec, 0, len(targetServers))
 	for i, server := range targetServers {

@@ -80,6 +80,11 @@ type VmwareCloudFoundationMigrationReconciler struct {
 	// any failing check resets it to zero. In-memory by design: a leader
 	// restart conservatively restarts the stability window.
 	readyStabilityCount int
+	// lastReadyStabilityCheck is the wall-clock time of the most recent
+	// ensureReady check. If the next check runs more than
+	// readyStabilityCheckGap later, reconciles in between never reached the
+	// readiness gate, so readyStabilityCount is reset.
+	lastReadyStabilityCheck time.Time
 }
 
 // conditionOrder defines the sequence in which conditions are evaluated.
@@ -104,6 +109,12 @@ const stallEventInterval = 5 * time.Minute
 // can trigger minutes later. Requiring ~3 minutes of sustained stability
 // across 30s requeues makes that gap impossible to pass through.
 const readyStabilityThreshold = 6
+
+// readyStabilityCheckGap is the maximum elapsed time between two consecutive
+// ensureReady checks that the stability window survives. A longer gap means an
+// observation is too stale to count toward sustained stability, so the counter
+// restarts from zero. It is 3x the 30s requeue cadence.
+const readyStabilityCheckGap = 90 * time.Second
 
 const (
 	maxConditionMessageBytes  = 32768
@@ -957,6 +968,19 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureSourceCleaned(ctx conte
 func (r *VmwareCloudFoundationMigrationReconciler) ensureReady(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) (ctrl.Result, error) {
 	log := klog.FromContext(ctx)
 	condType := migrationv1alpha1.ConditionReady
+
+	// A long gap since the last ensureReady check means earlier reconciles
+	// never reached this gate (e.g. an earlier condition flapped), so the
+	// stability window cannot claim consecutive ~30s observations and must
+	// restart.
+	if !r.lastReadyStabilityCheck.IsZero() && time.Since(r.lastReadyStabilityCheck) > readyStabilityCheckGap {
+		log.V(1).Info("resetting ready stability counter after long gap",
+			"lastCheck", r.lastReadyStabilityCheck,
+			"gap", readyStabilityCheckGap,
+		)
+		r.readyStabilityCount = 0
+	}
+	r.lastReadyStabilityCheck = time.Now()
 
 	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Verifying final cluster state")
 
