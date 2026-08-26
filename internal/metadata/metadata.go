@@ -7,6 +7,7 @@ import (
 
 	configv1 "github.com/openshift/api/config/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
@@ -15,51 +16,54 @@ import (
 // MetadataKey is the key used to store the metadata JSON in the Secret.
 const MetadataKey = "metadata.json"
 
-// Metadata holds the installer metadata for a cluster, used for generating
-// configuration that maps vCenter resources to OpenShift infrastructure.
-type Metadata struct {
+const (
+	metadataSecretLabelKey   = "migration.openshift.io/metadata"
+	metadataSecretLabelValue = "true"
+)
+
+// ClusterMetadata describes the installer-compatible metadata.json stored in the
+// migration metadata Secret.
+//
+// The Secret is named {migration-name}-metadata in the migration namespace and
+// contains a single key, metadata.json. The JSON layout matches the installer's
+// vSphere ClusterMetadata structure so openshift-install destroy cluster can use
+// it directly. The Secret is created or updated during the SourceCleaned phase
+// after source vCenter removal. It is labeled migration.openshift.io/metadata=true
+// and intentionally has no owner reference so it remains available for manual
+// teardown after the migration CR is deleted.
+type ClusterMetadata struct {
 	// ClusterName is the human-readable cluster name.
 	ClusterName string `json:"clusterName"`
 	// ClusterID is the unique cluster identifier.
 	ClusterID string `json:"clusterID"`
 	// InfraID is the infrastructure identifier used to name cloud resources.
 	InfraID string `json:"infraID"`
-	// VCenter is the primary vCenter server address.
-	VCenter string `json:"vcenter"`
-	// Username is the primary vCenter username.
-	Username string `json:"username"`
-	// Password is the primary vCenter password.
-	Password string `json:"password"`
-	// TerraformPlatform identifies the Terraform provider platform.
-	TerraformPlatform string `json:"terraformPlatform"`
-	// VCenters is the list of all vCenter configurations.
-	VCenters []VCenters `json:"vcenters"`
+	// VSphere contains the vSphere-specific metadata expected by the installer.
+	VSphere *VSphereMetadata `json:"vsphere,omitempty"`
 }
 
-// VCenters holds the connection and topology details for a single vCenter.
-type VCenters struct {
-	// Server is the vCenter FQDN or IP address.
-	Server string `json:"server"`
-	// Port is the vCenter connection port.
-	Port int32 `json:"port"`
+// VSphereMetadata contains the installer-compatible vSphere metadata payload.
+type VSphereMetadata struct {
+	// VCenter is the primary vCenter server address.
+	VCenter string `json:"vCenter,omitempty"`
+	// Username is the primary vCenter username.
+	Username string `json:"username,omitempty"`
+	// Password is the primary vCenter password.
+	Password string `json:"password,omitempty"`
+	// TerraformPlatform identifies the Terraform provider platform.
+	TerraformPlatform string `json:"terraform_platform"`
+	// VCenters lists every distinct vCenter the cluster uses.
+	VCenters []VCenter `json:"VCenters"`
+}
+
+// VCenter contains installer-compatible credentials for an individual vCenter.
+type VCenter struct {
+	// VCenter is the vCenter FQDN or IP address.
+	VCenter string `json:"vCenter"`
 	// Username is the vCenter login username.
 	Username string `json:"username"`
 	// Password is the vCenter login password.
 	Password string `json:"password"`
-	// Datacenters is the list of datacenter names.
-	Datacenters []string `json:"datacenters"`
-	// DefaultDC is the default datacenter.
-	DefaultDC string `json:"defaultDC"`
-	// Cluster is the compute cluster path.
-	Cluster string `json:"cluster"`
-	// Datastore is the datastore path.
-	Datastore string `json:"datastore"`
-	// Network is the network port group path.
-	Network string `json:"network"`
-	// ResourcePool is the resource pool path.
-	ResourcePool string `json:"resourcePool"`
-	// Folder is the VM folder path.
-	Folder string `json:"folder"`
 }
 
 // MetadataManager generates and persists installer metadata.
@@ -72,62 +76,79 @@ func NewMetadataManager(kubeClient kubernetes.Interface) *MetadataManager {
 	return &MetadataManager{kubeClient: kubeClient}
 }
 
-// GenerateMetadata builds a Metadata object from the given failure domains,
+// GenerateMetadata builds a ClusterMetadata object from the given failure domains,
 // Infrastructure resource, and credentials. The credentials map is keyed by
 // vCenter server and the values are formatted as "username:password".
-// Each failure domain contributes a VCenters entry.
-func (m *MetadataManager) GenerateMetadata(ctx context.Context, failureDomains []configv1.VSpherePlatformFailureDomainSpec, infra *configv1.Infrastructure, credentials map[string]string) (*Metadata, error) {
+// Distinct vCenter servers produce distinct VCenters entries.
+func (m *MetadataManager) GenerateMetadata(
+	ctx context.Context,
+	failureDomains []configv1.VSpherePlatformFailureDomainSpec,
+	infra *configv1.Infrastructure,
+	credentials map[string]string,
+) (*ClusterMetadata, error) {
 	log := klog.FromContext(ctx)
 	log.V(2).Info("generating installer metadata")
 
 	if infra == nil {
 		return nil, fmt.Errorf("infrastructure must not be nil")
 	}
+	if len(failureDomains) == 0 {
+		return nil, fmt.Errorf("failure domains must not be empty")
+	}
 	if infra.Status.InfrastructureName == "" {
 		return nil, fmt.Errorf("infrastructure status has no InfrastructureName")
 	}
 
-	md := &Metadata{
-		ClusterName:       infra.Name,
-		ClusterID:         string(infra.UID),
-		InfraID:           infra.Status.InfrastructureName,
-		TerraformPlatform: "vsphere",
+	md := &ClusterMetadata{
+		ClusterName: infra.Name,
+		ClusterID:   string(infra.UID),
+		InfraID:     infra.Status.InfrastructureName,
+		VSphere: &VSphereMetadata{
+			TerraformPlatform: "vsphere",
+		},
 	}
+
+	seenServers := make(map[string]struct{}, len(failureDomains))
 
 	// Build vCenter entries from failure domains.
 	for i := range failureDomains {
 		fd := &failureDomains[i]
-
-		username, password := parseCredentials(credentials[fd.Server])
+		cred, ok := credentials[fd.Server]
+		if !ok {
+			return nil, fmt.Errorf("credentials for %s not found", fd.Server)
+		}
+		username, password, err := parseRequiredCredentials(fd.Server, cred)
+		if err != nil {
+			return nil, err
+		}
 
 		if i == 0 {
-			md.VCenter = fd.Server
-			md.Username = username
-			md.Password = password
+			md.VSphere.VCenter = fd.Server
+			md.VSphere.Username = username
+			md.VSphere.Password = password
 		}
 
-		var network string
-		if len(fd.Topology.Networks) > 0 {
-			network = fd.Topology.Networks[0]
+		if _, exists := seenServers[fd.Server]; exists {
+			continue
 		}
+		seenServers[fd.Server] = struct{}{}
 
-		vc := VCenters{
-			Server:       fd.Server,
-			Port:         443,
-			Username:     username,
-			Password:     password,
-			Datacenters:  []string{fd.Topology.Datacenter},
-			DefaultDC:    fd.Topology.Datacenter,
-			Cluster:      fd.Topology.ComputeCluster,
-			Datastore:    fd.Topology.Datastore,
-			Network:      network,
-			ResourcePool: fd.Topology.ResourcePool,
-			Folder:       fd.Topology.Folder,
+		vc := VCenter{
+			VCenter:  fd.Server,
+			Username: username,
+			Password: password,
 		}
-		md.VCenters = append(md.VCenters, vc)
+		md.VSphere.VCenters = append(md.VSphere.VCenters, vc)
 	}
 
-	log.V(2).Info("generated metadata", "infraID", md.InfraID, "vcenterCount", len(md.VCenters))
+	if md.VSphere.VCenter == "" || md.VSphere.Username == "" || md.VSphere.Password == "" {
+		return nil, fmt.Errorf("primary vcenter credentials are incomplete")
+	}
+	if len(md.VSphere.VCenters) == 0 {
+		return nil, fmt.Errorf("no vcenters available for metadata")
+	}
+
+	log.V(2).Info("generated metadata", "vcenterCount", len(md.VSphere.VCenters))
 	return md, nil
 }
 
@@ -135,7 +156,7 @@ func (m *MetadataManager) GenerateMetadata(ctx context.Context, failureDomains [
 // namespace and name. If the Secret already exists, it is updated.
 // A Secret is used instead of a ConfigMap because the metadata contains
 // vCenter credentials.
-func (m *MetadataManager) SaveToSecret(ctx context.Context, md *Metadata, namespace, name string) error {
+func (m *MetadataManager) SaveToSecret(ctx context.Context, md *ClusterMetadata, namespace, name string) error {
 	log := klog.FromContext(ctx)
 	log.V(2).Info("saving metadata to Secret", "namespace", namespace, "name", name)
 
@@ -149,8 +170,9 @@ func (m *MetadataManager) SaveToSecret(ctx context.Context, md *Metadata, namesp
 			Name:      name,
 			Namespace: namespace,
 			Labels: map[string]string{
-				"migration.openshift.io/metadata": "true",
+				metadataSecretLabelKey: metadataSecretLabelValue,
 			},
+			OwnerReferences: nil,
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
@@ -160,14 +182,22 @@ func (m *MetadataManager) SaveToSecret(ctx context.Context, md *Metadata, namesp
 
 	existing, err := m.kubeClient.CoreV1().Secrets(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err == nil {
+		existing.OwnerReferences = nil
+		if existing.Labels == nil {
+			existing.Labels = map[string]string{}
+		}
+		existing.Labels[metadataSecretLabelKey] = metadataSecretLabelValue
 		existing.Data = secret.Data
+		existing.Type = corev1.SecretTypeOpaque
 		if _, err := m.kubeClient.CoreV1().Secrets(namespace).Update(ctx, existing, metav1.UpdateOptions{}); err != nil {
 			return fmt.Errorf("updating metadata Secret %s/%s: %w", namespace, name, err)
 		}
-	} else {
+	} else if apierrors.IsNotFound(err) {
 		if _, err := m.kubeClient.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
 			return fmt.Errorf("creating metadata Secret %s/%s: %w", namespace, name, err)
 		}
+	} else {
+		return fmt.Errorf("getting metadata Secret %s/%s: %w", namespace, name, err)
 	}
 
 	log.V(2).Info("saved metadata to Secret", "namespace", namespace, "name", name)
@@ -204,6 +234,14 @@ func parseCredentials(cred string) (username, password string) {
 		return "", ""
 	}
 	return parts[0], parts[1]
+}
+
+func parseRequiredCredentials(server, cred string) (string, string, error) {
+	username, password := parseCredentials(cred)
+	if username == "" || password == "" {
+		return "", "", fmt.Errorf("credentials for %s must be formatted as username:password", server)
+	}
+	return username, password, nil
 }
 
 // splitFirst splits s on the first occurrence of sep.

@@ -29,9 +29,17 @@ func TestGenerateMetadata(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "empty InfrastructureName",
+			name: "empty infrastructure name",
 			infra: &configv1.Infrastructure{
 				Status: configv1.InfrastructureStatus{InfrastructureName: ""},
+			},
+			wantErr: true,
+		},
+		{
+			name: "no failure domains",
+			infra: &configv1.Infrastructure{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster", UID: types.UID("test-uid")},
+				Status:     configv1.InfrastructureStatus{InfrastructureName: "my-cluster-abc"},
 			},
 			wantErr: true,
 		},
@@ -63,10 +71,28 @@ func TestGenerateMetadata(t *testing.T) {
 			wantPrimary: "vcenter.example.com",
 		},
 		{
-			name: "multiple failure domains",
+			name: "multiple distinct vcenters",
 			failureDomains: []configv1.VSpherePlatformFailureDomainSpec{
 				{Name: "fd1", Server: "vc1.example.com", Topology: configv1.VSpherePlatformTopology{Datacenter: "dc1"}},
 				{Name: "fd2", Server: "vc2.example.com", Topology: configv1.VSpherePlatformTopology{Datacenter: "dc2"}},
+			},
+			infra: &configv1.Infrastructure{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster", UID: types.UID("uid2a")},
+				Status:     configv1.InfrastructureStatus{InfrastructureName: "infra2a"},
+			},
+			credentials: map[string]string{
+				"vc1.example.com": "user1:pass1",
+				"vc2.example.com": "user2:pass2",
+			},
+			wantInfraID: "infra2a",
+			wantVCCount: 2,
+			wantPrimary: "vc1.example.com",
+		},
+		{
+			name: "deduplicates vcenters by server",
+			failureDomains: []configv1.VSpherePlatformFailureDomainSpec{
+				{Name: "fd1", Server: "vc1.example.com", Topology: configv1.VSpherePlatformTopology{Datacenter: "dc1"}},
+				{Name: "fd2", Server: "vc1.example.com", Topology: configv1.VSpherePlatformTopology{Datacenter: "dc2"}},
 			},
 			infra: &configv1.Infrastructure{
 				ObjectMeta: metav1.ObjectMeta{Name: "cluster", UID: types.UID("uid2")},
@@ -74,10 +100,9 @@ func TestGenerateMetadata(t *testing.T) {
 			},
 			credentials: map[string]string{
 				"vc1.example.com": "user1:pass1",
-				"vc2.example.com": "user2:pass2",
 			},
 			wantInfraID: "infra2",
-			wantVCCount: 2,
+			wantVCCount: 1,
 			wantPrimary: "vc1.example.com",
 		},
 	}
@@ -98,17 +123,135 @@ func TestGenerateMetadata(t *testing.T) {
 			if got.InfraID != tt.wantInfraID {
 				t.Errorf("InfraID = %q, want %q", got.InfraID, tt.wantInfraID)
 			}
-			if len(got.VCenters) != tt.wantVCCount {
-				t.Errorf("VCenters count = %d, want %d", len(got.VCenters), tt.wantVCCount)
+			if got.VSphere == nil {
+				t.Fatal("VSphere metadata is nil")
 			}
-			if got.VCenter != tt.wantPrimary {
-				t.Errorf("VCenter = %q, want %q", got.VCenter, tt.wantPrimary)
+			if len(got.VSphere.VCenters) != tt.wantVCCount {
+				t.Errorf("VCenters count = %d, want %d", len(got.VSphere.VCenters), tt.wantVCCount)
 			}
-			if got.TerraformPlatform != "vsphere" {
-				t.Errorf("TerraformPlatform = %q, want %q", got.TerraformPlatform, "vsphere")
+			if got.VSphere.VCenter != tt.wantPrimary {
+				t.Errorf("VCenter = %q, want %q", got.VSphere.VCenter, tt.wantPrimary)
+			}
+			if got.VSphere.TerraformPlatform != "vsphere" {
+				t.Errorf("TerraformPlatform = %q, want %q", got.VSphere.TerraformPlatform, "vsphere")
 			}
 		})
 	}
+}
+
+func TestGenerateMetadataCredentialErrors(t *testing.T) {
+	infra := &configv1.Infrastructure{
+		ObjectMeta: metav1.ObjectMeta{Name: "cluster", UID: types.UID("test-uid")},
+		Status:     configv1.InfrastructureStatus{InfrastructureName: "my-cluster-abc"},
+	}
+	failureDomains := []configv1.VSpherePlatformFailureDomainSpec{
+		{Name: "fd1", Server: "vc1.example.com", Topology: configv1.VSpherePlatformTopology{Datacenter: "dc1"}},
+	}
+
+	tests := []struct {
+		name        string
+		credentials map[string]string
+	}{
+		{
+			name:        "missing credentials for server",
+			credentials: map[string]string{},
+		},
+		{
+			name: "malformed credentials without colon",
+			credentials: map[string]string{
+				"vc1.example.com": "user1",
+			},
+		},
+		{
+			name: "empty username after parsing",
+			credentials: map[string]string{
+				"vc1.example.com": ":pass1",
+			},
+		},
+		{
+			name: "empty password after parsing",
+			credentials: map[string]string{
+				"vc1.example.com": "user1:",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mgr := NewMetadataManager(fakekubeclient.NewClientset())
+			if _, err := mgr.GenerateMetadata(context.Background(), failureDomains, infra, tt.credentials); err == nil {
+				t.Fatal("GenerateMetadata: expected error, got nil")
+			}
+		})
+	}
+}
+
+func TestGenerateMetadataJSONContract(t *testing.T) {
+	mgr := NewMetadataManager(fakekubeclient.NewClientset())
+	md, err := mgr.GenerateMetadata(
+		context.Background(),
+		[]configv1.VSpherePlatformFailureDomainSpec{
+			{
+				Name:   "fd1",
+				Server: "vc1.example.com",
+				Topology: configv1.VSpherePlatformTopology{
+					Datacenter:     "dc1",
+					ComputeCluster: "/dc1/host/cluster1",
+					Datastore:      "/dc1/datastore/ds1",
+					Networks:       []string{"VM Network"},
+					ResourcePool:   "/dc1/host/cluster1/Resources",
+					Folder:         "/dc1/vm/my-cluster",
+				},
+			},
+		},
+		&configv1.Infrastructure{
+			ObjectMeta: metav1.ObjectMeta{Name: "cluster", UID: types.UID("uid4")},
+			Status:     configv1.InfrastructureStatus{InfrastructureName: "infra4"},
+		},
+		map[string]string{"vc1.example.com": "user1:pass1"},
+	)
+	if err != nil {
+		t.Fatalf("GenerateMetadata: %v", err)
+	}
+
+	data, err := json.Marshal(md)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+
+	assertMapKeys(t, payload, "clusterName", "clusterID", "infraID", "vsphere")
+
+	vsphereRaw, ok := payload["vsphere"]
+	if !ok {
+		t.Fatal("vsphere key missing")
+	}
+	vspherePayload, ok := vsphereRaw.(map[string]any)
+	if !ok {
+		t.Fatalf("vsphere = %T, want map[string]any", vsphereRaw)
+	}
+	assertMapKeys(t, vspherePayload, "vCenter", "username", "password", "terraform_platform", "VCenters")
+
+	vcentersRaw, ok := vspherePayload["VCenters"]
+	if !ok {
+		t.Fatal("VCenters key missing")
+	}
+	vcenters, ok := vcentersRaw.([]any)
+	if !ok {
+		t.Fatalf("VCenters = %T, want []any", vcentersRaw)
+	}
+	if len(vcenters) != 1 {
+		t.Fatalf("len(VCenters) = %d, want 1", len(vcenters))
+	}
+	entry, ok := vcenters[0].(map[string]any)
+	if !ok {
+		t.Fatalf("VCenters[0] = %T, want map[string]any", vcenters[0])
+	}
+	assertMapKeys(t, entry, "vCenter", "username", "password")
 }
 
 func TestSaveToSecretAndGet(t *testing.T) {
@@ -116,15 +259,18 @@ func TestSaveToSecretAndGet(t *testing.T) {
 	client := fakekubeclient.NewClientset()
 	mgr := NewMetadataManager(client)
 
-	md := &Metadata{
-		ClusterName:       "test-cluster",
-		InfraID:           "test-infra",
-		VCenter:           "vc.example.com",
-		Username:          "admin",
-		Password:          "secret",
-		TerraformPlatform: "vsphere",
-		VCenters: []VCenters{
-			{Server: "vc.example.com", Port: 443, Username: "admin", Password: "secret"},
+	md := &ClusterMetadata{
+		ClusterName: "test-cluster",
+		ClusterID:   "test-uid",
+		InfraID:     "test-infra",
+		VSphere: &VSphereMetadata{
+			VCenter:           "vc.example.com",
+			Username:          "admin",
+			Password:          "secret",
+			TerraformPlatform: "vsphere",
+			VCenters: []VCenter{
+				{VCenter: "vc.example.com", Username: "admin", Password: "secret"},
+			},
 		},
 	}
 
@@ -138,8 +284,11 @@ func TestSaveToSecretAndGet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get Secret: %v", err)
 	}
-	if secret.Labels["migration.openshift.io/metadata"] != "true" {
+	if secret.Labels[metadataSecretLabelKey] != metadataSecretLabelValue {
 		t.Error("Secret missing metadata label")
+	}
+	if len(secret.OwnerReferences) != 0 {
+		t.Errorf("Secret.OwnerReferences = %#v, want empty", secret.OwnerReferences)
 	}
 
 	// Get metadata back
@@ -148,18 +297,33 @@ func TestSaveToSecretAndGet(t *testing.T) {
 		t.Fatalf("GetMetadataFromSecret: %v", err)
 	}
 
-	var roundTripped Metadata
+	var roundTripped ClusterMetadata
 	if err := json.Unmarshal(data, &roundTripped); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 	if roundTripped.InfraID != md.InfraID {
 		t.Errorf("roundTripped.InfraID = %q, want %q", roundTripped.InfraID, md.InfraID)
 	}
-	if roundTripped.VCenter != md.VCenter {
-		t.Errorf("roundTripped.VCenter = %q, want %q", roundTripped.VCenter, md.VCenter)
+	if roundTripped.VSphere == nil {
+		t.Fatal("roundTripped.VSphere is nil")
+	}
+	if roundTripped.VSphere.VCenter != md.VSphere.VCenter {
+		t.Errorf("roundTripped.VSphere.VCenter = %q, want %q", roundTripped.VSphere.VCenter, md.VSphere.VCenter)
 	}
 
 	// Update existing
+	secret.Labels = map[string]string{}
+	secret.OwnerReferences = []metav1.OwnerReference{
+		{
+			APIVersion: "migration.openshift.io/v1alpha1",
+			Kind:       "VmwareCloudFoundationMigration",
+			Name:       "test-migration",
+			UID:        types.UID("owner-uid"),
+		},
+	}
+	if _, err := client.CoreV1().Secrets("test-ns").Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("Update Secret labels: %v", err)
+	}
 	md.InfraID = "updated-infra"
 	if err := mgr.SaveToSecret(ctx, md, "test-ns", "test-metadata"); err != nil {
 		t.Fatalf("SaveToSecret (update): %v", err)
@@ -173,6 +337,16 @@ func TestSaveToSecretAndGet(t *testing.T) {
 	}
 	if roundTripped.InfraID != "updated-infra" {
 		t.Errorf("after update InfraID = %q, want %q", roundTripped.InfraID, "updated-infra")
+	}
+	secret, err = client.CoreV1().Secrets("test-ns").Get(ctx, "test-metadata", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Get Secret after update: %v", err)
+	}
+	if secret.Labels[metadataSecretLabelKey] != metadataSecretLabelValue {
+		t.Error("Secret missing metadata label after update")
+	}
+	if len(secret.OwnerReferences) != 0 {
+		t.Errorf("Secret.OwnerReferences after update = %#v, want empty", secret.OwnerReferences)
 	}
 }
 
@@ -229,5 +403,24 @@ func TestParseCredentials(t *testing.T) {
 				t.Errorf("parseCredentials(%q) = (%q, %q), want (%q, %q)", tt.input, u, p, tt.wantUser, tt.wantPass)
 			}
 		})
+	}
+}
+
+func assertMapKeys(t *testing.T, got map[string]any, wantKeys ...string) {
+	t.Helper()
+
+	want := make(map[string]struct{}, len(wantKeys))
+	for _, key := range wantKeys {
+		want[key] = struct{}{}
+	}
+
+	if len(got) != len(wantKeys) {
+		t.Fatalf("map has %d keys, want %d: %#v", len(got), len(wantKeys), got)
+	}
+
+	for key := range got {
+		if _, ok := want[key]; !ok {
+			t.Fatalf("unexpected key %q in map %#v", key, got)
+		}
 	}
 }
