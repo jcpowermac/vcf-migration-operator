@@ -32,10 +32,11 @@ func NewMachineConfigPoolManager(client machineconfigclient.Interface) *MachineC
 }
 
 // CheckPoolsConverged reports whether every MachineConfigPool has fully
-// converged on its current configuration: the Updated condition is True, no
-// node is degraded, and updatedMachineCount equals machineCount. Convergence
-// is the signal that node configuration rollouts (including control plane
-// revision rotations) have finished.
+// converged on its current configuration: the Updated condition is True, the
+// pool is not degraded (aggregate Degraded or NodeDegraded condition), and
+// updatedMachineCount equals machineCount. Convergence is the signal that
+// node configuration rollouts (including control plane revision rotations)
+// have finished.
 func (m *MachineConfigPoolManager) CheckPoolsConverged(ctx context.Context) (bool, PoolConvergenceSummary, error) {
 	log := klog.FromContext(ctx)
 
@@ -48,7 +49,13 @@ func (m *MachineConfigPoolManager) CheckPoolsConverged(ctx context.Context) (boo
 	for i := range pools.Items {
 		pool := &pools.Items[i]
 
-		if isPoolConditionTrue(pool, machineconfigurationv1.MachineConfigPoolNodeDegraded) {
+		// The aggregate Degraded condition is True when any node fails to
+		// apply its configuration (NodeDegraded) or when render or image
+		// build degradation is reported. NodeDegraded is checked separately
+		// so an inconsistent pool that lacks the aggregate condition is
+		// still rejected.
+		if isPoolConditionTrue(pool, machineconfigurationv1.MachineConfigPoolDegraded) ||
+			isPoolConditionTrue(pool, machineconfigurationv1.MachineConfigPoolNodeDegraded) {
 			summary.DegradedPools = append(summary.DegradedPools, pool.Name)
 			continue
 		}

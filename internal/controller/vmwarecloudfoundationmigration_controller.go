@@ -74,17 +74,25 @@ type VmwareCloudFoundationMigrationReconciler struct {
 	lastStallEventKey  string
 	lastStallEventTime time.Time
 
-	// readyStabilityCount tracks consecutive ensureReady reconciles in which
-	// all cluster operators were stable and all MachineConfigPools converged.
-	// It must reach readyStabilityThreshold before Ready=True is committed;
-	// any failing check resets it to zero. In-memory by design: a leader
-	// restart conservatively restarts the stability window.
+	// readyStabilityCount tracks consecutive counted stable ensureReady
+	// observations in which all cluster operators were stable and all
+	// MachineConfigPools converged. It must reach readyStabilityThreshold
+	// before Ready=True is committed; any failing check or long gap resets
+	// it to zero. In-memory by design: a leader restart conservatively
+	// restarts the stability window.
 	readyStabilityCount int
 	// lastReadyStabilityCheck is the wall-clock time of the most recent
 	// ensureReady check. If the next check runs more than
 	// readyStabilityCheckGap later, reconciles in between never reached the
 	// readiness gate, so readyStabilityCount is reset.
 	lastReadyStabilityCheck time.Time
+	// lastCountedStabilityCheck is the wall-clock time of the most recent
+	// stable observation counted toward readyStabilityCount. Stable
+	// observations closer together than readyStabilityObservationInterval
+	// are not counted; event-driven reconciles can run far faster than the
+	// 30s requeue cadence, and counting each one would reach the threshold
+	// within seconds.
+	lastCountedStabilityCheck time.Time
 }
 
 // conditionOrder defines the sequence in which conditions are evaluated.
@@ -115,6 +123,11 @@ const readyStabilityThreshold = 6
 // observation is too stale to count toward sustained stability, so the counter
 // restarts from zero. It is 3x the 30s requeue cadence.
 const readyStabilityCheckGap = 90 * time.Second
+
+// readyStabilityObservationInterval is the minimum elapsed time between two
+// stable observations that are both counted toward sustained stability. It
+// matches the 30s requeue cadence of the readiness gate.
+const readyStabilityObservationInterval = 30 * time.Second
 
 const (
 	maxConditionMessageBytes  = 32768
@@ -964,7 +977,8 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureSourceCleaned(ctx conte
 // ensureReady verifies all operators are healthy, every MachineConfigPool has
 // converged on its current configuration, and only target vCenters remain in
 // the Infrastructure resource. Ready=True is committed only after the full
-// check has passed readyStabilityThreshold consecutive reconciles.
+// check has passed readyStabilityThreshold stable observations spaced at
+// least readyStabilityObservationInterval apart.
 func (r *VmwareCloudFoundationMigrationReconciler) ensureReady(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) (ctrl.Result, error) {
 	log := klog.FromContext(ctx)
 	condType := migrationv1alpha1.ConditionReady
@@ -978,7 +992,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureReady(ctx context.Conte
 			"lastCheck", r.lastReadyStabilityCheck,
 			"gap", readyStabilityCheckGap,
 		)
-		r.readyStabilityCount = 0
+		r.resetReadyStability()
 	}
 	r.lastReadyStabilityCheck = time.Now()
 
@@ -988,6 +1002,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureReady(ctx context.Conte
 	opMgr := openshift.NewOperatorManager(r.ConfigClient)
 	stable, summary, err := opMgr.CheckAllOperatorsStable(ctx)
 	if err != nil {
+		// A failed check is not a stable observation; restart the window so
+		// the next success cannot immediately complete it.
+		r.resetReadyStability()
 		return ctrl.Result{}, fmt.Errorf("checking operator stability: %w", err)
 	}
 
@@ -998,6 +1015,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureReady(ctx context.Conte
 	poolMgr := openshift.NewMachineConfigPoolManager(r.MachineConfigClient)
 	converged, poolSummary, err := poolMgr.CheckPoolsConverged(ctx)
 	if err != nil {
+		// A failed check is not a stable observation; restart the window so
+		// the next success cannot immediately complete it.
+		r.resetReadyStability()
 		return ctrl.Result{}, fmt.Errorf("checking machine config pool convergence: %w", err)
 	}
 
@@ -1005,6 +1025,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureReady(ctx context.Conte
 	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient)
 	infra, err := infraMgr.Get(ctx)
 	if err != nil {
+		// A failed check is not a stable observation; restart the window so
+		// the next success cannot immediately complete it.
+		r.resetReadyStability()
 		return ctrl.Result{}, fmt.Errorf("getting infrastructure for readiness check: %w", err)
 	}
 
@@ -1048,7 +1071,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureReady(ctx context.Conte
 
 	if len(blockers) > 0 {
 		// Any failing check restarts the stability window.
-		r.readyStabilityCount = 0
+		r.resetReadyStability()
 		msg := fmt.Sprintf("Migration not ready: %s", strings.Join(blockers, "; "))
 		log.V(1).Info("cluster not yet stable",
 			"unavailable", summary.UnavailableOperators,
@@ -1065,7 +1088,18 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureReady(ctx context.Conte
 	// Everything is stable right now. Require sustained stability before
 	// committing Ready=True so a config revision triggered by the
 	// migration's own final changes cannot start right after this check.
-	r.readyStabilityCount++
+	// Only observations spaced at least
+	// readyStabilityObservationInterval apart count, so event-driven
+	// reconciles cannot satisfy the threshold within seconds.
+	if r.lastCountedStabilityCheck.IsZero() || time.Since(r.lastCountedStabilityCheck) >= readyStabilityObservationInterval {
+		r.lastCountedStabilityCheck = time.Now()
+		r.readyStabilityCount++
+	} else {
+		log.V(1).Info("stable observation not counted yet",
+			"lastCounted", r.lastCountedStabilityCheck,
+			"interval", readyStabilityObservationInterval,
+		)
+	}
 	if r.readyStabilityCount < readyStabilityThreshold {
 		msg := fmt.Sprintf("Waiting for sustained cluster stability (%d/%d)", r.readyStabilityCount, readyStabilityThreshold)
 		log.V(1).Info("cluster stable, waiting for sustained stability",
@@ -1082,6 +1116,14 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureReady(ctx context.Conte
 	r.setCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Migration complete, all operators healthy and node pools converged")
 	r.Recorder.Event(migration, "Normal", "MigrationComplete", "Migration completed successfully")
 	return ctrl.Result{}, nil
+}
+
+// resetReadyStability restarts the sustained-stability window: the counter
+// returns to zero and the next stable observation is eligible to count
+// immediately.
+func (r *VmwareCloudFoundationMigrationReconciler) resetReadyStability() {
+	r.readyStabilityCount = 0
+	r.lastCountedStabilityCheck = time.Time{}
 }
 
 // setCondition is a convenience wrapper around apimeta.SetStatusCondition.

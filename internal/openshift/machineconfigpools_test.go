@@ -75,6 +75,24 @@ func TestCheckPoolsConverged(t *testing.T) {
 			wantDegraded:  []string{"master"},
 		},
 		{
+			name: "aggregate degraded pool with matching update status and counts",
+			pools: []runtime.Object{
+				&machineconfigurationv1.MachineConfigPool{
+					ObjectMeta: metav1.ObjectMeta{Name: "master"},
+					Status: machineconfigurationv1.MachineConfigPoolStatus{
+						MachineCount:        3,
+						UpdatedMachineCount: 3,
+						Conditions: []machineconfigurationv1.MachineConfigPoolCondition{
+							{Type: machineconfigurationv1.MachineConfigPoolUpdated, Status: corev1.ConditionTrue},
+							{Type: machineconfigurationv1.MachineConfigPoolDegraded, Status: corev1.ConditionTrue},
+						},
+					},
+				},
+			},
+			wantConverged: false,
+			wantDegraded:  []string{"master"},
+		},
+		{
 			name:          "no pools reported converged",
 			pools:         nil,
 			wantConverged: true,
