@@ -44,6 +44,7 @@ import (
 	configv1 "github.com/openshift/api/config/v1"
 	configclient "github.com/openshift/client-go/config/clientset/versioned"
 	machineclient "github.com/openshift/client-go/machine/clientset/versioned"
+	machineconfigclient "github.com/openshift/client-go/machineconfiguration/clientset/versioned"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
 	"github.com/openshift/vcf-migration-operator/internal/metadata"
@@ -60,8 +61,10 @@ type VmwareCloudFoundationMigrationReconciler struct {
 	KubeClient    kubernetes.Interface
 	ConfigClient  configclient.Interface
 	MachineClient machineclient.Interface
-	DynamicClient dynamic.Interface
-	Recorder      record.EventRecorder
+	// MachineConfigClient accesses MachineConfigPool resources.
+	MachineConfigClient machineconfigclient.Interface
+	DynamicClient       dynamic.Interface
+	Recorder            record.EventRecorder
 
 	// lastStallEventKey identifies the set of old worker machines described by the
 	// most recent OldWorkersStalled Warning event; lastStallEventTime is when that
@@ -70,6 +73,13 @@ type VmwareCloudFoundationMigrationReconciler struct {
 	// restart may re-emit one event, which is harmless.
 	lastStallEventKey  string
 	lastStallEventTime time.Time
+
+	// readyStabilityCount tracks consecutive ensureReady reconciles in which
+	// all cluster operators were stable and all MachineConfigPools converged.
+	// It must reach readyStabilityThreshold before Ready=True is committed;
+	// any failing check resets it to zero. In-memory by design: a leader
+	// restart conservatively restarts the stability window.
+	readyStabilityCount int
 }
 
 // conditionOrder defines the sequence in which conditions are evaluated.
@@ -86,6 +96,14 @@ var conditionOrder = []string{
 const reasonWaitingForVSpherePods = "WaitingForVSpherePods"
 
 const stallEventInterval = 5 * time.Minute
+
+// readyStabilityThreshold is the number of consecutive fully stable
+// observations required before Ready=True is committed. A single stable
+// snapshot can fall in the gap between a finished machine-config revision
+// and the start of the next one, which the migration's own final mutations
+// can trigger minutes later. Requiring ~3 minutes of sustained stability
+// across 30s requeues makes that gap impossible to pass through.
+const readyStabilityThreshold = 6
 
 const (
 	maxConditionMessageBytes  = 32768
@@ -107,6 +125,7 @@ const (
 // +kubebuilder:rbac:groups=machine.openshift.io,resources=machinesets;machines,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=machine.openshift.io,resources=controlplanemachinesets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=machine.openshift.io,resources=machinehealthchecks,verbs=get;list;watch
+// +kubebuilder:rbac:groups=machineconfiguration.openshift.io,resources=machineconfigpools,verbs=get;list;watch
 // +kubebuilder:rbac:groups=autoscaling.openshift.io,resources=clusterautoscalers;machineautoscalers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=operator.openshift.io,resources=clustercsidrivers;storages,verbs=get
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
@@ -931,8 +950,10 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureSourceCleaned(ctx conte
 	return ctrl.Result{}, nil
 }
 
-// ensureReady verifies all operators are healthy and only target vCenters remain
-// in the Infrastructure resource.
+// ensureReady verifies all operators are healthy, every MachineConfigPool has
+// converged on its current configuration, and only target vCenters remain in
+// the Infrastructure resource. Ready=True is committed only after the full
+// check has passed readyStabilityThreshold consecutive reconciles.
 func (r *VmwareCloudFoundationMigrationReconciler) ensureReady(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) (ctrl.Result, error) {
 	log := klog.FromContext(ctx)
 	condType := migrationv1alpha1.ConditionReady
@@ -945,25 +966,15 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureReady(ctx context.Conte
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("checking operator stability: %w", err)
 	}
-	if !stable {
-		blockers := make([]string, 0, 3)
-		if len(summary.UnavailableOperators) > 0 {
-			blockers = append(blockers, fmt.Sprintf("unavailable=%s", strings.Join(summary.UnavailableOperators, ", ")))
-		}
-		if len(summary.ProgressingOperators) > 0 {
-			blockers = append(blockers, fmt.Sprintf("progressing=%s", strings.Join(summary.ProgressingOperators, ", ")))
-		}
-		if len(summary.DegradedOperators) > 0 {
-			blockers = append(blockers, fmt.Sprintf("degraded=%s", strings.Join(summary.DegradedOperators, ", ")))
-		}
-		msg := fmt.Sprintf("Operators not stable: %s", strings.Join(blockers, "; "))
-		log.V(1).Info("operators not yet stable",
-			"unavailable", summary.UnavailableOperators,
-			"progressing", summary.ProgressingOperators,
-			"degraded", summary.DegradedOperators,
-		)
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, msg)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+
+	// Check that every MachineConfigPool has converged on its current
+	// configuration. This catches node config rollouts (e.g. a new etcd
+	// revision triggered by the migration's own final changes) that have
+	// started but not finished.
+	poolMgr := openshift.NewMachineConfigPoolManager(r.MachineConfigClient)
+	converged, poolSummary, err := poolMgr.CheckPoolsConverged(ctx)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("checking machine config pool convergence: %w", err)
 	}
 
 	// Verify only target vCenters remain in Infrastructure.
@@ -973,27 +984,78 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureReady(ctx context.Conte
 		return ctrl.Result{}, fmt.Errorf("getting infrastructure for readiness check: %w", err)
 	}
 
+	var nonTargetVC string
 	if infra.Spec.PlatformSpec.VSphere != nil {
 		targetServers := make(map[string]bool)
 		for i := range migration.Spec.FailureDomains {
 			targetServers[migration.Spec.FailureDomains[i].Server] = true
 		}
-
 		for _, vc := range infra.Spec.PlatformSpec.VSphere.VCenters {
 			if !targetServers[vc.Server] {
-				msg := fmt.Sprintf("Non-target vCenter %q still present in Infrastructure", vc.Server)
-				log.V(1).Info("unexpected vCenter in infrastructure", "server", vc.Server)
-				r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, msg)
-				return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+				nonTargetVC = vc.Server
+				break
 			}
 		}
 	}
 
-	// Set completion time.
+	blockers := make([]string, 0, 4)
+	if !stable {
+		if len(summary.UnavailableOperators) > 0 {
+			blockers = append(blockers, fmt.Sprintf("unavailable=%s", strings.Join(summary.UnavailableOperators, ", ")))
+		}
+		if len(summary.ProgressingOperators) > 0 {
+			blockers = append(blockers, fmt.Sprintf("progressing=%s", strings.Join(summary.ProgressingOperators, ", ")))
+		}
+		if len(summary.DegradedOperators) > 0 {
+			blockers = append(blockers, fmt.Sprintf("degraded=%s", strings.Join(summary.DegradedOperators, ", ")))
+		}
+	}
+	if !converged {
+		if len(poolSummary.NotUpdatedPools) > 0 {
+			blockers = append(blockers, fmt.Sprintf("pools-not-updated=%s", strings.Join(poolSummary.NotUpdatedPools, ", ")))
+		}
+		if len(poolSummary.DegradedPools) > 0 {
+			blockers = append(blockers, fmt.Sprintf("pools-degraded=%s", strings.Join(poolSummary.DegradedPools, ", ")))
+		}
+	}
+	if nonTargetVC != "" {
+		blockers = append(blockers, fmt.Sprintf("non-target vCenter %q still present in Infrastructure", nonTargetVC))
+	}
+
+	if len(blockers) > 0 {
+		// Any failing check restarts the stability window.
+		r.readyStabilityCount = 0
+		msg := fmt.Sprintf("Migration not ready: %s", strings.Join(blockers, "; "))
+		log.V(1).Info("cluster not yet stable",
+			"unavailable", summary.UnavailableOperators,
+			"progressing", summary.ProgressingOperators,
+			"degraded", summary.DegradedOperators,
+			"poolsNotUpdated", poolSummary.NotUpdatedPools,
+			"poolsDegraded", poolSummary.DegradedPools,
+			"nonTargetVCenter", nonTargetVC,
+		)
+		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, msg)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// Everything is stable right now. Require sustained stability before
+	// committing Ready=True so a config revision triggered by the
+	// migration's own final changes cannot start right after this check.
+	r.readyStabilityCount++
+	if r.readyStabilityCount < readyStabilityThreshold {
+		msg := fmt.Sprintf("Waiting for sustained cluster stability (%d/%d)", r.readyStabilityCount, readyStabilityThreshold)
+		log.V(1).Info("cluster stable, waiting for sustained stability",
+			"count", r.readyStabilityCount,
+			"threshold", readyStabilityThreshold,
+		)
+		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, msg)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
 	now := metav1.Now()
 	migration.Status.CompletionTime = &now
 
-	r.setCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Migration complete, all operators healthy")
+	r.setCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Migration complete, all operators healthy and node pools converged")
 	r.Recorder.Event(migration, "Normal", "MigrationComplete", "Migration completed successfully")
 	return ctrl.Result{}, nil
 }
