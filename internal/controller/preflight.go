@@ -125,31 +125,50 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 		vsphere.ClearSessions(vsphereCtx)
 	}()
 
+	if err := r.validatePreflightVSphere(ctx, vsphereCtx, migration); err != nil {
+		return "", err
+	}
+
+	message := "Preflight validation passed"
+	if storageWarning != "" {
+		message = fmt.Sprintf("%s; warning: %s", message, storageWarning)
+	}
+	return message, nil
+}
+
+// validatePreflightVSphere connects to the source and target vCenters and
+// verifies that the failure domain topology (datacenter, cluster, datastore,
+// networks, template) is reachable on each target. When spec.image is set,
+// it also performs a best-effort reachability check against the OVA URL.
+func (r *VmwareCloudFoundationMigrationReconciler) validatePreflightVSphere(ctx context.Context, vsphereCtx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) error {
+	log := klog.FromContext(ctx)
+	condType := migrationv1alpha1.ConditionInfrastructurePrepared
+
 	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient)
 	sourceVC, err := infraMgr.GetSourceVCenter(ctx)
 	if err != nil {
-		return "", fmt.Errorf("getting source vCenter: %w", err)
+		return fmt.Errorf("getting source vCenter: %w", err)
 	}
 
 	sm := openshift.NewSecretManager(r.KubeClient)
 	srcUser, srcPass, err := sm.GetCredentials(ctx, sourceVC.Server)
 	if err != nil {
-		return "", fmt.Errorf("getting source vCenter credentials: %w", err)
+		return fmt.Errorf("getting source vCenter credentials: %w", err)
 	}
 
 	if len(sourceVC.Datacenters) == 0 {
-		return "", fmt.Errorf("source vCenter has no datacenters configured")
+		return fmt.Errorf("source vCenter has no datacenters configured")
 	}
 	if len(sourceVC.Datacenters) > 1 {
-		return "", fmt.Errorf("source vCenter must have exactly one datacenter configured, found %d", len(sourceVC.Datacenters))
+		return fmt.Errorf("source vCenter must have exactly one datacenter configured, found %d", len(sourceVC.Datacenters))
 	}
 	srcDC := sourceVC.Datacenters[0]
 	srcSession, err := getVSphereSession(vsphereCtx, sourceVC.Server, srcDC, srcUser, srcPass)
 	if err != nil {
-		return "", fmt.Errorf("connecting to source vCenter %s: %w", sourceVC.Server, err)
+		return fmt.Errorf("connecting to source vCenter %s: %w", sourceVC.Server, err)
 	}
 	if _, err := srcSession.Finder.Datacenter(vsphereCtx, srcDC); err != nil {
-		return "", fmt.Errorf("source datacenter %q not accessible: %w", srcDC, err)
+		return fmt.Errorf("source datacenter %q not accessible: %w", srcDC, err)
 	}
 	log.V(1).Info("source vCenter connectivity validated", "server", sourceVC.Server)
 
@@ -163,14 +182,14 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 		if !ok {
 			username, password, err := getTargetCredentials(ctx, r.KubeClient, migration, fd.Server)
 			if err != nil {
-				return "", fmt.Errorf("getting credentials for target %s: %w", fd.Server, err)
+				return fmt.Errorf("getting credentials for target %s: %w", fd.Server, err)
 			}
 			creds = credentials{username: username, password: password}
 			targetCredentialsByServer[fd.Server] = creds
 		}
 
 		if err := validateFailureDomain(vsphereCtx, migration, fd, creds); err != nil {
-			return "", err
+			return err
 		}
 		log.V(1).Info("target failure domain validated", "name", fd.Name, "server", fd.Server)
 	}
@@ -204,11 +223,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 		}
 	}
 
-	message := "Preflight validation passed"
-	if storageWarning != "" {
-		message = fmt.Sprintf("%s; warning: %s", message, storageWarning)
-	}
-	return message, nil
+	return nil
 }
 
 func validateFailureDomain(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, fd *configv1.VSpherePlatformFailureDomainSpec, creds credentials) error {
@@ -352,7 +367,7 @@ func checkOVAURLReachable(ctx context.Context, ovaURL string) error {
 	if err != nil {
 		return fmt.Errorf("OVA URL %s unreachable: %w. For air-gapped environments, set spec.image.ovaUrl to an internal HTTP(S) mirror or omit spec.image and set topology.template manually", sanitizeOVAURL(ovaURL), err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("OVA URL %s returned HTTP %d: %s", sanitizeOVAURL(ovaURL), resp.StatusCode, resp.Status)

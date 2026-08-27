@@ -155,7 +155,9 @@ func TestDownloadOVA(t *testing.T) {
 
 	t.Run("downloads and verifies SHA256", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte(content))
+			if _, err := w.Write([]byte(content)); err != nil {
+				return
+			}
 		}))
 		defer server.Close()
 
@@ -178,7 +180,9 @@ func TestDownloadOVA(t *testing.T) {
 		calls := 0
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			calls++
-			w.Write([]byte(content))
+			if _, err := w.Write([]byte(content)); err != nil {
+				return
+			}
 		}))
 		defer server.Close()
 
@@ -199,7 +203,9 @@ func TestDownloadOVA(t *testing.T) {
 
 	t.Run("rejects SHA256 mismatch", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte("wrong-content"))
+			if _, err := w.Write([]byte("wrong-content")); err != nil {
+				return
+			}
 		}))
 		defer server.Close()
 
@@ -231,7 +237,9 @@ func TestDownloadOVA(t *testing.T) {
 
 	t.Run("downloads without hash verification", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte(content))
+			if _, err := w.Write([]byte(content)); err != nil {
+				return
+			}
 		}))
 		defer server.Close()
 
@@ -247,7 +255,9 @@ func TestDownloadOVA(t *testing.T) {
 
 	t.Run("strips query params from filename", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte(content))
+			if _, err := w.Write([]byte(content)); err != nil {
+				return
+			}
 		}))
 		defer server.Close()
 
@@ -256,8 +266,39 @@ func TestDownloadOVA(t *testing.T) {
 		if err != nil {
 			t.Fatalf("DownloadOVAToDir: %v", err)
 		}
-		if filepath.Base(path) != "rhcos.ova" {
-			t.Fatalf("filename = %q, want %q", filepath.Base(path), "rhcos.ova")
+		// No digest is provided, so the filename is the basename (query params
+		// stripped) plus a short source-URL fingerprint.
+		base := filepath.Base(path)
+		if !strings.HasPrefix(base, "rhcos.ova-") || strings.Contains(base, "?") {
+			t.Fatalf("filename = %q, want basename prefixed \"rhcos.ova-\" without query params", base)
+		}
+	})
+
+	t.Run("different URLs without digest do not collide in cache", func(t *testing.T) {
+		serverA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, err := w.Write([]byte(content)); err != nil {
+				return
+			}
+		}))
+		defer serverA.Close()
+		serverB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, err := w.Write([]byte("other")); err != nil {
+				return
+			}
+		}))
+		defer serverB.Close()
+
+		dir := t.TempDir()
+		pathA, err := DownloadOVAToDir(context.Background(), serverA.URL+"/same-name.ova", "", dir)
+		if err != nil {
+			t.Fatalf("DownloadOVAToDir (A): %v", err)
+		}
+		pathB, err := DownloadOVAToDir(context.Background(), serverB.URL+"/same-name.ova", "", dir)
+		if err != nil {
+			t.Fatalf("DownloadOVAToDir (B): %v", err)
+		}
+		if filepath.Base(pathA) == filepath.Base(pathB) {
+			t.Fatalf("both URLs mapped to the same cache file %q", pathA)
 		}
 	})
 }
@@ -602,10 +643,14 @@ func createTestOVAWithFiles(t *testing.T, files map[string]string) string {
 	if err != nil {
 		t.Fatalf("creating OVA: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	tw := tar.NewWriter(f)
-	defer tw.Close()
+	defer func() {
+		if err := tw.Close(); err != nil {
+			t.Errorf("closing tar writer: %v", err)
+		}
+	}()
 
 	for name, content := range files {
 		header := &tar.Header{
@@ -636,10 +681,14 @@ func createTestOVA(t *testing.T, filename, content string) string {
 	if err != nil {
 		t.Fatalf("creating OVA file: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	tw := tar.NewWriter(f)
-	defer tw.Close()
+	defer func() {
+		if err := tw.Close(); err != nil {
+			t.Errorf("closing tar writer: %v", err)
+		}
+	}()
 
 	header := &tar.Header{
 		Name: filename,

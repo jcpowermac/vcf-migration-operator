@@ -644,9 +644,37 @@ func TestEnsureClusterTag(t *testing.T) {
 			if !strings.Contains(err.Error(), "missing required associable types") {
 				t.Fatalf("EnsureClusterTag error = %q, want missing associable types detail", err.Error())
 			}
-			for _, missingType := range []string{virtualMachineType, resourcePoolType, storagePodType} {
+			for _, missingType := range []string{"urn:vim25:VirtualMachine", "urn:vim25:ResourcePool", "urn:vim25:StoragePod"} {
 				if !strings.Contains(err.Error(), missingType) {
 					t.Fatalf("EnsureClusterTag error = %q, want %q in missing types", err.Error(), missingType)
+				}
+			}
+		})
+	})
+
+	t.Run("creates category with urn-prefixed associable types", func(t *testing.T) {
+		simulator.Test(func(ctx context.Context, c *vim25.Client) {
+			s := newTestSession(ctx, t, c)
+
+			tagID, err := EnsureClusterTag(ctx, s, "urn-infra")
+			if err != nil {
+				t.Fatalf("EnsureClusterTag: %v", err)
+			}
+			if tagID == "" {
+				t.Fatal("EnsureClusterTag returned empty tag ID")
+			}
+
+			cat, err := s.TagManager.GetCategory(ctx, "openshift-urn-infra")
+			if err != nil {
+				t.Fatalf("GetCategory: %v", err)
+			}
+			got := make(map[string]bool, len(cat.AssociableTypes))
+			for _, at := range cat.AssociableTypes {
+				got[normalizeAssociableType(at)] = true
+			}
+			for _, want := range clusterOwnershipAssociableTypes {
+				if !got[normalizeAssociableType(want)] {
+					t.Fatalf("category associable types %v missing %q", cat.AssociableTypes, want)
 				}
 			}
 		})

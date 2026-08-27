@@ -39,12 +39,6 @@ const (
 	datastoreType = "Datastore"
 	// folderType is the vSphere associable type name for folders.
 	folderType = "Folder"
-	// virtualMachineType is the vSphere associable type name for VMs.
-	virtualMachineType = "VirtualMachine"
-	// resourcePoolType is the vSphere associable type name for resource pools.
-	resourcePoolType = "ResourcePool"
-	// storagePodType is the vSphere associable type name for datastore clusters.
-	storagePodType = "StoragePod"
 
 	// clusterTagCategoryDescription is used for the per-cluster infra tag category,
 	// matching openshift-install behavior.
@@ -471,18 +465,10 @@ func EnsureClusterTag(ctx context.Context, s *Session, infraID string) (string, 
 
 	categoryName := fmt.Sprintf("openshift-%s", infraID)
 
-	// The cluster infra tag category uses a different set of associable types
-	// than the region/zone categories, matching the installer exactly.
-	clusterAssociableTypes := []string{
-		virtualMachineType,
-		resourcePoolType,
-		folderType,
-		datastoreType,
-		storagePodType,
-	}
-
-	// Get or create category.
-	categoryID, err := ensureTagCategoryWithTypes(ctx, s, categoryName, clusterTagCategoryDescription, "SINGLE", clusterAssociableTypes)
+	// Get or create category. The associable types match the installer's
+	// cluster tag category exactly, including the urn:vim25: prefix that
+	// vCenter 7.0 U1 and later require on category creation.
+	categoryID, err := ensureTagCategoryWithTypes(ctx, s, categoryName, clusterTagCategoryDescription, "SINGLE", clusterOwnershipAssociableTypes)
 	if err != nil {
 		return "", fmt.Errorf("ensuring cluster tag category %q: %w", categoryName, err)
 	}

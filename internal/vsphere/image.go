@@ -122,6 +122,13 @@ func DownloadOVAToDir(ctx context.Context, ovaURL, sha256Expected, cacheDir stri
 	if filename == "" || filename == "." || filename == "/" {
 		filename = "rhcos.ova"
 	}
+	if sha256Expected == "" {
+		// Without a digest a reused cache entry cannot be verified, so scope
+		// the cache key to the source URL to prevent importing an OVA that
+		// merely shares a basename with a different mirror.
+		urlSum := sha256.Sum256([]byte(ovaURL))
+		filename = fmt.Sprintf("%s-%x", filename, urlSum[:4])
+	}
 	localPath := filepath.Join(cacheDir, filename)
 
 	// File-level flock to prevent concurrent downloads.
@@ -130,7 +137,7 @@ func DownloadOVAToDir(ctx context.Context, ovaURL, sha256Expected, cacheDir stri
 	if err != nil {
 		return "", fmt.Errorf("creating lock file %s: %w", lockPath, err)
 	}
-	defer lockFile.Close()
+	defer func() { _ = lockFile.Close() }()
 
 	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
 		return "", fmt.Errorf("acquiring flock on %s: %w", lockPath, err)
@@ -141,9 +148,16 @@ func DownloadOVAToDir(ctx context.Context, ovaURL, sha256Expected, cacheDir stri
 
 	// Check if cached file already exists with correct hash.
 	if sha256Expected != "" {
-		if hash, err := hashFile(localPath); err == nil && hash == sha256Expected {
-			log.V(1).Info("OVA already cached with correct hash", "path", localPath)
-			return localPath, nil
+		if hash, err := hashFile(localPath); err == nil {
+			if hash == sha256Expected {
+				log.V(1).Info("OVA already cached with correct hash", "path", localPath)
+				return localPath, nil
+			}
+			// Remove the stale entry before downloading so the old file and
+			// the in-progress download cannot exceed the scratch volume limit.
+			if removeErr := os.Remove(localPath); removeErr != nil {
+				log.V(1).Info("removing stale cached OVA before download", "path", localPath, "error", removeErr)
+			}
 		}
 	} else if _, err := os.Stat(localPath); err == nil {
 		log.V(1).Info("OVA already cached (no hash verification)", "path", localPath)
@@ -162,7 +176,7 @@ func DownloadOVAToDir(ctx context.Context, ovaURL, sha256Expected, cacheDir stri
 	if err != nil {
 		return "", fmt.Errorf("downloading OVA from %s: %w", ovaURL, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("downloading OVA from %s: HTTP %d %s", ovaURL, resp.StatusCode, resp.Status)
@@ -175,8 +189,8 @@ func DownloadOVAToDir(ctx context.Context, ovaURL, sha256Expected, cacheDir stri
 	}
 	tmpPath := tmpFile.Name()
 	defer func() {
-		tmpFile.Close()
-		os.Remove(tmpPath) // Clean up on failure; no-op if already renamed.
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath) // Clean up on failure; no-op if already renamed.
 	}()
 
 	hasher := sha256.New()
@@ -421,7 +435,7 @@ func readOVFFromOVA(ovaPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("opening OVA %s: %w", ovaPath, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	tr := tar.NewReader(f)
 	for {
@@ -549,7 +563,7 @@ func createImportSpec(
 		return nil, fmt.Errorf("creating import spec: %w", err)
 	}
 
-	if cisp.Error != nil && len(cisp.Error) > 0 {
+	if len(cisp.Error) > 0 {
 		return nil, fmt.Errorf("import spec errors: %v", cisp.Error)
 	}
 
@@ -562,7 +576,7 @@ func upload(ctx context.Context, lease *nfc.Lease, info *nfc.LeaseInfo, ovaPath 
 	if err != nil {
 		return fmt.Errorf("opening OVA for upload: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	tr := tar.NewReader(f)
 
@@ -632,7 +646,7 @@ func hashFile(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
