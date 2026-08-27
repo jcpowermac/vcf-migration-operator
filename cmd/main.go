@@ -28,6 +28,7 @@ import (
 
 	configclient "github.com/openshift/client-go/config/clientset/versioned"
 	machineclient "github.com/openshift/client-go/machine/clientset/versioned"
+	machineconfigclient "github.com/openshift/client-go/machineconfiguration/clientset/versioned"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/dynamic"
@@ -226,6 +227,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	machineConfigClient, err := machineconfigclient.NewForConfig(restConfig)
+	if err != nil {
+		setupLog.Error(err, "unable to create machine config client")
+		os.Exit(1)
+	}
+
 	dynClient, err := dynamic.NewForConfig(restConfig)
 	if err != nil {
 		setupLog.Error(err, "unable to create dynamic client")
@@ -233,13 +240,14 @@ func main() {
 	}
 
 	if err := (&controller.VmwareCloudFoundationMigrationReconciler{
-		Client:        mgr.GetClient(),
-		Scheme:        mgr.GetScheme(),
-		KubeClient:    kubeClient,
-		ConfigClient:  cfgClient,
-		MachineClient: machClient,
-		DynamicClient: dynClient,
-		Recorder:      mgr.GetEventRecorderFor("vcf-migration-controller"),
+		Client:              mgr.GetClient(),
+		Scheme:              mgr.GetScheme(),
+		KubeClient:          kubeClient,
+		ConfigClient:        cfgClient,
+		MachineClient:       machClient,
+		MachineConfigClient: machineConfigClient,
+		DynamicClient:       dynClient,
+		Recorder:            mgr.GetEventRecorderFor("vcf-migration-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VmwareCloudFoundationMigration")
 		os.Exit(1)

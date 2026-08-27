@@ -181,6 +181,14 @@ spec:
           - list
           - watch
         - apiGroups:
+          - machineconfiguration.openshift.io
+          resources:
+          - machineconfigpools
+          verbs:
+          - get
+          - list
+          - watch
+        - apiGroups:
           - migration.openshift.io
           resources:
           - vmwarecloudfoundationmigrations
