@@ -183,7 +183,6 @@ spec:
                       - datacenter
                       - datastore
                       - networks
-                      - template
                       type: object
                     zone:
                       description: |-

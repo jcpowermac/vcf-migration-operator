@@ -5,15 +5,6 @@ resources:
 - bases/migration.openshift.io_vmwarecloudfoundationmigrations.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
-# JSON patch to require topology.template for each failure domain (avoids strategic merge
-# overwriting schema types and version served/storage).
-patches:
-- target:
-    group: apiextensions.k8s.io
-    version: v1
-    kind: CustomResourceDefinition
-    name: vmwarecloudfoundationmigrations.migration.openshift.io
-  path: patches/template_required.json
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix.
 # patches here are for enabling the conversion webhook for each CRD
 # +kubebuilder:scaffold:crdkustomizewebhookpatch
