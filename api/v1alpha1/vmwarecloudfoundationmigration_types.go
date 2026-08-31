@@ -33,6 +33,63 @@ const (
 	MigrationStatePaused MigrationState = "Paused"
 )
 
+// MigrationPhase represents the current phase of the migration workflow.
+type MigrationPhase string
+
+const (
+	// PhasePending indicates the migration is waiting to start.
+	PhasePending MigrationPhase = "Pending"
+	// PhaseInfrastructurePrepared indicates preflight checks and path selection are complete.
+	PhaseInfrastructurePrepared MigrationPhase = "InfrastructurePrepared"
+	// PhaseDestinationInitialized indicates target vCenter assets have been created.
+	PhaseDestinationInitialized MigrationPhase = "DestinationInitialized"
+	// PhaseMultiSiteConfigured indicates the cluster recognizes both vCenters.
+	PhaseMultiSiteConfigured MigrationPhase = "MultiSiteConfigured"
+	// PhaseWorkloadMigrated indicates compute has migrated to the target vCenter.
+	PhaseWorkloadMigrated MigrationPhase = "WorkloadMigrated"
+	// PhaseSourceCleaned indicates the source vCenter has been removed.
+	PhaseSourceCleaned MigrationPhase = "SourceCleaned"
+	// PhaseCompleted indicates the entire migration workflow completed successfully.
+	PhaseCompleted MigrationPhase = "Completed"
+	// PhaseFailed indicates a fatal error occurred during migration.
+	PhaseFailed MigrationPhase = "Failed"
+	// PhasePaused indicates the migration was paused by the user.
+	PhasePaused MigrationPhase = "Paused"
+)
+
+// MigrationProgress contains real-time counters and details of resource migration.
+type MigrationProgress struct {
+	// Workers tracks worker machine and node migration progress.
+	// +optional
+	Workers *WorkerMigrationProgress `json:"workers,omitempty"`
+
+	// ControlPlane tracks ControlPlaneMachineSet rollout progress.
+	// +optional
+	ControlPlane *ControlPlaneProgress `json:"controlPlane,omitempty"`
+}
+
+// WorkerMigrationProgress surfaces worker machine and node counts across source and target.
+type WorkerMigrationProgress struct {
+	// TargetMachinesTotal is the desired number of worker machines in target failure domains.
+	TargetMachinesTotal int32 `json:"targetMachinesTotal"`
+	// TargetMachinesReady is the number of target worker machines in Running phase with a NodeRef.
+	TargetMachinesReady int32 `json:"targetMachinesReady"`
+	// TargetNodesReady is the number of target worker nodes reporting NodeReady=True.
+	TargetNodesReady int32 `json:"targetNodesReady"`
+	// SourceMachinesRemaining is the number of source worker machines still existing.
+	SourceMachinesRemaining int32 `json:"sourceMachinesRemaining"`
+}
+
+// ControlPlaneProgress surfaces CPMS rollout counts.
+type ControlPlaneProgress struct {
+	// Replicas is the total desired control plane replicas.
+	Replicas int32 `json:"replicas"`
+	// UpdatedReplicas is the number of control plane replicas matching the target spec.
+	UpdatedReplicas int32 `json:"updatedReplicas"`
+	// ReadyReplicas is the number of control plane replicas running and ready.
+	ReadyReplicas int32 `json:"readyReplicas"`
+}
+
 // SingletonName is the only object name the operator will reconcile. Since a
 // single OpenShift cluster can only ever have one active vCenter migration,
 // this follows OpenShift's singleton resource pattern (e.g.
@@ -123,6 +180,14 @@ type ImageSpec struct {
 
 // VmwareCloudFoundationMigrationStatus defines the observed state of VmwareCloudFoundationMigration.
 type VmwareCloudFoundationMigrationStatus struct {
+	// Phase indicates the current stage of the migration workflow.
+	// +optional
+	Phase MigrationPhase `json:"phase,omitempty"`
+
+	// Progress surfaces real-time counts for worker and control-plane migration.
+	// +optional
+	Progress *MigrationProgress `json:"progress,omitempty"`
+
 	// conditions represent the current state of the migration.
 	// Known conditions are:
 	// - Accepted: admission gate; True is normal for the single reconciled instance (cluster),
@@ -144,6 +209,10 @@ type VmwareCloudFoundationMigrationStatus struct {
 	// startTime is when the migration started.
 	// +optional
 	StartTime *metav1.Time `json:"startTime,omitempty"`
+
+	// lastUpdateTime is when the migration status was last updated.
+	// +optional
+	LastUpdateTime *metav1.Time `json:"lastUpdateTime,omitempty"`
 
 	// completionTime is when the migration completed.
 	// +optional
@@ -254,6 +323,7 @@ const (
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:path=vmwarecloudfoundationmigrations,scope=Namespaced,shortName=vcfm,categories=migration
 // +kubebuilder:printcolumn:name="State",type=string,JSONPath=`.spec.state`
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
