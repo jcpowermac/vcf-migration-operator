@@ -100,6 +100,50 @@ func TestWorkerMachineSetName(t *testing.T) {
 	}
 }
 
+func TestConditionToPhase(t *testing.T) {
+	tests := []struct {
+		condition string
+		want      migrationv1alpha1.MigrationPhase
+	}{
+		{
+			condition: migrationv1alpha1.ConditionInfrastructurePrepared,
+			want:      migrationv1alpha1.PhaseInfrastructurePrepared,
+		},
+		{
+			condition: migrationv1alpha1.ConditionDestinationInitialized,
+			want:      migrationv1alpha1.PhaseDestinationInitialized,
+		},
+		{
+			condition: migrationv1alpha1.ConditionMultiSiteConfigured,
+			want:      migrationv1alpha1.PhaseMultiSiteConfigured,
+		},
+		{
+			condition: migrationv1alpha1.ConditionWorkloadMigrated,
+			want:      migrationv1alpha1.PhaseWorkloadMigrated,
+		},
+		{
+			condition: migrationv1alpha1.ConditionSourceCleaned,
+			want:      migrationv1alpha1.PhaseSourceCleaned,
+		},
+		{
+			condition: migrationv1alpha1.ConditionReady,
+			want:      migrationv1alpha1.PhaseSourceCleaned,
+		},
+		{
+			condition: "CustomCondition",
+			want:      migrationv1alpha1.MigrationPhase("CustomCondition"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.condition, func(t *testing.T) {
+			got := conditionToPhase(tt.condition)
+			if got != tt.want {
+				t.Errorf("conditionToPhase(%q) = %q, want %q", tt.condition, got, tt.want)
+			}
+		})
+	}
+}
+
 var _ = Describe("VmwareCloudFoundationMigration Controller", func() {
 	Context("When reconciling a resource", func() {
 		const resourceName = migrationv1alpha1.SingletonName
@@ -159,7 +203,7 @@ var _ = Describe("VmwareCloudFoundationMigration Controller", func() {
 			By("Cleanup the specific resource instance VmwareCloudFoundationMigration")
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 		})
-		It("should successfully reconcile the resource", func() {
+		It("should successfully reconcile the resource and set phase to Pending", func() {
 			By("Reconciling the created resource")
 			controllerReconciler := &VmwareCloudFoundationMigrationReconciler{
 				Client: k8sClient,
@@ -175,6 +219,30 @@ var _ = Describe("VmwareCloudFoundationMigration Controller", func() {
 			Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
 			Expect(apimeta.FindStatusCondition(resource.Status.Conditions, migrationv1alpha1.ConditionReady)).To(BeNil())
 			Expect(resource.Status.StartTime).To(BeNil())
+			Expect(resource.Status.Phase).To(Equal(migrationv1alpha1.PhasePending))
+			Expect(resource.Status.LastUpdateTime).NotTo(BeNil())
+		})
+
+		It("should set status phase to Paused when in Paused state", func() {
+			resource := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
+			resource.Spec.State = migrationv1alpha1.MigrationStatePaused
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
+
+			controllerReconciler := &VmwareCloudFoundationMigrationReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+			Expect(updated.Status.Phase).To(Equal(migrationv1alpha1.PhasePaused))
+			Expect(updated.Status.LastUpdateTime).NotTo(BeNil())
 		})
 	})
 
@@ -253,6 +321,8 @@ var _ = Describe("VmwareCloudFoundationMigration Controller", func() {
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(cond.Reason).To(Equal(migrationv1alpha1.ReasonUnsupportedName))
+			Expect(resource.Status.Phase).To(Equal(migrationv1alpha1.PhaseFailed))
+			Expect(resource.Status.LastUpdateTime).NotTo(BeNil())
 
 			// No workflow conditions should have been set since the resource was never processed.
 			Expect(apimeta.FindStatusCondition(resource.Status.Conditions, migrationv1alpha1.ConditionInfrastructurePrepared)).To(BeNil())
@@ -545,5 +615,83 @@ var _ = Describe("updateStatus", func() {
 		Expect(destCond).NotTo(BeNil())
 		Expect(destCond.Status).To(Equal(metav1.ConditionTrue), "a later stale failure must not overwrite a committed success")
 		Expect(destCond.Reason).To(Equal(migrationv1alpha1.ReasonCompleted))
+	})
+
+	It("persists Phase, Progress, and updates LastUpdateTime", func() {
+		resource := newStatusTestResource()
+		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+		reconciler := &VmwareCloudFoundationMigrationReconciler{
+			Client: k8sClient,
+			Scheme: k8sClient.Scheme(),
+		}
+
+		migration := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, migration)).To(Succeed())
+		base := *migration.Status.DeepCopy()
+
+		migration.Status.Phase = migrationv1alpha1.PhaseWorkloadMigrated
+		migration.Status.Progress = &migrationv1alpha1.MigrationProgress{
+			Workers: &migrationv1alpha1.WorkerMigrationProgress{
+				TargetMachinesTotal:     3,
+				TargetMachinesReady:     2,
+				TargetNodesReady:        2,
+				SourceMachinesRemaining: 1,
+			},
+			ControlPlane: &migrationv1alpha1.ControlPlaneProgress{
+				Replicas:        3,
+				UpdatedReplicas: 2,
+				ReadyReplicas:   2,
+			},
+		}
+
+		Expect(reconciler.updateStatus(ctx, migration, base)).To(Succeed())
+
+		final := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, final)).To(Succeed())
+
+		Expect(final.Status.Phase).To(Equal(migrationv1alpha1.PhaseWorkloadMigrated))
+		Expect(final.Status.LastUpdateTime).NotTo(BeNil())
+		Expect(final.Status.Progress).NotTo(BeNil())
+		Expect(final.Status.Progress.Workers).NotTo(BeNil())
+		Expect(final.Status.Progress.Workers.TargetMachinesTotal).To(Equal(int32(3)))
+		Expect(final.Status.Progress.Workers.TargetMachinesReady).To(Equal(int32(2)))
+		Expect(final.Status.Progress.Workers.TargetNodesReady).To(Equal(int32(2)))
+		Expect(final.Status.Progress.Workers.SourceMachinesRemaining).To(Equal(int32(1)))
+		Expect(final.Status.Progress.ControlPlane).NotTo(BeNil())
+		Expect(final.Status.Progress.ControlPlane.Replicas).To(Equal(int32(3)))
+		Expect(final.Status.Progress.ControlPlane.UpdatedReplicas).To(Equal(int32(2)))
+		Expect(final.Status.Progress.ControlPlane.ReadyReplicas).To(Equal(int32(2)))
+	})
+
+	It("persists CompletionTime and PhaseCompleted when migration is finished", func() {
+		resource := newStatusTestResource()
+		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+		reconciler := &VmwareCloudFoundationMigrationReconciler{
+			Client: k8sClient,
+			Scheme: k8sClient.Scheme(),
+		}
+
+		migration := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, migration)).To(Succeed())
+		base := *migration.Status.DeepCopy()
+
+		now := metav1.Now()
+		migration.Status.Phase = migrationv1alpha1.PhaseCompleted
+		migration.Status.CompletionTime = &now
+		reconciler.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Migration complete")
+
+		Expect(reconciler.updateStatus(ctx, migration, base)).To(Succeed())
+
+		final := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, final)).To(Succeed())
+
+		Expect(final.Status.Phase).To(Equal(migrationv1alpha1.PhaseCompleted))
+		Expect(final.Status.CompletionTime).NotTo(BeNil())
+		Expect(final.Status.LastUpdateTime).NotTo(BeNil())
+		readyCond := apimeta.FindStatusCondition(final.Status.Conditions, migrationv1alpha1.ConditionReady)
+		Expect(readyCond).NotTo(BeNil())
+		Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
 	})
 })
