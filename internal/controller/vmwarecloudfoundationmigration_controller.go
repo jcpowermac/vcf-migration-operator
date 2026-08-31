@@ -1610,13 +1610,17 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 			}
 			apimeta.SetStatusCondition(&latest.Status.Conditions, cond)
 		}
-		if migration.Status.Phase != "" && latest.Status.Phase != migration.Status.Phase {
-			latest.Status.Phase = migration.Status.Phase
-			hasChanges = true
+		if migration.Status.Phase != "" && (latest.Status.Phase == "" || migration.Status.Phase != baseStatus.Phase) {
+			if latest.Status.Phase != migration.Status.Phase {
+				latest.Status.Phase = migration.Status.Phase
+				hasChanges = true
+			}
 		}
-		if migration.Status.Progress != nil && !reflect.DeepEqual(latest.Status.Progress, migration.Status.Progress) {
-			latest.Status.Progress = migration.Status.Progress.DeepCopy()
-			hasChanges = true
+		if migration.Status.Progress != nil && (latest.Status.Progress == nil || !reflect.DeepEqual(baseStatus.Progress, migration.Status.Progress)) {
+			if !reflect.DeepEqual(latest.Status.Progress, migration.Status.Progress) {
+				latest.Status.Progress = migration.Status.Progress.DeepCopy()
+				hasChanges = true
+			}
 		}
 		if migration.Status.StartTime != nil && latest.Status.StartTime == nil {
 			latest.Status.StartTime = migration.Status.StartTime
@@ -1627,10 +1631,15 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 			hasChanges = true
 		}
 
-		if hasChanges || latest.Status.LastUpdateTime == nil {
-			now := metav1.Now()
-			latest.Status.LastUpdateTime = &now
+		if !hasChanges && latest.Status.LastUpdateTime != nil {
+			if latest.Name == migrationv1alpha1.SingletonName {
+				metrics.UpdateMigrationMetrics(&latest.Status)
+			}
+			return nil
 		}
+
+		now := metav1.Now()
+		latest.Status.LastUpdateTime = &now
 
 		if err := r.Status().Update(ctx, latest); err != nil {
 			return err
@@ -1681,38 +1690,68 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateWorkloadProgress(
 		Workers:      &migrationv1alpha1.WorkerMigrationProgress{},
 		ControlPlane: &migrationv1alpha1.ControlPlaneProgress{},
 	}
+	if migration.Status.Progress != nil {
+		progress = migration.Status.Progress.DeepCopy()
+		if progress.Workers == nil {
+			progress.Workers = &migrationv1alpha1.WorkerMigrationProgress{}
+		}
+		if progress.ControlPlane == nil {
+			progress.ControlPlane = &migrationv1alpha1.ControlPlaneProgress{}
+		}
+	}
 
+	var targetTotal, targetReady, targetNodesReady int32
+	var hasTargetErrors bool
 	for i := range migration.Spec.FailureDomains {
 		msName := workerMachineSetName(infraID, migration.Spec.FailureDomains[i].Name)
 		if ms, err := machineMgr.GetMachineSet(ctx, msName); err == nil && ms.Spec.Replicas != nil {
-			progress.Workers.TargetMachinesTotal += *ms.Spec.Replicas
+			targetTotal += *ms.Spec.Replicas
+		} else if err != nil {
+			log.V(2).Info("failed getting machineset for progress", "machineset", msName, "err", err)
 		}
 		_, ready, total, err := machineMgr.CheckMachinesReady(ctx, msName)
 		if err == nil {
-			progress.Workers.TargetMachinesReady += ready
-			if progress.Workers.TargetMachinesTotal == 0 {
-				progress.Workers.TargetMachinesTotal += total
+			targetReady += ready
+			if targetTotal == 0 {
+				targetTotal += total
 			}
 		} else {
+			hasTargetErrors = true
 			log.V(2).Info("failed checking machines ready for progress", "machineset", msName, "err", err)
 		}
 		_, nodeReady, _, err := machineMgr.CheckNodesReady(ctx, msName)
 		if err == nil {
-			progress.Workers.TargetNodesReady += nodeReady
+			targetNodesReady += nodeReady
 		} else {
+			hasTargetErrors = true
 			log.V(2).Info("failed checking nodes ready for progress", "machineset", msName, "err", err)
 		}
+	}
+	if !hasTargetErrors || progress.Workers.TargetMachinesTotal == 0 {
+		progress.Workers.TargetMachinesTotal = targetTotal
+		progress.Workers.TargetMachinesReady = targetReady
+		progress.Workers.TargetNodesReady = targetNodesReady
 	}
 
 	if sourceVCServer != "" {
 		sourceMSList, err := machineMgr.GetMachineSetsByVCenter(ctx, sourceVCServer)
 		if err == nil {
+			var remainingTotal int32
+			var hasSourceErrors bool
 			for _, ms := range sourceMSList {
 				_, remaining, err := machineMgr.CheckMachinesDeleted(ctx, ms.Name)
 				if err == nil {
-					progress.Workers.SourceMachinesRemaining += remaining
+					remainingTotal += remaining
+				} else {
+					hasSourceErrors = true
+					log.V(2).Info("failed checking machines deleted for progress", "machineset", ms.Name, "err", err)
 				}
 			}
+			if !hasSourceErrors {
+				progress.Workers.SourceMachinesRemaining = remainingTotal
+			}
+		} else {
+			log.V(2).Info("failed getting source machinesets for progress", "err", err)
 		}
 	}
 
