@@ -1,0 +1,8 @@
+apiVersion: olm.operatorframework.io/v1
+kind: ClusterExtension
+metadata:
+  name: vcf-migration-operator
+spec:
+  packageName: vcf-migration-operator
+  channel: dev-preview
+  installNamespace: openshift-vcf-migration

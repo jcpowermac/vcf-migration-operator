@@ -43,7 +43,7 @@ metadata:
         }
       ]
     capabilities: Basic Install
-    createdAt: "2026-08-12T12:41:49Z"
+    createdAt: "2026-08-31T15:31:43Z"
     features.operators.openshift.io/disconnected: "true"
     features.operators.openshift.io/fips-compliant: "false"
     features.operators.openshift.io/proxy-aware: "false"
@@ -348,6 +348,7 @@ spec:
   - email: ocp-splat-team@redhat.com
     name: SPLAT
   maturity: alpha
+  minKubeVersion: 1.30.0
   provider:
     name: Red Hat
   version: 0.0.1

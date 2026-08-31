@@ -33,31 +33,50 @@ This is distinct from `openshift-region` / `openshift-zone`. Topology tags descr
 ## Getting Started
 
 ### Prerequisites
-- go version v1.25.0+
-- podman
-- kubectl version v1.11.3+
-- Access to a Kubernetes v1.11.3+ cluster
+- OpenShift Container Platform 4.18+ or 5.0+ (or Kubernetes v1.30.0+)
+- `cluster-admin` privileges
+- OpenShift CLI (`oc`) or `kubectl`
+- Container tool (`podman` or `docker`)
+- Go v1.25.0+ (for local development)
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+### Installation via OLM v1 (Recommended)
+
+On OpenShift 4.18+ and 5.0+, the operator is installed via Operator Lifecycle Manager v1 (OLM v1) using `ClusterCatalog` and `ClusterExtension`:
+
+1. **Deploy the File-Based Catalog:**
+   ```bash
+   oc apply -f config/samples/olmv1/cluster_catalog.yaml
+   ```
+
+2. **Deploy the Operator Extension:**
+   ```bash
+   oc apply -f config/samples/olmv1/cluster_extension.yaml
+   ```
+
+3. **Verify Installation:**
+   ```bash
+   oc get clusterextension vcf-migration-operator
+   oc get pods -n openshift-vcf-migration
+   ```
+
+For detailed instructions, step-by-step walkthrough, and configuration examples, see [Installing VCF Migration Operator with OLM v1](docs/install.md).
+
+---
+
+## Local Development
+
+### Deploying Directly on Cluster (Non-OLM Dev Mode)
+
+**Build and push the operator image:**
 
 ```sh
 make operator-image operator-push IMG=<some-registry>/vcf-migration-operator:tag
 ```
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don't work.
-
-**Install the CRDs into the cluster:**
+**Install CRDs and Deploy Manager:**
 
 ```sh
 make install
-```
-
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
-
-```sh
 make deploy IMG=<some-registry>/vcf-migration-operator:tag
 ```
 
@@ -66,30 +85,19 @@ privileges or be logged in as admin.
 
 **Create instances of your solution**
 
-Apply the sample migration CRs from `config/samples/` (if present):
+Apply the sample migration CRs from `config/samples/`:
 
 ```sh
 kubectl apply -k config/samples/
 ```
 
->**NOTE**: Ensure that the samples has default values to test it out.
+### To Uninstall Local Dev Deployment
 
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
+**Delete instances and undeploy:**
 
 ```sh
 kubectl delete -k config/samples/
-```
-
-**Delete the APIs(CRDs) from the cluster:**
-
-```sh
 make uninstall
-```
-
-**UnDeploy the controller from the cluster:**
-
-```sh
 make undeploy
 ```
 

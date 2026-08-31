@@ -1,0 +1,8 @@
+apiVersion: olm.operatorframework.io/v1
+kind: ClusterCatalog
+metadata:
+  name: vcf-migration-operator-catalog
+spec:
+  sourceType: Image
+  image: registry.ci.openshift.org/origin/vcf-migration-operator-catalog:latest
+  priority: 0

@@ -56,6 +56,7 @@ spec:
   - email: ocp-splat-team@redhat.com
     name: SPLAT
   maturity: alpha
+  minKubeVersion: 1.30.0
   provider:
     name: Red Hat
   version: 0.0.0

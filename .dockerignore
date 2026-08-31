@@ -1,6 +1,3 @@
-# Ignore when building console-plugin image (context is repo root)
-console-plugin/web/node_modules
-console-plugin/web/dist
 .git
 bin
 *.test
