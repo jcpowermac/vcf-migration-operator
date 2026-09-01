@@ -162,9 +162,9 @@ func TestDownloadOVA(t *testing.T) {
 		defer server.Close()
 
 		dir := t.TempDir()
-		path, err := DownloadOVAToDir(context.Background(), server.URL+"/rhcos.ova", hash, dir)
+		path, err := downloadOVAToDir(context.Background(), server.URL+"/rhcos.ova", hash, dir)
 		if err != nil {
-			t.Fatalf("DownloadOVAToDir: %v", err)
+			t.Fatalf("downloadOVAToDir: %v", err)
 		}
 
 		data, err := os.ReadFile(path)
@@ -187,11 +187,11 @@ func TestDownloadOVA(t *testing.T) {
 		defer server.Close()
 
 		dir := t.TempDir()
-		_, err := DownloadOVAToDir(context.Background(), server.URL+"/rhcos.ova", hash, dir)
+		_, err := downloadOVAToDir(context.Background(), server.URL+"/rhcos.ova", hash, dir)
 		if err != nil {
 			t.Fatalf("first download: %v", err)
 		}
-		_, err = DownloadOVAToDir(context.Background(), server.URL+"/rhcos.ova", hash, dir)
+		_, err = downloadOVAToDir(context.Background(), server.URL+"/rhcos.ova", hash, dir)
 		if err != nil {
 			t.Fatalf("second download: %v", err)
 		}
@@ -210,7 +210,7 @@ func TestDownloadOVA(t *testing.T) {
 		defer server.Close()
 
 		dir := t.TempDir()
-		_, err := DownloadOVAToDir(context.Background(), server.URL+"/rhcos.ova", hash, dir)
+		_, err := downloadOVAToDir(context.Background(), server.URL+"/rhcos.ova", hash, dir)
 		if err == nil {
 			t.Fatal("expected SHA256 mismatch error")
 		}
@@ -226,7 +226,7 @@ func TestDownloadOVA(t *testing.T) {
 		defer server.Close()
 
 		dir := t.TempDir()
-		_, err := DownloadOVAToDir(context.Background(), server.URL+"/missing.ova", "", dir)
+		_, err := downloadOVAToDir(context.Background(), server.URL+"/missing.ova", "", dir)
 		if err == nil {
 			t.Fatal("expected HTTP error")
 		}
@@ -244,9 +244,9 @@ func TestDownloadOVA(t *testing.T) {
 		defer server.Close()
 
 		dir := t.TempDir()
-		path, err := DownloadOVAToDir(context.Background(), server.URL+"/rhcos.ova", "", dir)
+		path, err := downloadOVAToDir(context.Background(), server.URL+"/rhcos.ova", "", dir)
 		if err != nil {
-			t.Fatalf("DownloadOVAToDir (no hash): %v", err)
+			t.Fatalf("downloadOVAToDir (no hash): %v", err)
 		}
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("downloaded file not found: %v", err)
@@ -262,9 +262,9 @@ func TestDownloadOVA(t *testing.T) {
 		defer server.Close()
 
 		dir := t.TempDir()
-		path, err := DownloadOVAToDir(context.Background(), server.URL+"/rhcos.ova?sha256=abc", "", dir)
+		path, err := downloadOVAToDir(context.Background(), server.URL+"/rhcos.ova?sha256=abc", "", dir)
 		if err != nil {
-			t.Fatalf("DownloadOVAToDir: %v", err)
+			t.Fatalf("downloadOVAToDir: %v", err)
 		}
 		// No digest is provided, so the filename is the basename (query params
 		// stripped) plus a short source-URL fingerprint.
@@ -289,13 +289,13 @@ func TestDownloadOVA(t *testing.T) {
 		defer serverB.Close()
 
 		dir := t.TempDir()
-		pathA, err := DownloadOVAToDir(context.Background(), serverA.URL+"/same-name.ova", "", dir)
+		pathA, err := downloadOVAToDir(context.Background(), serverA.URL+"/same-name.ova", "", dir)
 		if err != nil {
-			t.Fatalf("DownloadOVAToDir (A): %v", err)
+			t.Fatalf("downloadOVAToDir (A): %v", err)
 		}
-		pathB, err := DownloadOVAToDir(context.Background(), serverB.URL+"/same-name.ova", "", dir)
+		pathB, err := downloadOVAToDir(context.Background(), serverB.URL+"/same-name.ova", "", dir)
 		if err != nil {
-			t.Fatalf("DownloadOVAToDir (B): %v", err)
+			t.Fatalf("downloadOVAToDir (B): %v", err)
 		}
 		if filepath.Base(pathA) == filepath.Base(pathB) {
 			t.Fatalf("both URLs mapped to the same cache file %q", pathA)
@@ -703,4 +703,144 @@ func createTestOVA(t *testing.T, filename, content string) string {
 	}
 
 	return ovaPath
+}
+
+func TestOvaCacheFilename(t *testing.T) {
+	tests := []struct {
+		name           string
+		ovaURL         string
+		sha256Expected string
+		want           string
+	}{
+		{
+			name:           "with digest uses plain basename",
+			ovaURL:         "https://mirror.openshift.com/rhcos.ova",
+			sha256Expected: "abc123",
+			want:           "rhcos.ova",
+		},
+		{
+			name:           "with digest strips query string",
+			ovaURL:         "https://mirror.openshift.com/rhcos.ova?sig=SECRET",
+			sha256Expected: "abc123",
+			want:           "rhcos.ova",
+		},
+		{
+			name:           "without digest is suffixed with url hash",
+			ovaURL:         "https://mirror.openshift.com/rhcos.ova",
+			sha256Expected: "",
+			want:           "rhcos.ova-0678e569",
+		},
+		{
+			name:           "without digest uses nested basename",
+			ovaURL:         "https://example.com/base/image.ova",
+			sha256Expected: "",
+			want:           "image.ova-3ccc2d0f",
+		},
+		{
+			name:           "degenerate URL path falls back to rhcos.ova",
+			ovaURL:         "",
+			sha256Expected: "abc123",
+			want:           "rhcos.ova",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ovaCacheFilename(tt.ovaURL, tt.sha256Expected); got != tt.want {
+				t.Errorf("ovaCacheFilename(%q, %q) = %q, want %q", tt.ovaURL, tt.sha256Expected, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCachedOVAPath(t *testing.T) {
+	dir := t.TempDir()
+
+	// Absent: nothing has been downloaded into the directory.
+	if path, ok := cachedOVAPathInDir("https://mirror.example.com/x.ova", "deadbeef", dir); ok {
+		t.Errorf("cachedOVAPathInDir(absent) = (%q, true), want not ok", path)
+	}
+
+	// Present: a non-empty file exists at the derived cache path.
+	wantPath := filepath.Join(dir, "x.ova")
+	if err := os.WriteFile(wantPath, []byte("ova-bytes"), 0o600); err != nil {
+		t.Fatalf("writing test OVA: %v", err)
+	}
+	if path, ok := cachedOVAPathInDir("https://mirror.example.com/x.ova", "deadbeef", dir); !ok || path != wantPath {
+		t.Errorf("cachedOVAPathInDir(present) = (%q, %v), want (%q, true)", path, ok, wantPath)
+	}
+
+	// A zero-size file is not considered a valid cache entry.
+	if err := os.WriteFile(filepath.Join(dir, "empty.ova"), nil, 0o600); err != nil {
+		t.Fatalf("writing empty OVA: %v", err)
+	}
+	if _, ok := cachedOVAPathInDir("https://mirror.example.com/empty.ova", "deadbeef", dir); ok {
+		t.Errorf("cachedOVAPathInDir(zero-size) = ok, want not ok")
+	}
+
+	// Public wrapper: a URL that has never been downloaded is not cached.
+	if _, ok := CachedOVAPath("https://never-downloaded.example.com/none.ova", "deadbeef"); ok {
+		t.Errorf("CachedOVAPath(never downloaded) = ok, want not ok")
+	}
+}
+
+func TestSanitizeOVAURL(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{
+			name: "strips query params",
+			url:  "https://mirror.example.com/rhcos/9.x/rhcos.ova?APIKey=SECRET",
+			want: "https://mirror.example.com/rhcos/9.x/rhcos.ova?<redacted>",
+		},
+		{
+			name: "no query params leaves url as-is",
+			url:  "http://x/",
+			want: "http://x/",
+		},
+		{
+			name: "unparseable url",
+			url:  "://bad",
+			want: "<unparseable-url>",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SanitizeOVAURL(tt.url); got != tt.want {
+				t.Errorf("SanitizeOVAURL(%q) = %q, want %q", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDeleteTemplate(t *testing.T) {
+	t.Run("nil session returns error", func(t *testing.T) {
+		if err := DeleteTemplate(context.Background(), nil, "/DC0/vm/x"); err == nil {
+			t.Fatal("expected error for nil session")
+		}
+	})
+
+	t.Run("not-found path is idempotent", func(t *testing.T) {
+		simulator.Test(func(ctx context.Context, c *vim25.Client) {
+			s := newTestSession(ctx, t, c)
+			if err := DeleteTemplate(ctx, s, "/DC0/vm/definitely-not-here"); err != nil {
+				t.Fatalf("expected nil for not-found path, got %v", err)
+			}
+		})
+	})
+
+	t.Run("deletes an existing VM then is idempotent", func(t *testing.T) {
+		simulator.Test(func(ctx context.Context, c *vim25.Client) {
+			s := newTestSession(ctx, t, c)
+			vm := createSimulatorVM(ctx, t, s, c, "deletable-vm")
+			path := vm.InventoryPath
+			if err := DeleteTemplate(ctx, s, path); err != nil {
+				t.Fatalf("deleting VM %q: %v", path, err)
+			}
+			if err := DeleteTemplate(ctx, s, path); err != nil {
+				t.Fatalf("second delete of %q: %v", path, err)
+			}
+		})
+	})
 }

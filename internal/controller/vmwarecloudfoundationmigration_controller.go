@@ -542,16 +542,17 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 	}
 
 	// Phase 2: Resolve OVA URL. Re-resolve when the user corrects
-	// spec.image.ovaUrl so a stored stale URL does not keep being used.
+	// spec.image.ovaUrl, or clears it to fall back to ConfigMap
+	// auto-resolution, so a stored stale URL does not keep being used.
 	specURL := migration.Spec.Image.OVAUrl
-	urlChanged := specURL != "" && migration.Status.Image.ResolvedOVAUrl != specURL
-	if migration.Status.Image.ResolvedOVAUrl == "" || urlChanged {
+	if needsOVAReresolution(specURL, migration.Status.Image.ResolvedOVAUrl, migration.Status.Image.URLSource) {
 		migration.Status.Image.DownloadComplete = false
 		migration.Status.Image.ResolvedSHA256 = ""
 		if specURL != "" {
 			// User-provided URL.
 			migration.Status.Image.ResolvedOVAUrl = specURL
-			log.V(1).Info("using user-provided OVA URL", "url", sanitizeOVAURL(specURL))
+			migration.Status.Image.URLSource = "user"
+			log.V(1).Info("using user-provided OVA URL", "url", vsphere.SanitizeOVAURL(specURL))
 		} else {
 			// Resolve from coreos-bootimages ConfigMap.
 			cm, err := r.KubeClient.CoreV1().ConfigMaps("openshift-machine-config-operator").Get(ctx, "coreos-bootimages", metav1.GetOptions{})
@@ -561,7 +562,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 				return ctrl.Result{}, fmt.Errorf("getting coreos-bootimages ConfigMap: %w", err)
 			}
 
-			ova, err := vsphere.ResolveRHCOSOVAFromConfigMap(cm, "x86_64")
+			ova, err := vsphere.ResolveRHCOSOVAFromConfigMap(cm, rhcosArchAMD64)
 			if err != nil {
 				r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonFailed,
 					fmt.Sprintf("Failed to resolve RHCOS OVA from stream metadata: %v", err))
@@ -570,7 +571,8 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 
 			migration.Status.Image.ResolvedOVAUrl = ova.Location
 			migration.Status.Image.ResolvedSHA256 = ova.Sha256
-			log.V(1).Info("resolved RHCOS OVA from stream metadata", "url", sanitizeOVAURL(ova.Location), "sha256", ova.Sha256)
+			migration.Status.Image.URLSource = "auto"
+			log.V(1).Info("resolved RHCOS OVA from stream metadata", "url", vsphere.SanitizeOVAURL(ova.Location), "sha256", ova.Sha256)
 		}
 
 		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
@@ -622,16 +624,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 		}
 	}
 
-	specChanged := false
-	for i := range migration.Spec.FailureDomains {
-		fd := &migration.Spec.FailureDomains[i]
-		if fd.Topology.Template == "" {
-			if path, ok := migration.Status.Image.ImportedTemplates[fd.Name]; ok {
-				fd.Topology.Template = path
-				specChanged = true
-			}
-		}
-	}
+	specChanged := populateTopologyTemplates(migration)
 
 	if specChanged {
 		if err := r.Update(ctx, migration); err != nil {
@@ -662,9 +655,38 @@ func (r *VmwareCloudFoundationMigrationReconciler) importOVATemplate(ctx context
 	for i := range migration.Spec.FailureDomains {
 		fd := &migration.Spec.FailureDomains[i]
 
-		// Skip if already imported.
-		if _, done := migration.Status.Image.ImportedTemplates[fd.Name]; done {
-			continue
+		// Skip if already imported, unless this operator-imported template was
+		// built from a different OVA URL than the one now resolved: a
+		// corrected ovaUrl must delete and re-import it. User-pre-configured
+		// templates (never tracked in OperatorImportedTemplates) are left
+		// alone.
+		if recorded, done := migration.Status.Image.ImportedTemplates[fd.Name]; done {
+			if prevURL, ok := migration.Status.Image.OperatorImportedTemplates[fd.Name]; ok && prevURL != migration.Status.Image.ResolvedOVAUrl {
+				staleUser, stalePass, err := getTargetCredentials(ctx, r.KubeClient, migration, fd.Server)
+				if err != nil {
+					return false, fmt.Errorf("getting credentials for %s: %w", fd.Server, err)
+				}
+				staleSession, err := getVSphereSession(ctx, fd.Server, fd.Topology.Datacenter, staleUser, stalePass)
+				if err != nil {
+					return false, fmt.Errorf("creating vSphere session for %s: %w", fd.Server, err)
+				}
+				if err := vsphere.DeleteTemplate(ctx, staleSession, recorded); err != nil {
+					r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonFailed,
+						fmt.Sprintf("Failed to delete stale template for %s: %v", fd.Name, err))
+					return false, fmt.Errorf("deleting stale template for %s: %w", fd.Name, err)
+				}
+				log.V(1).Info("OVA URL changed, deleting stale operator template for re-import",
+					"failureDomain", fd.Name, "template", recorded,
+					"previousURL", vsphere.SanitizeOVAURL(prevURL),
+					"resolvedURL", vsphere.SanitizeOVAURL(migration.Status.Image.ResolvedOVAUrl))
+				r.Recorder.Eventf(migration, "Normal", "TemplateReimport",
+					"Re-importing template for %s after OVA URL change", fd.Name)
+				delete(migration.Status.Image.ImportedTemplates, fd.Name)
+				delete(migration.Status.Image.OperatorImportedTemplates, fd.Name)
+				fd.Topology.Template = "" // clear so the import below recreates it
+			} else {
+				continue
+			}
 		}
 
 		// If user already set topology.template, record it and skip.
@@ -709,7 +731,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) importOVATemplate(ctx context
 
 		// Ensure cluster infra tag on this vCenter (once per server).
 		if _, exists := clusterTagIDs[fd.Server]; !exists {
-			tagID, err := vsphere.EnsureClusterTag(ctx, session, infraID)
+			tagID, err := vsphere.EnsureClusterOwnershipTag(ctx, session, infraID)
 			if err != nil {
 				return false, fmt.Errorf("ensuring cluster tag on %s: %w", fd.Server, err)
 			}
@@ -734,14 +756,24 @@ func (r *VmwareCloudFoundationMigrationReconciler) importOVATemplate(ctx context
 		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
 			fmt.Sprintf("Importing template for %s (%d/%d)", fd.Name, len(migration.Status.Image.ImportedTemplates)+1, len(migration.Spec.FailureDomains)))
 
-		// Use an explicit timeout: after a pod restart the emptyDir cache is
-		// empty and this re-downloads the OVA, and http.DefaultClient has no
-		// timeout of its own.
-		ovaCtx, ovaCancel := context.WithTimeout(ctx, ovaDownloadTimeout)
-		ovaLocalPath, err := vsphere.DownloadOVA(ovaCtx, migration.Status.Image.ResolvedOVAUrl, migration.Status.Image.ResolvedSHA256)
-		ovaCancel()
-		if err != nil {
-			return false, fmt.Errorf("getting cached OVA path: %w", err)
+		// Reuse the OVA already downloaded in Phase 3 instead of re-invoking
+		// DownloadOVA, which re-hashes the full ~1GB file once per failure
+		// domain. CachedOVAPath only stats the file. Fall back to DownloadOVA
+		// when no cached file exists (e.g. after a pod restart cleared the
+		// emptyDir cache).
+		ovaLocalPath, cached := vsphere.CachedOVAPath(migration.Status.Image.ResolvedOVAUrl, migration.Status.Image.ResolvedSHA256)
+		if !cached {
+			// Use an explicit timeout: after a pod restart the emptyDir cache
+			// is empty and this re-downloads the OVA, and http.DefaultClient
+			// has no timeout of its own.
+			ovaCtx, ovaCancel := context.WithTimeout(ctx, ovaDownloadTimeout)
+			ovaLocalPath, err = vsphere.DownloadOVA(ovaCtx, migration.Status.Image.ResolvedOVAUrl, migration.Status.Image.ResolvedSHA256)
+			ovaCancel()
+			if err != nil {
+				return false, fmt.Errorf("downloading OVA: %w", err)
+			}
+		} else {
+			log.V(1).Info("reusing cached OVA", "path", ovaLocalPath)
 		}
 
 		vm, err := vsphere.ImportOVA(ctx, vsphere.ImportOVAParams{
@@ -768,6 +800,13 @@ func (r *VmwareCloudFoundationMigrationReconciler) importOVATemplate(ctx context
 		}
 
 		migration.Status.Image.ImportedTemplates[fd.Name] = vm.InventoryPath
+		// Record provenance so a later OVA URL change can re-import this
+		// operator-built template (user-pre-configured templates are never
+		// recorded here).
+		if migration.Status.Image.OperatorImportedTemplates == nil {
+			migration.Status.Image.OperatorImportedTemplates = make(map[string]string)
+		}
+		migration.Status.Image.OperatorImportedTemplates[fd.Name] = migration.Status.Image.ResolvedOVAUrl
 		log.Info("template imported", "failureDomain", fd.Name, "path", vm.InventoryPath)
 
 		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
@@ -776,6 +815,43 @@ func (r *VmwareCloudFoundationMigrationReconciler) importOVATemplate(ctx context
 		return true, nil
 	}
 	return false, nil
+}
+
+// needsOVAReresolution reports whether the OVA URL must (re)resolve: nothing
+// has been resolved yet, the user changed spec.image.ovaUrl, or the user
+// cleared a previously user-supplied URL (URLSource == "user") to fall back to
+// ConfigMap auto-resolution. A URL that was auto-resolved or is unchanged is
+// left stable.
+func needsOVAReresolution(specURL, resolvedURL, urlSource string) bool {
+	if resolvedURL == "" {
+		return true
+	}
+	if specURL != "" && resolvedURL != specURL {
+		return true
+	}
+	return specURL == "" && urlSource == "user"
+}
+
+// populateTopologyTemplates fills each failure domain's topology.template from
+// the recorded imported paths: an empty template is filled, and a template the
+// operator re-imported after an OVA URL change is refreshed to the new path.
+// User-configured templates (not tracked in OperatorImportedTemplates) are
+// left untouched. Returns true if the spec was changed.
+func populateTopologyTemplates(migration *migrationv1alpha1.VmwareCloudFoundationMigration) bool {
+	changed := false
+	for i := range migration.Spec.FailureDomains {
+		fd := &migration.Spec.FailureDomains[i]
+		path, imported := migration.Status.Image.ImportedTemplates[fd.Name]
+		if !imported {
+			continue
+		}
+		_, opImported := migration.Status.Image.OperatorImportedTemplates[fd.Name]
+		if fd.Topology.Template == "" || (opImported && fd.Topology.Template != path) {
+			fd.Topology.Template = path
+			changed = true
+		}
+	}
+	return changed
 }
 
 // ensureMultiSiteConfigured adds target vCenter to cluster configuration

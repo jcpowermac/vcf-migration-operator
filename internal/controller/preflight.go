@@ -3,8 +3,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"net/http"
-	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -28,6 +26,7 @@ import (
 
 const vsphereCSIDriverName = "csi.vsphere.vmware.com"
 const preflightVSphereTimeout = 2 * time.Minute
+const rhcosArchAMD64 = "x86_64"
 
 var (
 	machineHealthCheckGVR = schema.GroupVersionResource{Group: "machine.openshift.io", Version: "v1beta1", Resource: "machinehealthchecks"}
@@ -63,6 +62,19 @@ type credentials struct {
 	password string
 }
 
+// fdTemplateMissing returns an error naming the first failure domain whose
+// topology.template is empty. Called from runPreflightChecks only when spec.image
+// is not set, because in that mode the operator does not import a template and
+// each failure domain must reference an existing one.
+func fdTemplateMissing(fds []configv1.VSpherePlatformFailureDomainSpec) error {
+	for i := range fds {
+		if fds[i].Topology.Template == "" {
+			return fmt.Errorf("spec.failureDomains[%d].topology.template is required when spec.image is not set (failure domain %q)", i, fds[i].Name)
+		}
+	}
+	return nil
+}
+
 func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) (string, error) {
 	log := klog.FromContext(ctx)
 	condType := migrationv1alpha1.ConditionInfrastructurePrepared
@@ -72,6 +84,11 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 	}
 	if err := validateUniqueFailureDomainNames(migration.Spec.FailureDomains); err != nil {
 		return "", err
+	}
+	if migration.Spec.Image == nil {
+		if err := fdTemplateMissing(migration.Spec.FailureDomains); err != nil {
+			return "", err
+		}
 	}
 
 	secretRef := migration.Spec.TargetVCenterCredentialsSecret
@@ -194,41 +211,10 @@ func (r *VmwareCloudFoundationMigrationReconciler) validatePreflightVSphere(ctx 
 		log.V(1).Info("target failure domain validated", "name", fd.Name, "server", fd.Server)
 	}
 
-	// OVA URL reachability check when spec.image is set.
-	if migration.Spec.Image != nil {
-		ovaURL := migration.Spec.Image.OVAUrl
-		if ovaURL == "" {
-			// Auto-resolve: try reading the URL from the coreos-bootimages
-			// ConfigMap so we can check reachability before the import phase.
-			cm, err := r.KubeClient.CoreV1().ConfigMaps("openshift-machine-config-operator").Get(vsphereCtx, "coreos-bootimages", metav1.GetOptions{})
-			if err != nil {
-				log.V(1).Info("cannot read coreos-bootimages ConfigMap during preflight, will retry during import",
-					"error", err)
-			} else {
-				ova, err := vsphere.ResolveRHCOSOVAFromConfigMap(cm, "x86_64")
-				if err != nil {
-					log.V(1).Info("cannot resolve RHCOS OVA from ConfigMap during preflight, will retry during import",
-						"error", err)
-				} else {
-					ovaURL = ova.Location
-				}
-			}
-		}
-		if ovaURL != "" {
-			if err := checkOVAURLReachable(vsphereCtx, ovaURL); err != nil {
-				log.V(1).Info("OVA URL reachability check failed (may be due to proxy/TLS interceptor)",
-					"url", sanitizeOVAURL(ovaURL), "error", err)
-				// Best-effort: warn but don't block (HEAD may fail while GET succeeds).
-			}
-		}
-	}
-
 	return nil
 }
 
 func validateFailureDomain(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, fd *configv1.VSpherePlatformFailureDomainSpec, creds credentials) error {
-	log := klog.FromContext(ctx)
-
 	session, err := getVSphereSession(ctx, fd.Server, fd.Topology.Datacenter, creds.username, creds.password)
 	if err != nil {
 		return fmt.Errorf("connecting to target vCenter %s: %w", fd.Server, err)
@@ -260,15 +246,14 @@ func validateFailureDomain(ctx context.Context, migration *migrationv1alpha1.Vmw
 			return fmt.Errorf("target folder %q on %s not found: %w", fd.Topology.Folder, fd.Server, err)
 		}
 	}
-	// Template check: skip when spec.image is set and topology.template
-	// is empty — the template will be created by ensureDestinationImageImported.
+	// Template check: skip when spec.image is set and topology.template is
+	// empty — the template will be created by ensureDestinationImageImported. A
+	// missing template with spec.image unset is rejected earlier in
+	// runPreflightChecks.
 	if fd.Topology.Template != "" {
 		if _, err := session.Finder.VirtualMachine(ctx, fd.Topology.Template); err != nil {
 			return fmt.Errorf("target template %q on %s not found: %w", fd.Topology.Template, fd.Server, err)
 		}
-	} else if migration.Spec.Image == nil {
-		log.V(1).Info("no template configured for failure domain and spec.image not set",
-			"failureDomain", fd.Name, "server", fd.Server)
 	}
 
 	if err := validateTargetPrivileges(ctx, session, datacenter, cluster); err != nil {
@@ -334,62 +319,12 @@ func validateImageImportPrivileges(ctx context.Context, session *vsphere.Session
 		return fmt.Errorf("no privilege check results returned for resource pool")
 	}
 
-	var missing []string
-	for _, priv := range imageImportPrivileges {
-		found := false
-		for _, pa := range results[0].PrivAvailability {
-			if pa.PrivId == priv && pa.IsGranted {
-				found = true
-				break
-			}
-		}
-		if !found {
-			missing = append(missing, priv)
-		}
-	}
-
+	missing := missingPrivileges(results[0], imageImportPrivileges)
 	if len(missing) > 0 {
 		return fmt.Errorf("missing required image import privileges on resource pool: %s", strings.Join(missing, ", "))
 	}
 
 	return nil
-}
-
-// checkOVAURLReachable performs a best-effort HEAD request against the OVA URL
-// to verify it is reachable before starting the migration.
-func checkOVAURLReachable(ctx context.Context, ovaURL string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, ovaURL, nil)
-	if err != nil {
-		return fmt.Errorf("creating HEAD request for %s: %w", sanitizeOVAURL(ovaURL), err)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("OVA URL %s unreachable: %w. For air-gapped environments, set spec.image.ovaUrl to an internal HTTP(S) mirror or omit spec.image and set topology.template manually", sanitizeOVAURL(ovaURL), err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("OVA URL %s returned HTTP %d: %s", sanitizeOVAURL(ovaURL), resp.StatusCode, resp.Status)
-	}
-
-	return nil
-}
-
-// sanitizeOVAURL strips query parameters from an OVA URL so that signed tokens
-// and other credentials embedded in query strings are not leaked into logs or
-// error messages. Returns scheme://host/path (with "?<redacted>" appended when
-// query params were present).
-func sanitizeOVAURL(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return "<unparseable-url>"
-	}
-	sanitized := u.Scheme + "://" + u.Host + u.Path
-	if u.RawQuery != "" {
-		sanitized += "?<redacted>"
-	}
-	return sanitized
 }
 
 func (r *VmwareCloudFoundationMigrationReconciler) hasTargetVCenterConfiguration(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) (bool, error) {

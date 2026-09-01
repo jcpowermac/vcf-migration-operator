@@ -601,6 +601,16 @@ func TestRunPreflightChecks(t *testing.T) {
 			wantMessageContains:       "Storage/cluster managementState is Managed",
 			wantTargetSecretReadCount: 2,
 		},
+		{
+			name:        "image not set with empty topology.template is rejected before vCenter work",
+			version:     "5.0.0",
+			gateEnabled: true,
+			mutateMigration: func(m *migrationv1alpha1.VmwareCloudFoundationMigration) {
+				m.Spec.FailureDomains[0].Topology.Template = ""
+			},
+			wantErrContains:           "topology.template is required",
+			wantTargetSecretReadCount: 0,
+		},
 	}
 
 	for _, tt := range tests {
@@ -837,6 +847,7 @@ type preflightTestInventory struct {
 	datastorePath  string
 	networkPath    string
 	folderPath     string
+	templatePath   string
 }
 
 func discoverPreflightTestInventory(ctx context.Context, t *testing.T, serverURL *url.URL, username, password string) preflightTestInventory {
@@ -888,12 +899,37 @@ func discoverPreflightTestInventory(ctx context.Context, t *testing.T, serverURL
 		t.Fatalf("creating preflight test folder: %v", err)
 	}
 
+	dcFolders, err := datacenter.Folders(ctx)
+	if err != nil {
+		t.Fatalf("getting datacenter folders: %v", err)
+	}
+	rootPool, err := finder.ResourcePool(ctx, clusters[0].InventoryPath+"/Resources")
+	if err != nil {
+		t.Fatalf("finding root resource pool: %v", err)
+	}
+	vmSpec := types.VirtualMachineConfigSpec{
+		Name:  "preflight-test-template",
+		Files: &types.VirtualMachineFileInfo{VmPathName: fmt.Sprintf("[%s]", datastores[0].Name())},
+	}
+	createTask, err := dcFolders.VmFolder.CreateVM(ctx, vmSpec, rootPool, nil)
+	if err != nil {
+		t.Fatalf("creating preflight test template VM: %v", err)
+	}
+	if _, err := createTask.WaitForResult(ctx); err != nil {
+		t.Fatalf("waiting for preflight test template VM: %v", err)
+	}
+	templateVM, err := finder.VirtualMachine(ctx, "preflight-test-template")
+	if err != nil {
+		t.Fatalf("finding preflight test template VM: %v", err)
+	}
+
 	return preflightTestInventory{
 		datacenterName: datacenter.Name(),
 		clusterPath:    clusters[0].InventoryPath,
 		datastorePath:  datastores[0].InventoryPath,
 		networkPath:    networks[0].GetInventoryPath(),
 		folderPath:     folder.InventoryPath,
+		templatePath:   templateVM.InventoryPath,
 	}
 }
 
@@ -915,6 +951,7 @@ func newMigrationForPreflight(server string, inventory preflightTestInventory) *
 					Zone:   "zone-a",
 					Server: server,
 					Topology: configv1.VSpherePlatformTopology{
+						Template:       inventory.templatePath,
 						Datacenter:     inventory.datacenterName,
 						ComputeCluster: inventory.clusterPath,
 						Datastore:      inventory.datastorePath,
@@ -928,6 +965,7 @@ func newMigrationForPreflight(server string, inventory preflightTestInventory) *
 					Zone:   "zone-b",
 					Server: server,
 					Topology: configv1.VSpherePlatformTopology{
+						Template:       inventory.templatePath,
 						Datacenter:     inventory.datacenterName,
 						ComputeCluster: inventory.clusterPath,
 						Datastore:      inventory.datastorePath,
@@ -1002,5 +1040,21 @@ func newFeatureGateForPreflight(version string, enabled bool) *configv1.FeatureG
 		Status: configv1.FeatureGateStatus{
 			FeatureGates: []configv1.FeatureGateDetails{details},
 		},
+	}
+}
+
+func TestFDFailureDomainTemplateMissing(t *testing.T) {
+	setFD := func(name, tpl string) configv1.VSpherePlatformFailureDomainSpec {
+		return configv1.VSpherePlatformFailureDomainSpec{Name: name, Topology: configv1.VSpherePlatformTopology{Template: tpl}}
+	}
+	if err := fdTemplateMissing([]configv1.VSpherePlatformFailureDomainSpec{setFD("a", "/DC0/vm/t"), setFD("b", "/DC0/vm/u")}); err != nil {
+		t.Fatalf("expected nil when every template is set, got: %v", err)
+	}
+	err := fdTemplateMissing([]configv1.VSpherePlatformFailureDomainSpec{setFD("a", "/DC0/vm/t"), setFD("b", "")})
+	if err == nil {
+		t.Fatal("expected an error for an empty template, got nil")
+	}
+	if !strings.Contains(err.Error(), "spec.failureDomains[1].topology.template is required") || !strings.Contains(err.Error(), `failure domain "b"`) {
+		t.Fatalf("error should name the first empty template (failure domain b), got: %v", err)
 	}
 }

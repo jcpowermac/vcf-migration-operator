@@ -94,26 +94,12 @@ func ResolveRHCOSOVAFromConfigMap(cm *corev1.ConfigMap, arch string) (*stream.Ar
 	return ova, nil
 }
 
-// DownloadOVA downloads an OVA file to the scratch volume with optional SHA256
-// verification. It uses file-level flock locking to prevent concurrent downloads.
-//
-// When sha256 is non-empty, the downloaded file's hash is verified. On mismatch,
-// the file is deleted and re-downloaded.
-//
-// Returns the local file path of the downloaded OVA.
-func DownloadOVA(ctx context.Context, ovaURL, sha256Expected string) (string, error) {
-	return DownloadOVAToDir(ctx, ovaURL, sha256Expected, defaultCacheDir)
-}
-
-// DownloadOVAToDir downloads an OVA file to the specified cache directory.
-func DownloadOVAToDir(ctx context.Context, ovaURL, sha256Expected, cacheDir string) (string, error) {
-	log := klog.FromContext(ctx)
-
-	if err := os.MkdirAll(cacheDir, 0o750); err != nil {
-		return "", fmt.Errorf("creating cache directory %s: %w", cacheDir, err)
-	}
-
-	// Derive filename from URL, stripping query params.
+// ovaCacheFilename derives the on-disk cache filename for an OVA URL. The
+// basename is taken from the URL path with any query string stripped; when no
+// digest is supplied the name is additionally suffixed with a short hash of the
+// full URL so that OVAs sharing a basename but served from different mirrors
+// cannot collide in the cache.
+func ovaCacheFilename(ovaURL, sha256Expected string) string {
 	urlPath := ovaURL
 	if idx := strings.IndexByte(urlPath, '?'); idx >= 0 {
 		urlPath = urlPath[:idx]
@@ -129,7 +115,46 @@ func DownloadOVAToDir(ctx context.Context, ovaURL, sha256Expected, cacheDir stri
 		urlSum := sha256.Sum256([]byte(ovaURL))
 		filename = fmt.Sprintf("%s-%x", filename, urlSum[:4])
 	}
-	localPath := filepath.Join(cacheDir, filename)
+	return filename
+}
+
+// CachedOVAPath returns the path of a previously downloaded OVA for the given
+// URL/digest if it already exists on the scratch volume with a non-zero size,
+// without re-downloading or re-hashing. It reports false when no such file is
+// present.
+func CachedOVAPath(ovaURL, sha256Expected string) (string, bool) {
+	return cachedOVAPathInDir(ovaURL, sha256Expected, defaultCacheDir)
+}
+
+func cachedOVAPathInDir(ovaURL, sha256Expected, cacheDir string) (string, bool) {
+	localPath := filepath.Join(cacheDir, ovaCacheFilename(ovaURL, sha256Expected))
+	info, err := os.Stat(localPath)
+	if err != nil || info.Size() == 0 {
+		return "", false
+	}
+	return localPath, true
+}
+
+// DownloadOVA downloads an OVA file to the scratch volume with optional SHA256
+// verification. It uses file-level flock locking to prevent concurrent downloads.
+//
+// When sha256 is non-empty, the downloaded file's hash is verified. On mismatch,
+// the file is deleted and re-downloaded.
+//
+// Returns the local file path of the downloaded OVA.
+func DownloadOVA(ctx context.Context, ovaURL, sha256Expected string) (string, error) {
+	return downloadOVAToDir(ctx, ovaURL, sha256Expected, defaultCacheDir)
+}
+
+// downloadOVAToDir downloads an OVA file to the specified cache directory.
+func downloadOVAToDir(ctx context.Context, ovaURL, sha256Expected, cacheDir string) (string, error) {
+	log := klog.FromContext(ctx)
+
+	if err := os.MkdirAll(cacheDir, 0o750); err != nil {
+		return "", fmt.Errorf("creating cache directory %s: %w", cacheDir, err)
+	}
+
+	localPath := filepath.Join(cacheDir, ovaCacheFilename(ovaURL, sha256Expected))
 
 	// File-level flock to prevent concurrent downloads.
 	lockPath := localPath + ".lock"
@@ -165,7 +190,7 @@ func DownloadOVAToDir(ctx context.Context, ovaURL, sha256Expected, cacheDir stri
 	}
 
 	// Download the OVA.
-	log.Info("downloading OVA", "url", sanitizeOVAURL(ovaURL), "dest", localPath)
+	log.Info("downloading OVA", "url", SanitizeOVAURL(ovaURL), "dest", localPath)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ovaURL, nil)
 	if err != nil {
@@ -261,6 +286,32 @@ func FindTemplateByName(ctx context.Context, s *Session, templateName string) (s
 
 	log.V(1).Info("found existing template", "name", templateName, "path", vm.InventoryPath)
 	return vm.InventoryPath, true, nil
+}
+
+// DeleteTemplate removes a VM template from vCenter by its inventory path. It is
+// idempotent: if the template does not exist it returns nil.
+func DeleteTemplate(ctx context.Context, s *Session, inventoryPath string) error {
+	if s == nil || s.Finder == nil {
+		return fmt.Errorf("session and Finder must not be nil")
+	}
+	log := klog.FromContext(ctx)
+	vm, err := s.Finder.VirtualMachine(ctx, inventoryPath)
+	if err != nil {
+		if _, ok := err.(*find.NotFoundError); ok {
+			log.V(2).Info("template not found, nothing to delete", "path", inventoryPath)
+			return nil
+		}
+		return fmt.Errorf("finding template %q: %w", inventoryPath, err)
+	}
+	task, err := vm.Destroy(ctx)
+	if err != nil {
+		return fmt.Errorf("deleting template %q: %w", inventoryPath, err)
+	}
+	if err := task.Wait(ctx); err != nil {
+		return fmt.Errorf("waiting for template deletion of %q: %w", inventoryPath, err)
+	}
+	log.V(2).Info("deleted template", "path", inventoryPath)
+	return nil
 }
 
 // ImportOVAParams holds parameters for importing an OVA into vCenter.
@@ -656,11 +707,11 @@ func hashFile(path string) (string, error) {
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
-// sanitizeOVAURL strips query parameters from an OVA URL so that signed tokens
-// and other credentials embedded in query strings are not leaked into logs.
-// Returns scheme://host/path (with "?<redacted>" appended when query params
-// were present).
-func sanitizeOVAURL(rawURL string) string {
+// SanitizeOVAURL strips query parameters from an OVA URL so that signed tokens
+// and other credentials embedded in query strings are not leaked into logs or
+// error messages. Returns scheme://host/path (with "?<redacted>" appended when
+// query params were present).
+func SanitizeOVAURL(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return "<unparseable-url>"

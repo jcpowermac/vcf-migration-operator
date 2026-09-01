@@ -137,6 +137,21 @@ type ImageStatus struct {
 	// of imported VM templates.
 	// +optional
 	ImportedTemplates map[string]string `json:"importedTemplates,omitempty"`
+
+	// OperatorImportedTemplates records the OVA URL each failure domain's
+	// template was imported from by the operator. It is populated only for
+	// operator imports; user-pre-configured templates are not recorded here.
+	// Used to detect a changed OVA URL and re-import only operator-managed
+	// templates without touching user-provided ones.
+	// +optional
+	OperatorImportedTemplates map[string]string `json:"operatorImportedTemplates,omitempty"`
+
+	// URLSource records how ResolvedOVAUrl was populated: "" (unresolved),
+	// "user" (user-specified), or "auto" (auto-resolved). Used to tell a
+	// deliberate user-clear of spec.image.ovaUrl apart from an empty
+	// auto-resolution when deciding whether to clear ResolvedOVAUrl.
+	// +optional
+	URLSource string `json:"urlSource,omitempty"`
 }
 
 // Condition type constants for the migration workflow.
