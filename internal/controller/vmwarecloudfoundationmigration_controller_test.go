@@ -582,6 +582,61 @@ var _ = Describe("updateStatus", func() {
 		Expect(destCond.ObservedGeneration).To(Equal(migrationCurrent.Generation))
 	})
 
+	It("does not let a stale-generation reconcile overwrite current-generation Phase and Progress", func() {
+		resource := newStatusTestResource()
+		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+		reconciler := &VmwareCloudFoundationMigrationReconciler{
+			Client: k8sClient,
+			Scheme: k8sClient.Scheme(),
+		}
+
+		// Capture an in-memory copy from generation 1 before any spec change.
+		migrationStale := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, migrationStale)).To(Succeed())
+		baseStale := *migrationStale.Status.DeepCopy()
+
+		// Bump the resource generation with a spec update.
+		current := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, current)).To(Succeed())
+		current.Spec.FailureDomains[0].Name = "renamed-fd"
+		Expect(k8sClient.Update(ctx, current)).To(Succeed())
+
+		// A current-generation reconcile commits Phase and Progress.
+		migrationCurrent := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, migrationCurrent)).To(Succeed())
+		baseCurrent := *migrationCurrent.Status.DeepCopy()
+		migrationCurrent.Status.Phase = migrationv1alpha1.PhaseWorkloadMigrated
+		migrationCurrent.Status.Progress = &migrationv1alpha1.MigrationProgress{
+			Workers: &migrationv1alpha1.WorkerMigrationProgress{
+				TargetMachinesTotal:     3,
+				TargetMachinesReady:     3,
+				SourceMachinesRemaining: 2,
+			},
+			ControlPlane: &migrationv1alpha1.ControlPlaneProgress{Replicas: 3},
+		}
+		Expect(reconciler.updateStatus(ctx, migrationCurrent, baseCurrent)).To(Succeed())
+
+		// The stale reconcile still holds generation 1 and tries to persist
+		// its own Phase and Progress.
+		migrationStale.Status.Phase = migrationv1alpha1.PhaseFailed
+		migrationStale.Status.Progress = &migrationv1alpha1.MigrationProgress{
+			Workers:      &migrationv1alpha1.WorkerMigrationProgress{SourceMachinesRemaining: 1},
+			ControlPlane: &migrationv1alpha1.ControlPlaneProgress{Replicas: 1},
+		}
+		Expect(reconciler.updateStatus(ctx, migrationStale, baseStale)).To(Succeed())
+
+		final := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, final)).To(Succeed())
+
+		Expect(final.Status.Phase).To(Equal(migrationv1alpha1.PhaseWorkloadMigrated),
+			"a stale-generation update must not overwrite a current-generation phase")
+		Expect(final.Status.Progress).NotTo(BeNil())
+		Expect(final.Status.Progress.Workers.TargetMachinesTotal).To(Equal(int32(3)))
+		Expect(final.Status.Progress.Workers.SourceMachinesRemaining).To(Equal(int32(2)))
+		Expect(final.Status.Progress.ControlPlane.Replicas).To(Equal(int32(3)))
+	})
+
 	It("does not let a stale failure overwrite a concurrent success on the same condition", func() {
 		resource := newStatusTestResource()
 		Expect(k8sClient.Create(ctx, resource)).To(Succeed())

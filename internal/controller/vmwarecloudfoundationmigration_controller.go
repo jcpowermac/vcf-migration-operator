@@ -1610,16 +1610,20 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 			}
 			apimeta.SetStatusCondition(&latest.Status.Conditions, cond)
 		}
-		if migration.Status.Phase != "" && (latest.Status.Phase == "" || migration.Status.Phase != baseStatus.Phase) {
-			if latest.Status.Phase != migration.Status.Phase {
-				latest.Status.Phase = migration.Status.Phase
-				hasChanges = true
+		// Apply only phase and progress deltas computed for the current resource
+		// generation, matching the generation protection used for conditions.
+		if migration.Generation == latest.Generation {
+			if migration.Status.Phase != "" && (latest.Status.Phase == "" || migration.Status.Phase != baseStatus.Phase) {
+				if latest.Status.Phase != migration.Status.Phase {
+					latest.Status.Phase = migration.Status.Phase
+					hasChanges = true
+				}
 			}
-		}
-		if migration.Status.Progress != nil && (latest.Status.Progress == nil || !reflect.DeepEqual(baseStatus.Progress, migration.Status.Progress)) {
-			if !reflect.DeepEqual(latest.Status.Progress, migration.Status.Progress) {
-				latest.Status.Progress = migration.Status.Progress.DeepCopy()
-				hasChanges = true
+			if migration.Status.Progress != nil && (latest.Status.Progress == nil || !reflect.DeepEqual(baseStatus.Progress, migration.Status.Progress)) {
+				if !reflect.DeepEqual(latest.Status.Progress, migration.Status.Progress) {
+					latest.Status.Progress = migration.Status.Progress.DeepCopy()
+					hasChanges = true
+				}
 			}
 		}
 		if migration.Status.StartTime != nil && latest.Status.StartTime == nil {
