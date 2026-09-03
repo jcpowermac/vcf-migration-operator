@@ -750,3 +750,39 @@ var _ = Describe("updateStatus", func() {
 		Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
 	})
 })
+
+var _ = Describe("seedReadyCondition", func() {
+	It("seeds Ready as False/Progressing when the condition is absent", func() {
+		r := &VmwareCloudFoundationMigrationReconciler{}
+		migration := &migrationv1alpha1.VmwareCloudFoundationMigration{
+			ObjectMeta: metav1.ObjectMeta{Name: migrationv1alpha1.SingletonName, Generation: 1},
+		}
+		r.seedReadyCondition(migration)
+
+		cond := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionReady)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(cond.Reason).To(Equal(migrationv1alpha1.ReasonProgressing))
+		Expect(cond.ObservedGeneration).To(Equal(int64(1)))
+	})
+
+	It("leaves an existing Ready condition untouched", func() {
+		r := &VmwareCloudFoundationMigrationReconciler{}
+		migration := &migrationv1alpha1.VmwareCloudFoundationMigration{
+			ObjectMeta: metav1.ObjectMeta{Name: migrationv1alpha1.SingletonName, Generation: 2},
+			Status: migrationv1alpha1.VmwareCloudFoundationMigrationStatus{
+				Conditions: []metav1.Condition{{
+					Type:   migrationv1alpha1.ConditionReady,
+					Status: metav1.ConditionTrue,
+					Reason: migrationv1alpha1.ReasonCompleted,
+				}},
+			},
+		}
+		r.seedReadyCondition(migration)
+
+		cond := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionReady)
+		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+		Expect(cond.Reason).To(Equal(migrationv1alpha1.ReasonCompleted))
+		Expect(migration.Status.Conditions).To(HaveLen(1))
+	})
+})
