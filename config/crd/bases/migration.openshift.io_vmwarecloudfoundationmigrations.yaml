@@ -8,6 +8,8 @@ metadata:
 spec:
   group: migration.openshift.io
   names:
+    categories:
+    - migration
     kind: VmwareCloudFoundationMigration
     listKind: VmwareCloudFoundationMigrationList
     plural: vmwarecloudfoundationmigrations
@@ -51,14 +53,15 @@ spec:
           metadata:
             type: object
           spec:
-            description: VmwareCloudFoundationMigrationSpec defines the desired state
-              of VmwareCloudFoundationMigration.
+            description: spec defines the desired state of VmwareCloudFoundationMigration.
             properties:
               failureDomains:
                 description: |-
-                  FailureDomains defines failure domains for the target vCenter.
-                  Uses OpenShift's standard VSpherePlatformFailureDomainSpec which includes
-                  Name, Region, Zone, Server, and Topology with all necessary fields.
+                  failureDomains defines failure domains for the target vCenter. The embedded
+                  element type intentionally tracks config.openshift.io/v1 VSpherePlatformFailureDomainSpec
+                  (including Name, Region, Zone, Server, and Topology) to align with OpenShift API
+                  failure domain semantics; the schema is re-inlined on "make manifests" after
+                  dependency bumps.
                 items:
                   description: VSpherePlatformFailureDomainSpec holds the region and
                     zone failure domain and the vCenter topology of that failure domain.
@@ -262,17 +265,20 @@ spec:
                   type: object
                 minItems: 1
                 type: array
+                x-kubernetes-list-type: atomic
               image:
                 description: |-
-                  Image controls RHCOS OVA resolution and import into destination vCenter.
+                  image controls RHCOS OVA resolution and import into destination vCenter.
                   When set, the operator downloads and imports the OVA as a VM template
                   for each failure domain and populates topology.template automatically.
                   When omitted, topology.template must be set manually in each failure domain.
                 properties:
                   diskProvisioning:
                     description: |-
-                      DiskProvisioning controls the VMDK disk provisioning type when importing
-                      the OVA. Matches the installer's behavior.
+                      diskProvisioning controls the VMDK disk provisioning type when importing
+                      the OVA (thin, thick, eagerZeroedThick). Matches the installer's behavior.
+                      When omitted, vSphere defaults to the provisioning type specified in the
+                      OVF descriptor.
                     enum:
                     - thin
                     - thick
@@ -280,20 +286,21 @@ spec:
                     type: string
                   ovaUrl:
                     description: |-
-                      OVAUrl is a direct URL to the RHCOS OVA file. When set, the operator
+                      ovaUrl is a direct URL to the RHCOS OVA file. The URL must use https:// and
+                      end in .ova (an optional query string is allowed for proxy tokens or
+                      integrity digests appended by stream metadata tooling). When set, the operator
                       downloads from this URL instead of resolving via the coreos-bootimages
                       ConfigMap delivered by CVO.
-                      Supports both direct .ova URLs and URLs with query parameters (e.g.
-                      integrity digests appended by stream metadata tooling).
-                      Required for air-gapped environments: point to an internal HTTP(S) mirror.
+                      Required for air-gapped environments: point to an internal HTTPS mirror.
                     pattern: ^https://.*\.ova(\?.*)?$
                     type: string
                 type: object
               state:
                 default: Pending
                 description: |-
-                  State controls the workflow: Pending, Running, Paused.
-                  The reconciler only acts when State is Running.
+                  state controls the workflow: Pending, Running, Paused.
+                  The reconciler only acts when state is Running.
+                  When omitted, defaults to Pending.
                 enum:
                 - Pending
                 - Running
@@ -301,14 +308,18 @@ spec:
                 type: string
               targetVCenterCredentialsSecret:
                 description: |-
-                  TargetVCenterCredentialsSecret references the secret containing target vCenter credentials.
+                  targetVCenterCredentialsSecret references the secret containing target vCenter credentials.
                   The secret must contain keys: {target-vcenter-fqdn}.username and {target-vcenter-fqdn}.password.
                 properties:
                   name:
-                    description: Name is the secret name.
+                    description: name is the secret name.
+                    maxLength: 253
+                    minLength: 1
                     type: string
                   namespace:
-                    description: Namespace is the secret namespace.
+                    description: |-
+                      namespace is the secret namespace. When omitted, defaults to the namespace
+                      of the VmwareCloudFoundationMigration object.
                     type: string
                 required:
                 - name
@@ -318,18 +329,27 @@ spec:
             - targetVCenterCredentialsSecret
             type: object
           status:
-            description: VmwareCloudFoundationMigrationStatus defines the observed
-              state of VmwareCloudFoundationMigration.
+            description: status defines the observed state of VmwareCloudFoundationMigration.
             properties:
               completionTime:
-                description: CompletionTime is when the migration completed.
+                description: completionTime is when the migration completed.
                 format: date-time
                 type: string
               conditions:
                 description: |-
-                  Conditions represent the current state of the migration.
-                  Each condition corresponds to a stage of the migration workflow.
-                  Standard Kubernetes conditions using metav1.Condition.
+                  conditions represent the current state of the migration.
+                  Known conditions are:
+                  - Accepted: admission gate; True is normal for the single reconciled instance (cluster),
+                    while False indicates an unsupported object name.
+                  - InfrastructurePrepared: preflight validation and migration path selection.
+                  - DestinationInitialized: destination vCenter folders and tags created.
+                  - DestinationImageImported: RHCOS OVA imported as a VM template on destination vCenter.
+                  - MultiSiteConfigured: cluster configured for both source and target vCenters.
+                  - WorkloadMigrated: workloads migrated to destination vCenter machine sets.
+                  - SourceCleaned: source vCenter references removed and cleaned up.
+                  - Ready: aggregate condition indicating migration is complete and cluster is healthy.
+                  For stage conditions (InfrastructurePrepared through Ready), False is normal while
+                  progressing; True indicates the stage has completed. Stages execute in order.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -389,7 +409,7 @@ spec:
                 - type
                 x-kubernetes-list-type: map
               image:
-                description: Image reports the RHCOS OVA import state.
+                description: image reports the RHCOS OVA import state.
                 properties:
                   downloadComplete:
                     description: |-
@@ -400,38 +420,38 @@ spec:
                     additionalProperties:
                       type: string
                     description: |-
-                      ImportedTemplates maps failure domain names to the inventory paths
+                      importedTemplates maps failure domain names to the inventory paths
                       of imported VM templates.
                     type: object
                   operatorImportedTemplates:
                     additionalProperties:
                       type: string
                     description: |-
-                      OperatorImportedTemplates records the OVA URL each failure domain's
+                      operatorImportedTemplates records the OVA URL each failure domain's
                       template was imported from by the operator. It is populated only for
                       operator imports; user-pre-configured templates are not recorded here.
                       Used to detect a changed OVA URL and re-import only operator-managed
                       templates without touching user-provided ones.
                     type: object
                   resolvedOVAUrl:
-                    description: ResolvedOVAUrl is the URL from which the OVA was
+                    description: resolvedOVAUrl is the URL from which the OVA was
                       (or will be) downloaded.
                     type: string
                   resolvedSHA256:
                     description: |-
-                      ResolvedSHA256 is the expected sha256 digest of the OVA file, when
+                      resolvedSHA256 is the expected sha256 digest of the OVA file, when
                       resolved from stream metadata. Empty for user-provided URLs.
                     type: string
                   urlSource:
                     description: |-
-                      URLSource records how ResolvedOVAUrl was populated: "" (unresolved),
+                      urlSource records how resolvedOVAUrl was populated: "" (unresolved),
                       "user" (user-specified), or "auto" (auto-resolved). Used to tell a
                       deliberate user-clear of spec.image.ovaUrl apart from an empty
-                      auto-resolution when deciding whether to clear ResolvedOVAUrl.
+                      auto-resolution when deciding whether to clear resolvedOVAUrl.
                     type: string
                 type: object
               startTime:
-                description: StartTime is when the migration started.
+                description: startTime is when the migration started.
                 format: date-time
                 type: string
             type: object
