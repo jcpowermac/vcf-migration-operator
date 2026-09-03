@@ -36,6 +36,7 @@ import (
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -546,7 +547,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 	// auto-resolution, so a stored stale URL does not keep being used.
 	specURL := migration.Spec.Image.OVAUrl
 	if needsOVAReresolution(specURL, migration.Status.Image.ResolvedOVAUrl, migration.Status.Image.URLSource) {
-		migration.Status.Image.DownloadComplete = false
+		migration.Status.Image.DownloadComplete = nil
 		migration.Status.Image.ResolvedSHA256 = ""
 		if specURL != "" {
 			// User-provided URL.
@@ -581,7 +582,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 	}
 
 	// Phase 3: Download OVA.
-	if !migration.Status.Image.DownloadComplete {
+	if migration.Status.Image.DownloadComplete == nil || !*migration.Status.Image.DownloadComplete {
 		// Use an explicit timeout for the download to avoid blocking the
 		// reconcile loop indefinitely on slow networks.
 		downloadCtx, downloadCancel := context.WithTimeout(ctx, ovaDownloadTimeout)
@@ -594,7 +595,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 			return ctrl.Result{}, fmt.Errorf("downloading OVA: %w", err)
 		}
 
-		migration.Status.Image.DownloadComplete = true
+		migration.Status.Image.DownloadComplete = ptr.To(true)
 		log.Info("OVA downloaded", "path", localPath)
 		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
 			"OVA downloaded, importing templates")

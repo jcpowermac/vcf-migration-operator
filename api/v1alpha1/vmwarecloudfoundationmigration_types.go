@@ -42,6 +42,7 @@ const SingletonName = "cluster"
 // SecretReference references a secret by name and namespace.
 type SecretReference struct {
 	// Name is the secret name.
+	// +required
 	Name string `json:"name"`
 
 	// Namespace is the secret namespace.
@@ -53,17 +54,20 @@ type SecretReference struct {
 type VmwareCloudFoundationMigrationSpec struct {
 	// State controls the workflow: Pending, Running, Paused.
 	// The reconciler only acts when State is Running.
+	// +optional
 	// +kubebuilder:validation:Enum=Pending;Running;Paused
 	// +kubebuilder:default=Pending
 	State MigrationState `json:"state"`
 
 	// TargetVCenterCredentialsSecret references the secret containing target vCenter credentials.
 	// The secret must contain keys: {target-vcenter-fqdn}.username and {target-vcenter-fqdn}.password.
+	// +required
 	TargetVCenterCredentialsSecret SecretReference `json:"targetVCenterCredentialsSecret"`
 
 	// FailureDomains defines failure domains for the target vCenter.
 	// Uses OpenShift's standard VSpherePlatformFailureDomainSpec which includes
 	// Name, Region, Zone, Server, and Topology with all necessary fields.
+	// +required
 	// +kubebuilder:validation:MinItems=1
 	FailureDomains []configv1.VSpherePlatformFailureDomainSpec `json:"failureDomains"`
 
@@ -131,7 +135,7 @@ type ImageStatus struct {
 	// DownloadComplete indicates the OVA has been successfully downloaded
 	// to the operator's scratch volume.
 	// +optional
-	DownloadComplete bool `json:"downloadComplete,omitempty"`
+	DownloadComplete *bool `json:"downloadComplete,omitempty"`
 
 	// ImportedTemplates maps failure domain names to the inventory paths
 	// of imported VM templates.
@@ -219,7 +223,10 @@ type VmwareCloudFoundationMigration struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   VmwareCloudFoundationMigrationSpec   `json:"spec,omitempty"`
+	// +optional
+	Spec VmwareCloudFoundationMigrationSpec `json:"spec,omitempty"`
+
+	// +optional
 	Status VmwareCloudFoundationMigrationStatus `json:"status,omitempty"`
 }
 
@@ -229,7 +236,8 @@ type VmwareCloudFoundationMigration struct {
 type VmwareCloudFoundationMigrationList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []VmwareCloudFoundationMigration `json:"items"`
+	// +required
+	Items []VmwareCloudFoundationMigration `json:"items"`
 }
 
 func init() {

@@ -315,7 +315,6 @@ spec:
                 type: object
             required:
             - failureDomains
-            - state
             - targetVCenterCredentialsSecret
             type: object
           status:
