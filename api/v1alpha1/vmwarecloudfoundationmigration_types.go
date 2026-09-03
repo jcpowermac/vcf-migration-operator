@@ -194,6 +194,7 @@ type ImageStatus struct {
 	// of spec.image.ovaUrl apart from an empty auto-resolution when deciding
 	// whether to clear resolvedOVAUrl.
 	// +optional
+	// +kubebuilder:validation:Enum="";user;auto
 	URLSource ImageURLSource `json:"urlSource,omitempty"`
 }
 

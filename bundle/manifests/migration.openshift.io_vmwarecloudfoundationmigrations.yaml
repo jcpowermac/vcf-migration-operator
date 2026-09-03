@@ -444,6 +444,10 @@ spec:
                       indicates no opinion or unresolved. Used to tell a deliberate user-clear
                       of spec.image.ovaUrl apart from an empty auto-resolution when deciding
                       whether to clear resolvedOVAUrl.
+                    enum:
+                    - ""
+                    - user
+                    - auto
                     type: string
                 type: object
               startTime:
