@@ -273,6 +273,8 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 		migrationv1alpha1.ConditionReady:                    r.ensureReady,
 	}
 
+	r.seedReadyCondition(migration)
+
 	for _, condType := range conditionOrder {
 		if r.isConditionTrue(migration, condType) {
 			continue
@@ -1532,6 +1534,15 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureReady(ctx context.Conte
 func (r *VmwareCloudFoundationMigrationReconciler) resetReadyStability() {
 	r.readyStabilityCount = 0
 	r.lastCountedStabilityCheck = time.Time{}
+}
+
+// seedReadyCondition seeds the Ready condition as False so `oc get` shows
+// False (not blank) throughout the workflow. Once ensureReady runs, its own
+// messages take over; an existing condition (any status) is left untouched.
+func (r *VmwareCloudFoundationMigrationReconciler) seedReadyCondition(migration *migrationv1alpha1.VmwareCloudFoundationMigration) {
+	if apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionReady) == nil {
+		r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Waiting for migration workflow to complete")
+	}
 }
 
 // setCondition is a convenience wrapper around apimeta.SetStatusCondition.
