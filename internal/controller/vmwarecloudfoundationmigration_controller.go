@@ -211,6 +211,23 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 
 	if migration.Spec.State != migrationv1alpha1.MigrationStateRunning {
 		log.V(1).Info("migration not in Running state, skipping", "state", migration.Spec.State)
+		if migration.Spec.State == migrationv1alpha1.MigrationStatePaused {
+			cond := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionReady)
+			alreadyRecorded := cond != nil &&
+				cond.Status == metav1.ConditionFalse &&
+				cond.Reason == migrationv1alpha1.ReasonPaused &&
+				cond.ObservedGeneration == migration.Generation
+			if !alreadyRecorded {
+				msg := fmt.Sprintf("Migration is paused; set spec.state to %s to resume", migrationv1alpha1.MigrationStateRunning)
+				if r.Recorder != nil {
+					r.Recorder.Eventf(migration, "Normal", migrationv1alpha1.ReasonPaused, "%s", msg)
+				}
+				r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPaused, msg)
+				if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+		}
 		return ctrl.Result{}, nil
 	}
 

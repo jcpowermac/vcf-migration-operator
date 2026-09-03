@@ -169,8 +169,11 @@ var _ = Describe("VmwareCloudFoundationMigration Controller", func() {
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
+
+			resource := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
+			Expect(apimeta.FindStatusCondition(resource.Status.Conditions, migrationv1alpha1.ConditionReady)).To(BeNil())
+			Expect(resource.Status.StartTime).To(BeNil())
 		})
 	})
 
@@ -253,6 +256,98 @@ var _ = Describe("VmwareCloudFoundationMigration Controller", func() {
 			// No workflow conditions should have been set since the resource was never processed.
 			Expect(apimeta.FindStatusCondition(resource.Status.Conditions, migrationv1alpha1.ConditionInfrastructurePrepared)).To(BeNil())
 			Expect(resource.Status.StartTime).To(BeNil())
+		})
+	})
+
+	Context("When reconciling a resource in Paused state", func() {
+		const resourceName = migrationv1alpha1.SingletonName
+
+		ctx := context.Background()
+
+		typeNamespacedName := types.NamespacedName{
+			Name:      resourceName,
+			Namespace: "default",
+		}
+
+		BeforeEach(func() {
+			resource := &migrationv1alpha1.VmwareCloudFoundationMigration{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      resourceName,
+					Namespace: "default",
+				},
+				Spec: migrationv1alpha1.VmwareCloudFoundationMigrationSpec{
+					State: migrationv1alpha1.MigrationStatePaused,
+					TargetVCenterCredentialsSecret: migrationv1alpha1.SecretReference{
+						Name:      "target-vcenter-creds",
+						Namespace: "default",
+					},
+					FailureDomains: []configv1.VSpherePlatformFailureDomainSpec{
+						{
+							Name:   "target-fd-1",
+							Region: "target-region",
+							Zone:   "target-zone-1",
+							Server: "vcenter-target.example.com",
+							Topology: configv1.VSpherePlatformTopology{
+								Datacenter:     "TargetDC",
+								ComputeCluster: "/TargetDC/host/TargetCluster",
+								Datastore:      "/TargetDC/datastore/TargetDatastore",
+								Networks:       []string{"VM Network"},
+								ResourcePool:   "/TargetDC/host/TargetCluster/Resources",
+								Template:       "/TargetDC/vm/rhcos-template",
+								Folder:         "/TargetDC/vm/my-cluster-infra-id",
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			resource := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+		})
+
+		It("should set the Ready condition to False with reason Paused and record a Normal event", func() {
+			fakeRecorder := record.NewFakeRecorder(10)
+			controllerReconciler := &VmwareCloudFoundationMigrationReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: fakeRecorder,
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(fakeRecorder.Events).To(Receive(SatisfyAll(
+				ContainSubstring("Normal"),
+				ContainSubstring(migrationv1alpha1.ReasonPaused),
+				ContainSubstring("Migration is paused; set spec.state to Running to resume"),
+			)))
+
+			resource := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
+
+			cond := apimeta.FindStatusCondition(resource.Status.Conditions, migrationv1alpha1.ConditionReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal(migrationv1alpha1.ReasonPaused))
+			Expect(cond.Message).To(Equal("Migration is paused; set spec.state to Running to resume"))
+			Expect(cond.ObservedGeneration).To(Equal(resource.Generation))
+
+			// Workflow conditions should not have started
+			Expect(apimeta.FindStatusCondition(resource.Status.Conditions, migrationv1alpha1.ConditionInfrastructurePrepared)).To(BeNil())
+			Expect(resource.Status.StartTime).To(BeNil())
+
+			// Subsequent reconcile while still paused should be idempotent and not re-emit events
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fakeRecorder.Events).NotTo(Receive())
 		})
 	})
 })

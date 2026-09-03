@@ -241,8 +241,8 @@ const (
 	ReasonProgressing = "Progressing"
 	ReasonCompleted   = "Completed"
 	ReasonFailed      = "Failed"
-	ReasonPaused      = "Paused"
-	ReasonPending     = "Pending"
+	// ReasonPaused indicates migration has been paused because spec.state is set to Paused.
+	ReasonPaused = "Paused"
 
 	// ReasonUnsupportedName indicates the object's name is not SingletonName,
 	// so the operator is ignoring it.
