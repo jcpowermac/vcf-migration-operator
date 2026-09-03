@@ -411,11 +411,6 @@ spec:
               image:
                 description: image reports the RHCOS OVA import state.
                 properties:
-                  downloadComplete:
-                    description: |-
-                      DownloadComplete indicates the OVA has been successfully downloaded
-                      to the operator's scratch volume.
-                    type: boolean
                   importedTemplates:
                     additionalProperties:
                       type: string
@@ -444,10 +439,11 @@ spec:
                     type: string
                   urlSource:
                     description: |-
-                      urlSource records how resolvedOVAUrl was populated: "" (unresolved),
-                      "user" (user-specified), or "auto" (auto-resolved). Used to tell a
-                      deliberate user-clear of spec.image.ovaUrl apart from an empty
-                      auto-resolution when deciding whether to clear resolvedOVAUrl.
+                      urlSource records how resolvedOVAUrl was populated: "" (unresolved / no opinion),
+                      "user" (user-specified), or "auto" (auto-resolved). The zero value ("")
+                      indicates no opinion or unresolved. Used to tell a deliberate user-clear
+                      of spec.image.ovaUrl apart from an empty auto-resolution when deciding
+                      whether to clear resolvedOVAUrl.
                     type: string
                 type: object
               startTime:

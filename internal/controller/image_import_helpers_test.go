@@ -14,15 +14,15 @@ func TestNeedsOVAReresolution(t *testing.T) {
 		name     string
 		specURL  string
 		resolved string
-		source   string
+		source   migrationv1alpha1.ImageURLSource
 		want     bool
 	}{
 		{name: "initial", specURL: "", resolved: "", source: "", want: true},
 		{name: "user new", specURL: "https://a", resolved: "", source: "", want: true},
-		{name: "user changed", specURL: "https://b", resolved: "https://a", source: "user", want: true},
-		{name: "user cleared to auto", specURL: "", resolved: "https://a", source: "user", want: true},
-		{name: "auto stable", specURL: "", resolved: "https://a", source: "auto", want: false},
-		{name: "user unchanged", specURL: "https://a", resolved: "https://a", source: "user", want: false},
+		{name: "user changed", specURL: "https://b", resolved: "https://a", source: migrationv1alpha1.ImageURLSourceUser, want: true},
+		{name: "user cleared to auto", specURL: "", resolved: "https://a", source: migrationv1alpha1.ImageURLSourceUser, want: true},
+		{name: "auto stable", specURL: "", resolved: "https://a", source: migrationv1alpha1.ImageURLSourceAuto, want: false},
+		{name: "user unchanged", specURL: "https://a", resolved: "https://a", source: migrationv1alpha1.ImageURLSourceUser, want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

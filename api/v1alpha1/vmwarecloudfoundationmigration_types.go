@@ -88,6 +88,18 @@ type VmwareCloudFoundationMigrationSpec struct {
 	Image *ImageSpec `json:"image,omitempty"`
 }
 
+// DiskProvisioningMode defines the disk provisioning type for imported VM templates.
+type DiskProvisioningMode string
+
+const (
+	// DiskProvisioningModeThin allocates storage on demand as blocks are written.
+	DiskProvisioningModeThin DiskProvisioningMode = "thin"
+	// DiskProvisioningModeThick pre-allocates all storage at creation time.
+	DiskProvisioningModeThick DiskProvisioningMode = "thick"
+	// DiskProvisioningModeEagerZeroedThick pre-allocates all storage and zeroes blocks at creation time.
+	DiskProvisioningModeEagerZeroedThick DiskProvisioningMode = "eagerZeroedThick"
+)
+
 // ImageSpec controls RHCOS OVA import behavior.
 type ImageSpec struct {
 	// ovaUrl is a direct URL to the RHCOS OVA file. The URL must use https:// and
@@ -106,7 +118,7 @@ type ImageSpec struct {
 	// OVF descriptor.
 	// +optional
 	// +kubebuilder:validation:Enum=thin;thick;eagerZeroedThick
-	DiskProvisioning string `json:"diskProvisioning,omitempty"`
+	DiskProvisioning DiskProvisioningMode `json:"diskProvisioning,omitempty"`
 }
 
 // VmwareCloudFoundationMigrationStatus defines the observed state of VmwareCloudFoundationMigration.
@@ -142,6 +154,16 @@ type VmwareCloudFoundationMigrationStatus struct {
 	Image *ImageStatus `json:"image,omitempty"`
 }
 
+// ImageURLSource describes how the resolved OVA URL was obtained.
+type ImageURLSource string
+
+const (
+	// ImageURLSourceUser indicates the OVA URL was user-specified in spec.image.ovaUrl.
+	ImageURLSourceUser ImageURLSource = "user"
+	// ImageURLSourceAuto indicates the OVA URL was auto-resolved from stream metadata.
+	ImageURLSourceAuto ImageURLSource = "auto"
+)
+
 // ImageStatus reports the RHCOS OVA import progress and results.
 type ImageStatus struct {
 	// resolvedOVAUrl is the URL from which the OVA was (or will be) downloaded.
@@ -152,11 +174,6 @@ type ImageStatus struct {
 	// resolved from stream metadata. Empty for user-provided URLs.
 	// +optional
 	ResolvedSHA256 string `json:"resolvedSHA256,omitempty"`
-
-	// DownloadComplete indicates the OVA has been successfully downloaded
-	// to the operator's scratch volume.
-	// +optional
-	DownloadComplete *bool `json:"downloadComplete,omitempty"`
 
 	// importedTemplates maps failure domain names to the inventory paths
 	// of imported VM templates.
@@ -171,12 +188,13 @@ type ImageStatus struct {
 	// +optional
 	OperatorImportedTemplates map[string]string `json:"operatorImportedTemplates,omitempty"`
 
-	// urlSource records how resolvedOVAUrl was populated: "" (unresolved),
-	// "user" (user-specified), or "auto" (auto-resolved). Used to tell a
-	// deliberate user-clear of spec.image.ovaUrl apart from an empty
-	// auto-resolution when deciding whether to clear resolvedOVAUrl.
+	// urlSource records how resolvedOVAUrl was populated: "" (unresolved / no opinion),
+	// "user" (user-specified), or "auto" (auto-resolved). The zero value ("")
+	// indicates no opinion or unresolved. Used to tell a deliberate user-clear
+	// of spec.image.ovaUrl apart from an empty auto-resolution when deciding
+	// whether to clear resolvedOVAUrl.
 	// +optional
-	URLSource string `json:"urlSource,omitempty"`
+	URLSource ImageURLSource `json:"urlSource,omitempty"`
 }
 
 // Condition type constants for the migration workflow.

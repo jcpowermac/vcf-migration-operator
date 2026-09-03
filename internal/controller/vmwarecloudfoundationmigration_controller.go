@@ -36,7 +36,6 @@ import (
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -547,12 +546,11 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 	// auto-resolution, so a stored stale URL does not keep being used.
 	specURL := migration.Spec.Image.OVAUrl
 	if needsOVAReresolution(specURL, migration.Status.Image.ResolvedOVAUrl, migration.Status.Image.URLSource) {
-		migration.Status.Image.DownloadComplete = nil
 		migration.Status.Image.ResolvedSHA256 = ""
 		if specURL != "" {
 			// User-provided URL.
 			migration.Status.Image.ResolvedOVAUrl = specURL
-			migration.Status.Image.URLSource = "user"
+			migration.Status.Image.URLSource = migrationv1alpha1.ImageURLSourceUser
 			log.V(1).Info("using user-provided OVA URL", "url", vsphere.SanitizeOVAURL(specURL))
 		} else {
 			// Resolve from coreos-bootimages ConfigMap.
@@ -572,7 +570,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 
 			migration.Status.Image.ResolvedOVAUrl = ova.Location
 			migration.Status.Image.ResolvedSHA256 = ova.Sha256
-			migration.Status.Image.URLSource = "auto"
+			migration.Status.Image.URLSource = migrationv1alpha1.ImageURLSourceAuto
 			log.V(1).Info("resolved RHCOS OVA from stream metadata", "url", vsphere.SanitizeOVAURL(ova.Location), "sha256", ova.Sha256)
 		}
 
@@ -582,7 +580,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 	}
 
 	// Phase 3: Download OVA.
-	if migration.Status.Image.DownloadComplete == nil || !*migration.Status.Image.DownloadComplete {
+	if _, cached := vsphere.CachedOVAPath(migration.Status.Image.ResolvedOVAUrl, migration.Status.Image.ResolvedSHA256); !cached {
 		// Use an explicit timeout for the download to avoid blocking the
 		// reconcile loop indefinitely on slow networks.
 		downloadCtx, downloadCancel := context.WithTimeout(ctx, ovaDownloadTimeout)
@@ -595,7 +593,6 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 			return ctrl.Result{}, fmt.Errorf("downloading OVA: %w", err)
 		}
 
-		migration.Status.Image.DownloadComplete = ptr.To(true)
 		log.Info("OVA downloaded", "path", localPath)
 		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
 			"OVA downloaded, importing templates")
@@ -786,7 +783,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) importOVATemplate(ctx context
 			Network:          fd.Topology.Networks[0],
 			Folder:           folder,
 			ResourcePool:     fd.Topology.ResourcePool,
-			DiskProvisioning: migration.Spec.Image.DiskProvisioning,
+			DiskProvisioning: string(migration.Spec.Image.DiskProvisioning),
 		})
 		if err != nil {
 			r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonFailed,
@@ -820,17 +817,17 @@ func (r *VmwareCloudFoundationMigrationReconciler) importOVATemplate(ctx context
 
 // needsOVAReresolution reports whether the OVA URL must (re)resolve: nothing
 // has been resolved yet, the user changed spec.image.ovaUrl, or the user
-// cleared a previously user-supplied URL (URLSource == "user") to fall back to
+// cleared a previously user-supplied URL (urlSource == ImageURLSourceUser) to fall back to
 // ConfigMap auto-resolution. A URL that was auto-resolved or is unchanged is
 // left stable.
-func needsOVAReresolution(specURL, resolvedURL, urlSource string) bool {
+func needsOVAReresolution(specURL, resolvedURL string, urlSource migrationv1alpha1.ImageURLSource) bool {
 	if resolvedURL == "" {
 		return true
 	}
 	if specURL != "" && resolvedURL != specURL {
 		return true
 	}
-	return specURL == "" && urlSource == "user"
+	return specURL == "" && urlSource == migrationv1alpha1.ImageURLSourceUser
 }
 
 // populateTopologyTemplates fills each failure domain's topology.template from

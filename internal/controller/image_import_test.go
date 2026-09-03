@@ -24,7 +24,6 @@ import (
 	configv1 "github.com/openshift/api/config/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
@@ -210,7 +209,6 @@ var _ = Describe("DestinationImageImported Condition", func() {
 			// Manually simulate having already resolved the URL and downloaded.
 			migration.Status.Image = &migrationv1alpha1.ImageStatus{
 				ResolvedOVAUrl:    "https://example.com/rhcos.ova",
-				DownloadComplete:  ptr.To(true),
 				ImportedTemplates: make(map[string]string),
 			}
 
