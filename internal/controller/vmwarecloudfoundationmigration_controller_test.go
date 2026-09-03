@@ -356,9 +356,12 @@ var _ = Describe("VmwareCloudFoundationMigration Controller", func() {
 			resource.Spec.State = migrationv1alpha1.MigrationStateRunning
 			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
 
-			_, _ = controllerReconciler.Reconcile(ctx, reconcile.Request{
+			// The fake client has no credentials secret for the resumed workflow,
+			// so reconciliation persists the Running condition then fails.
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
 			})
+			Expect(err).To(HaveOccurred())
 
 			Expect(fakeRecorder.Events).To(Receive(SatisfyAll(
 				ContainSubstring("Normal"),

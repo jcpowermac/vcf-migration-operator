@@ -63,7 +63,7 @@ type VmwareCloudFoundationMigrationSpec struct {
 	// +optional
 	// +kubebuilder:validation:Enum=Pending;Running;Paused
 	// +kubebuilder:default=Pending
-	State MigrationState `json:"state"`
+	State MigrationState `json:"state,omitempty"`
 
 	// targetVCenterCredentialsSecret references the secret containing target vCenter credentials.
 	// The secret must contain keys: {target-vcenter-fqdn}.username and {target-vcenter-fqdn}.password.
