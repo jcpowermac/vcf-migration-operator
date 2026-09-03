@@ -26,6 +26,7 @@ import (
 
 const vsphereCSIDriverName = "csi.vsphere.vmware.com"
 const preflightVSphereTimeout = 2 * time.Minute
+const rhcosArchAMD64 = "x86_64"
 
 var (
 	machineHealthCheckGVR = schema.GroupVersionResource{Group: "machine.openshift.io", Version: "v1beta1", Resource: "machinehealthchecks"}
@@ -61,6 +62,19 @@ type credentials struct {
 	password string
 }
 
+// fdTemplateMissing returns an error naming the first failure domain whose
+// topology.template is empty. Called from runPreflightChecks only when spec.image
+// is not set, because in that mode the operator does not import a template and
+// each failure domain must reference an existing one.
+func fdTemplateMissing(fds []configv1.VSpherePlatformFailureDomainSpec) error {
+	for i := range fds {
+		if fds[i].Topology.Template == "" {
+			return fmt.Errorf("spec.failureDomains[%d].topology.template is required when spec.image is not set (failure domain %q)", i, fds[i].Name)
+		}
+	}
+	return nil
+}
+
 func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) (string, error) {
 	log := klog.FromContext(ctx)
 	condType := migrationv1alpha1.ConditionInfrastructurePrepared
@@ -70,6 +84,11 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 	}
 	if err := validateUniqueFailureDomainNames(migration.Spec.FailureDomains); err != nil {
 		return "", err
+	}
+	if migration.Spec.Image == nil {
+		if err := fdTemplateMissing(migration.Spec.FailureDomains); err != nil {
+			return "", err
+		}
 	}
 
 	secretRef := migration.Spec.TargetVCenterCredentialsSecret
@@ -123,31 +142,50 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 		vsphere.ClearSessions(vsphereCtx)
 	}()
 
+	if err := r.validatePreflightVSphere(ctx, vsphereCtx, migration); err != nil {
+		return "", err
+	}
+
+	message := "Preflight validation passed"
+	if storageWarning != "" {
+		message = fmt.Sprintf("%s; warning: %s", message, storageWarning)
+	}
+	return message, nil
+}
+
+// validatePreflightVSphere connects to the source and target vCenters and
+// verifies that the failure domain topology (datacenter, cluster, datastore,
+// networks, template) is reachable on each target. When spec.image is set,
+// it also performs a best-effort reachability check against the OVA URL.
+func (r *VmwareCloudFoundationMigrationReconciler) validatePreflightVSphere(ctx context.Context, vsphereCtx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) error {
+	log := klog.FromContext(ctx)
+	condType := migrationv1alpha1.ConditionInfrastructurePrepared
+
 	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient)
 	sourceVC, err := infraMgr.GetSourceVCenter(ctx)
 	if err != nil {
-		return "", fmt.Errorf("getting source vCenter: %w", err)
+		return fmt.Errorf("getting source vCenter: %w", err)
 	}
 
 	sm := openshift.NewSecretManager(r.KubeClient)
 	srcUser, srcPass, err := sm.GetCredentials(ctx, sourceVC.Server)
 	if err != nil {
-		return "", fmt.Errorf("getting source vCenter credentials: %w", err)
+		return fmt.Errorf("getting source vCenter credentials: %w", err)
 	}
 
 	if len(sourceVC.Datacenters) == 0 {
-		return "", fmt.Errorf("source vCenter has no datacenters configured")
+		return fmt.Errorf("source vCenter has no datacenters configured")
 	}
 	if len(sourceVC.Datacenters) > 1 {
-		return "", fmt.Errorf("source vCenter must have exactly one datacenter configured, found %d", len(sourceVC.Datacenters))
+		return fmt.Errorf("source vCenter must have exactly one datacenter configured, found %d", len(sourceVC.Datacenters))
 	}
 	srcDC := sourceVC.Datacenters[0]
 	srcSession, err := getVSphereSession(vsphereCtx, sourceVC.Server, srcDC, srcUser, srcPass)
 	if err != nil {
-		return "", fmt.Errorf("connecting to source vCenter %s: %w", sourceVC.Server, err)
+		return fmt.Errorf("connecting to source vCenter %s: %w", sourceVC.Server, err)
 	}
 	if _, err := srcSession.Finder.Datacenter(vsphereCtx, srcDC); err != nil {
-		return "", fmt.Errorf("source datacenter %q not accessible: %w", srcDC, err)
+		return fmt.Errorf("source datacenter %q not accessible: %w", srcDC, err)
 	}
 	log.V(1).Info("source vCenter connectivity validated", "server", sourceVC.Server)
 
@@ -161,26 +199,22 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 		if !ok {
 			username, password, err := getTargetCredentials(ctx, r.KubeClient, migration, fd.Server)
 			if err != nil {
-				return "", fmt.Errorf("getting credentials for target %s: %w", fd.Server, err)
+				return fmt.Errorf("getting credentials for target %s: %w", fd.Server, err)
 			}
 			creds = credentials{username: username, password: password}
 			targetCredentialsByServer[fd.Server] = creds
 		}
 
-		if err := validateFailureDomain(vsphereCtx, fd, creds); err != nil {
-			return "", err
+		if err := validateFailureDomain(vsphereCtx, migration, fd, creds); err != nil {
+			return err
 		}
 		log.V(1).Info("target failure domain validated", "name", fd.Name, "server", fd.Server)
 	}
 
-	message := "Preflight validation passed"
-	if storageWarning != "" {
-		message = fmt.Sprintf("%s; warning: %s", message, storageWarning)
-	}
-	return message, nil
+	return nil
 }
 
-func validateFailureDomain(ctx context.Context, fd *configv1.VSpherePlatformFailureDomainSpec, creds credentials) error {
+func validateFailureDomain(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, fd *configv1.VSpherePlatformFailureDomainSpec, creds credentials) error {
 	session, err := getVSphereSession(ctx, fd.Server, fd.Topology.Datacenter, creds.username, creds.password)
 	if err != nil {
 		return fmt.Errorf("connecting to target vCenter %s: %w", fd.Server, err)
@@ -212,12 +246,85 @@ func validateFailureDomain(ctx context.Context, fd *configv1.VSpherePlatformFail
 			return fmt.Errorf("target folder %q on %s not found: %w", fd.Topology.Folder, fd.Server, err)
 		}
 	}
+	// Template check: skip when spec.image is set and topology.template is
+	// empty — the template will be created by ensureDestinationImageImported. A
+	// missing template with spec.image unset is rejected earlier in
+	// runPreflightChecks.
 	if fd.Topology.Template != "" {
 		if _, err := session.Finder.VirtualMachine(ctx, fd.Topology.Template); err != nil {
 			return fmt.Errorf("target template %q on %s not found: %w", fd.Topology.Template, fd.Server, err)
 		}
 	}
-	return validateTargetPrivileges(ctx, session, datacenter, cluster)
+
+	if err := validateTargetPrivileges(ctx, session, datacenter, cluster); err != nil {
+		return fmt.Errorf("validating target privileges for failure domain %q: %w", fd.Name, err)
+	}
+
+	if migration.Spec.Image != nil && fd.Topology.Template == "" {
+		if err := validateImageImportPrivileges(ctx, session, cluster, fd.Topology.ResourcePool); err != nil {
+			return fmt.Errorf("validating image import privileges for failure domain %q: %w", fd.Name, err)
+		}
+	}
+
+	return nil
+}
+
+// imageImportPrivileges are the vCenter privileges required for OVA import.
+var imageImportPrivileges = []string{
+	"VApp.Import",
+	"VirtualMachine.Config.AddNewDisk",
+	"VirtualMachine.Inventory.CreateFromExisting",
+}
+
+// validateImageImportPrivileges checks that the authenticated user has the
+// privileges required for OVA import on the effective resource pool.
+// When resourcePoolPath is non-empty, privileges are checked against that
+// specific resource pool; otherwise, the cluster's default resource pool is used.
+func validateImageImportPrivileges(ctx context.Context, session *vsphere.Session, cluster *object.ClusterComputeResource, resourcePoolPath string) error {
+	if session == nil || session.Client == nil || session.Client.Client == nil {
+		return fmt.Errorf("session client must not be nil")
+	}
+
+	userSession, err := session.Client.SessionManager.UserSession(ctx)
+	if err != nil {
+		return fmt.Errorf("getting current vSphere user session: %w", err)
+	}
+	if userSession == nil {
+		return fmt.Errorf("current vSphere user session not found")
+	}
+
+	authMgr := object.NewAuthorizationManager(session.Client.Client)
+
+	var rp *object.ResourcePool
+	if resourcePoolPath != "" {
+		rp, err = session.Finder.ResourcePool(ctx, resourcePoolPath)
+		if err != nil {
+			return fmt.Errorf("finding resource pool %q: %w", resourcePoolPath, err)
+		}
+	} else {
+		rp, err = cluster.ResourcePool(ctx)
+		if err != nil {
+			return fmt.Errorf("getting cluster resource pool: %w", err)
+		}
+	}
+
+	results, err := authMgr.HasUserPrivilegeOnEntities(ctx,
+		[]types.ManagedObjectReference{rp.Reference()},
+		userSession.UserName, imageImportPrivileges)
+	if err != nil {
+		return fmt.Errorf("checking image import privileges: %w", err)
+	}
+
+	if len(results) == 0 {
+		return fmt.Errorf("no privilege check results returned for resource pool")
+	}
+
+	missing := missingPrivileges(results[0], imageImportPrivileges)
+	if len(missing) > 0 {
+		return fmt.Errorf("missing required image import privileges on resource pool: %s", strings.Join(missing, ", "))
+	}
+
+	return nil
 }
 
 func (r *VmwareCloudFoundationMigrationReconciler) hasTargetVCenterConfiguration(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) (bool, error) {

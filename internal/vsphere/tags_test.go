@@ -622,6 +622,7 @@ func TestAttachClusterOwnershipTag(t *testing.T) {
 			}
 		})
 	})
+
 }
 
 func createTestCategory(ctx context.Context, t *testing.T, s *Session, category tags.Category) string {

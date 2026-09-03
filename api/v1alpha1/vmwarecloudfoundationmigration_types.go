@@ -66,6 +66,32 @@ type VmwareCloudFoundationMigrationSpec struct {
 	// Name, Region, Zone, Server, and Topology with all necessary fields.
 	// +kubebuilder:validation:MinItems=1
 	FailureDomains []configv1.VSpherePlatformFailureDomainSpec `json:"failureDomains"`
+
+	// Image controls RHCOS OVA resolution and import into destination vCenter.
+	// When set, the operator downloads and imports the OVA as a VM template
+	// for each failure domain and populates topology.template automatically.
+	// When omitted, topology.template must be set manually in each failure domain.
+	// +optional
+	Image *ImageSpec `json:"image,omitempty"`
+}
+
+// ImageSpec controls RHCOS OVA import behavior.
+type ImageSpec struct {
+	// OVAUrl is a direct URL to the RHCOS OVA file. When set, the operator
+	// downloads from this URL instead of resolving via the coreos-bootimages
+	// ConfigMap delivered by CVO.
+	// Supports both direct .ova URLs and URLs with query parameters (e.g.
+	// integrity digests appended by stream metadata tooling).
+	// Required for air-gapped environments: point to an internal HTTP(S) mirror.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^https://.*\.ova(\?.*)?$`
+	OVAUrl string `json:"ovaUrl,omitempty"`
+
+	// DiskProvisioning controls the VMDK disk provisioning type when importing
+	// the OVA. Matches the installer's behavior.
+	// +optional
+	// +kubebuilder:validation:Enum=thin;thick;eagerZeroedThick
+	DiskProvisioning string `json:"diskProvisioning,omitempty"`
 }
 
 // VmwareCloudFoundationMigrationStatus defines the observed state of VmwareCloudFoundationMigration.
@@ -85,6 +111,47 @@ type VmwareCloudFoundationMigrationStatus struct {
 	// CompletionTime is when the migration completed.
 	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
+
+	// Image reports the RHCOS OVA import state.
+	// +optional
+	Image *ImageStatus `json:"image,omitempty"`
+}
+
+// ImageStatus reports the RHCOS OVA import progress and results.
+type ImageStatus struct {
+	// ResolvedOVAUrl is the URL from which the OVA was (or will be) downloaded.
+	// +optional
+	ResolvedOVAUrl string `json:"resolvedOVAUrl,omitempty"`
+
+	// ResolvedSHA256 is the expected sha256 digest of the OVA file, when
+	// resolved from stream metadata. Empty for user-provided URLs.
+	// +optional
+	ResolvedSHA256 string `json:"resolvedSHA256,omitempty"`
+
+	// DownloadComplete indicates the OVA has been successfully downloaded
+	// to the operator's scratch volume.
+	// +optional
+	DownloadComplete bool `json:"downloadComplete,omitempty"`
+
+	// ImportedTemplates maps failure domain names to the inventory paths
+	// of imported VM templates.
+	// +optional
+	ImportedTemplates map[string]string `json:"importedTemplates,omitempty"`
+
+	// OperatorImportedTemplates records the OVA URL each failure domain's
+	// template was imported from by the operator. It is populated only for
+	// operator imports; user-pre-configured templates are not recorded here.
+	// Used to detect a changed OVA URL and re-import only operator-managed
+	// templates without touching user-provided ones.
+	// +optional
+	OperatorImportedTemplates map[string]string `json:"operatorImportedTemplates,omitempty"`
+
+	// URLSource records how ResolvedOVAUrl was populated: "" (unresolved),
+	// "user" (user-specified), or "auto" (auto-resolved). Used to tell a
+	// deliberate user-clear of spec.image.ovaUrl apart from an empty
+	// auto-resolution when deciding whether to clear ResolvedOVAUrl.
+	// +optional
+	URLSource string `json:"urlSource,omitempty"`
 }
 
 // Condition type constants for the migration workflow.
@@ -98,6 +165,11 @@ const (
 	// ConditionDestinationInitialized indicates the target vCenter has all required assets
 	// (VM folders, region/zone tags).
 	ConditionDestinationInitialized = "DestinationInitialized"
+
+	// ConditionDestinationImageImported indicates the RHCOS OVA has been
+	// downloaded and imported as a VM template on all target vCenters.
+	// When spec.image is nil, this condition is immediately set to True.
+	ConditionDestinationImageImported = "DestinationImageImported"
 
 	// ConditionMultiSiteConfigured indicates the cluster recognizes both vCenters
 	// (secrets, Infrastructure CRD, cloud-provider-config updated, pods restarted).

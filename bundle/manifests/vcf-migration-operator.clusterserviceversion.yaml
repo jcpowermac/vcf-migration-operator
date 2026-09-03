@@ -43,7 +43,7 @@ metadata:
         }
       ]
     capabilities: Basic Install
-    createdAt: "2026-08-12T12:41:49Z"
+    createdAt: "2026-09-02T12:29:02Z"
     features.operators.openshift.io/disconnected: "true"
     features.operators.openshift.io/fips-compliant: "false"
     features.operators.openshift.io/proxy-aware: "false"
@@ -277,7 +277,7 @@ spec:
                 resources:
                   limits:
                     cpu: 500m
-                    memory: 128Mi
+                    memory: 256Mi
                   requests:
                     cpu: 10m
                     memory: 64Mi
@@ -286,12 +286,19 @@ spec:
                   capabilities:
                     drop:
                     - ALL
+                volumeMounts:
+                - mountPath: /tmp/ova-scratch
+                  name: scratch
               securityContext:
                 runAsNonRoot: true
                 seccompProfile:
                   type: RuntimeDefault
               serviceAccountName: vcf-migration-operator-controller-manager
               terminationGracePeriodSeconds: 10
+              volumes:
+              - emptyDir:
+                  sizeLimit: 2Gi
+                name: scratch
       permissions:
       - rules:
         - apiGroups:
