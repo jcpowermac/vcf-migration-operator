@@ -58,7 +58,7 @@ type SecretReference struct {
 // VmwareCloudFoundationMigrationSpec defines the desired state of VmwareCloudFoundationMigration.
 type VmwareCloudFoundationMigrationSpec struct {
 	// state controls the workflow: Pending, Running, Paused.
-	// The reconciler only acts when state is Running.
+	// The migration workflow only executes when state is Running.
 	// When omitted, defaults to Pending.
 	// +optional
 	// +kubebuilder:validation:Enum=Pending;Running;Paused

@@ -299,7 +299,7 @@ spec:
                 default: Pending
                 description: |-
                   state controls the workflow: Pending, Running, Paused.
-                  The reconciler only acts when state is Running.
+                  The migration workflow only executes when state is Running.
                   When omitted, defaults to Pending.
                 enum:
                 - Pending

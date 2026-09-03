@@ -231,6 +231,20 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 		return ctrl.Result{}, nil
 	}
 
+	// If resuming from Paused, clear the Paused condition on Ready and set it to Progressing.
+	cond := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionReady)
+	if cond != nil && cond.Reason == migrationv1alpha1.ReasonPaused {
+		log.V(1).Info("migration resumed from Paused state, updating Ready condition")
+		msg := "Migration is running"
+		if r.Recorder != nil {
+			r.Recorder.Eventf(migration, "Normal", migrationv1alpha1.ReasonProgressing, "%s", msg)
+		}
+		r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, msg)
+		if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	// Set start time on first reconcile in Running state.
 	if migration.Status.StartTime == nil {
 		now := metav1.Now()

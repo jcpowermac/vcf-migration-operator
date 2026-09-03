@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
+	fakekube "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -309,12 +310,13 @@ var _ = Describe("VmwareCloudFoundationMigration Controller", func() {
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 		})
 
-		It("should set the Ready condition to False with reason Paused and record a Normal event", func() {
+		It("should set the Ready condition to False with reason Paused and transition to Progressing on resume", func() {
 			fakeRecorder := record.NewFakeRecorder(10)
 			controllerReconciler := &VmwareCloudFoundationMigrationReconciler{
-				Client:   k8sClient,
-				Scheme:   k8sClient.Scheme(),
-				Recorder: fakeRecorder,
+				Client:     k8sClient,
+				Scheme:     k8sClient.Scheme(),
+				KubeClient: fakekube.NewClientset(),
+				Recorder:   fakeRecorder,
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
@@ -348,6 +350,30 @@ var _ = Describe("VmwareCloudFoundationMigration Controller", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(fakeRecorder.Events).NotTo(Receive())
+
+			// Resume migration by setting state to Running
+			Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
+			resource.Spec.State = migrationv1alpha1.MigrationStateRunning
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
+
+			_, _ = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+
+			Expect(fakeRecorder.Events).To(Receive(SatisfyAll(
+				ContainSubstring("Normal"),
+				ContainSubstring(migrationv1alpha1.ReasonProgressing),
+				ContainSubstring("Migration is running"),
+			)))
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
+
+			cond = apimeta.FindStatusCondition(resource.Status.Conditions, migrationv1alpha1.ConditionReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal(migrationv1alpha1.ReasonProgressing))
+			Expect(cond.Message).To(Equal("Migration is running"))
+			Expect(cond.ObservedGeneration).To(Equal(resource.Generation))
 		})
 	})
 })
