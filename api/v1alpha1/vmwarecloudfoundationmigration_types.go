@@ -33,30 +33,6 @@ const (
 	MigrationStatePaused MigrationState = "Paused"
 )
 
-// MigrationPhase represents the current phase of the migration workflow.
-type MigrationPhase string
-
-const (
-	// PhasePending indicates the migration is waiting to start.
-	PhasePending MigrationPhase = "Pending"
-	// PhaseInfrastructurePrepared indicates preflight checks and path selection are complete.
-	PhaseInfrastructurePrepared MigrationPhase = "InfrastructurePrepared"
-	// PhaseDestinationInitialized indicates target vCenter assets have been created.
-	PhaseDestinationInitialized MigrationPhase = "DestinationInitialized"
-	// PhaseMultiSiteConfigured indicates the cluster recognizes both vCenters.
-	PhaseMultiSiteConfigured MigrationPhase = "MultiSiteConfigured"
-	// PhaseWorkloadMigrated indicates compute has migrated to the target vCenter.
-	PhaseWorkloadMigrated MigrationPhase = "WorkloadMigrated"
-	// PhaseSourceCleaned indicates the source vCenter has been removed.
-	PhaseSourceCleaned MigrationPhase = "SourceCleaned"
-	// PhaseCompleted indicates the entire migration workflow completed successfully.
-	PhaseCompleted MigrationPhase = "Completed"
-	// PhaseFailed indicates a fatal error occurred during migration.
-	PhaseFailed MigrationPhase = "Failed"
-	// PhasePaused indicates the migration was paused by the user.
-	PhasePaused MigrationPhase = "Paused"
-)
-
 // MigrationProgress contains real-time counters and details of resource migration.
 type MigrationProgress struct {
 	// Workers tracks worker machine and node migration progress.
@@ -187,12 +163,7 @@ type ImageSpec struct {
 
 // VmwareCloudFoundationMigrationStatus defines the observed state of VmwareCloudFoundationMigration.
 type VmwareCloudFoundationMigrationStatus struct {
-	// phase indicates the current stage of the migration workflow.
-	// +optional
-	// +kubebuilder:validation:Enum="";Pending;InfrastructurePrepared;DestinationInitialized;MultiSiteConfigured;WorkloadMigrated;SourceCleaned;Completed;Failed;Paused
-	Phase MigrationPhase `json:"phase,omitempty"`
-
-	// Progress surfaces real-time counts for worker and control-plane migration.
+	// progress surfaces real-time counts for worker and control-plane migration.
 	// +optional
 	Progress *MigrationProgress `json:"progress,omitempty"`
 
