@@ -70,24 +70,31 @@ type MigrationProgress struct {
 
 // WorkerMigrationProgress surfaces worker machine and node counts across source and target.
 type WorkerMigrationProgress struct {
-	// TargetMachinesTotal is the desired number of worker machines in target failure domains.
-	TargetMachinesTotal int32 `json:"targetMachinesTotal"`
-	// TargetMachinesReady is the number of target worker machines in Running phase with a NodeRef.
-	TargetMachinesReady int32 `json:"targetMachinesReady"`
-	// TargetNodesReady is the number of target worker nodes reporting NodeReady=True.
-	TargetNodesReady int32 `json:"targetNodesReady"`
-	// SourceMachinesRemaining is the number of source worker machines still existing.
-	SourceMachinesRemaining int32 `json:"sourceMachinesRemaining"`
+	// targetMachinesTotal is the desired number of worker machines in target failure domains.
+	// +optional
+	TargetMachinesTotal int32 `json:"targetMachinesTotal,omitempty"`
+	// targetMachinesReady is the number of target worker machines in Running phase with a NodeRef.
+	// +optional
+	TargetMachinesReady int32 `json:"targetMachinesReady,omitempty"`
+	// targetNodesReady is the number of target worker nodes reporting NodeReady=True.
+	// +optional
+	TargetNodesReady int32 `json:"targetNodesReady,omitempty"`
+	// sourceMachinesRemaining is the number of source worker machines still existing.
+	// +optional
+	SourceMachinesRemaining int32 `json:"sourceMachinesRemaining,omitempty"`
 }
 
 // ControlPlaneProgress surfaces CPMS rollout counts.
 type ControlPlaneProgress struct {
-	// Replicas is the total desired control plane replicas.
-	Replicas int32 `json:"replicas"`
-	// UpdatedReplicas is the number of control plane replicas matching the target spec.
-	UpdatedReplicas int32 `json:"updatedReplicas"`
-	// ReadyReplicas is the number of control plane replicas running and ready.
-	ReadyReplicas int32 `json:"readyReplicas"`
+	// replicas is the total desired control plane replicas.
+	// +optional
+	Replicas int32 `json:"replicas,omitempty"`
+	// updatedReplicas is the number of control plane replicas matching the target spec.
+	// +optional
+	UpdatedReplicas int32 `json:"updatedReplicas,omitempty"`
+	// readyReplicas is the number of control plane replicas running and ready.
+	// +optional
+	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
 }
 
 // SingletonName is the only object name the operator will reconcile. Since a
@@ -180,8 +187,9 @@ type ImageSpec struct {
 
 // VmwareCloudFoundationMigrationStatus defines the observed state of VmwareCloudFoundationMigration.
 type VmwareCloudFoundationMigrationStatus struct {
-	// Phase indicates the current stage of the migration workflow.
+	// phase indicates the current stage of the migration workflow.
 	// +optional
+	// +kubebuilder:validation:Enum="";Pending;InfrastructurePrepared;DestinationInitialized;MultiSiteConfigured;WorkloadMigrated;SourceCleaned;Completed;Failed;Paused
 	Phase MigrationPhase `json:"phase,omitempty"`
 
 	// Progress surfaces real-time counts for worker and control-plane migration.
