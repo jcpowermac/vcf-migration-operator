@@ -458,22 +458,8 @@ spec:
                   updated.
                 format: date-time
                 type: string
-              phase:
-                description: phase indicates the current stage of the migration workflow.
-                enum:
-                - ""
-                - Pending
-                - InfrastructurePrepared
-                - DestinationInitialized
-                - MultiSiteConfigured
-                - WorkloadMigrated
-                - SourceCleaned
-                - Completed
-                - Failed
-                - Paused
-                type: string
               progress:
-                description: Progress surfaces real-time counts for worker and control-plane
+                description: progress surfaces real-time counts for worker and control-plane
                   migration.
                 properties:
                   controlPlane:

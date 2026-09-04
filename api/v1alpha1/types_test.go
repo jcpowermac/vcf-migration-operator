@@ -9,7 +9,6 @@ import (
 func TestMigrationProgressDeepCopy(t *testing.T) {
 	now := metav1.Now()
 	orig := &VmwareCloudFoundationMigrationStatus{
-		Phase: PhaseWorkloadMigrated,
 		Progress: &MigrationProgress{
 			Workers: &WorkerMigrationProgress{
 				TargetMachinesTotal:     3,
@@ -31,9 +30,6 @@ func TestMigrationProgressDeepCopy(t *testing.T) {
 	copied := orig.DeepCopy()
 	if copied == nil {
 		t.Fatal("DeepCopy returned nil")
-	}
-	if copied.Phase != PhaseWorkloadMigrated {
-		t.Errorf("expected phase %s, got %s", PhaseWorkloadMigrated, copied.Phase)
 	}
 	if copied.Progress == nil || copied.Progress.Workers == nil || copied.Progress.Workers.TargetMachinesReady != 3 {
 		t.Errorf("progress workers not copied properly: %+v", copied.Progress)

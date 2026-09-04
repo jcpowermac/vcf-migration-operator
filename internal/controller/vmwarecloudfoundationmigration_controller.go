@@ -202,7 +202,6 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 		if !alreadyRecorded {
 			log.Info("ignoring VmwareCloudFoundationMigration with unsupported name; only a single resource is reconciled", "expectedName", migrationv1alpha1.SingletonName, "actualName", migration.Name)
 			r.Recorder.Eventf(migration, "Warning", migrationv1alpha1.ReasonUnsupportedName, "this operator only reconciles a VmwareCloudFoundationMigration named %q; this resource will be ignored", migrationv1alpha1.SingletonName)
-			migration.Status.Phase = migrationv1alpha1.PhaseFailed
 			r.setCondition(migration, migrationv1alpha1.ConditionAccepted, metav1.ConditionFalse, migrationv1alpha1.ReasonUnsupportedName, fmt.Sprintf("only a VmwareCloudFoundationMigration named %q is reconciled by this operator", migrationv1alpha1.SingletonName))
 			if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
 				return ctrl.Result{}, err
@@ -214,7 +213,6 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 	if migration.Spec.State != migrationv1alpha1.MigrationStateRunning {
 		log.V(1).Info("migration not in Running state, skipping", "state", migration.Spec.State)
 		if migration.Spec.State == migrationv1alpha1.MigrationStatePaused {
-			migration.Status.Phase = migrationv1alpha1.PhasePaused
 			cond := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionReady)
 			alreadyRecorded := cond != nil &&
 				cond.Status == metav1.ConditionFalse &&
@@ -227,8 +225,6 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 				}
 				r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPaused, msg)
 			}
-		} else {
-			migration.Status.Phase = migrationv1alpha1.PhasePending
 		}
 		if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
 			return ctrl.Result{}, err
@@ -254,7 +250,6 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 	if migration.Status.StartTime == nil {
 		now := metav1.Now()
 		migration.Status.StartTime = &now
-		migration.Status.Phase = conditionToPhase(conditionOrder[0])
 		r.Recorder.Event(migration, "Normal", "MigrationStarted", "Migration workflow started")
 		if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
 			return ctrl.Result{}, err
@@ -285,11 +280,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 			return ctrl.Result{}, fmt.Errorf("no handler for condition %q", condType)
 		}
 
-		migration.Status.Phase = conditionToPhase(condType)
 		log.V(1).Info("processing condition", "condition", condType)
 		result, err := handler(ctx, migration)
 		if err != nil {
-			migration.Status.Phase = migrationv1alpha1.PhaseFailed
 			r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonFailed, err.Error())
 			r.Recorder.Eventf(migration, "Warning", "ConditionFailed", "Condition %s failed: %v", condType, err)
 		}
@@ -307,7 +300,6 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 	}
 
 	// All conditions True: migration complete.
-	migration.Status.Phase = migrationv1alpha1.PhaseCompleted
 	if statusErr := r.updateStatus(ctx, migration, baseStatus); statusErr != nil {
 		log.Error(statusErr, "failed to update status")
 		return ctrl.Result{}, statusErr
@@ -1621,15 +1613,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 			}
 			apimeta.SetStatusCondition(&latest.Status.Conditions, cond)
 		}
-		// Apply only phase and progress deltas computed for the current resource
+		// Apply only progress deltas computed for the current resource
 		// generation, matching the generation protection used for conditions.
 		if migration.Generation == latest.Generation {
-			if migration.Status.Phase != "" && (latest.Status.Phase == "" || migration.Status.Phase != baseStatus.Phase) {
-				if latest.Status.Phase != migration.Status.Phase {
-					latest.Status.Phase = migration.Status.Phase
-					hasChanges = true
-				}
-			}
 			if migration.Status.Progress != nil && (latest.Status.Progress == nil || !reflect.DeepEqual(baseStatus.Progress, migration.Status.Progress)) {
 				if !reflect.DeepEqual(latest.Status.Progress, migration.Status.Progress) {
 					latest.Status.Progress = migration.Status.Progress.DeepCopy()
@@ -1669,26 +1655,6 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 		return fmt.Errorf("updating migration status: %w", err)
 	}
 	return nil
-}
-
-// conditionToPhase maps an active migration condition to its corresponding MigrationPhase.
-func conditionToPhase(condType string) migrationv1alpha1.MigrationPhase {
-	switch condType {
-	case migrationv1alpha1.ConditionInfrastructurePrepared:
-		return migrationv1alpha1.PhaseInfrastructurePrepared
-	case migrationv1alpha1.ConditionDestinationInitialized:
-		return migrationv1alpha1.PhaseDestinationInitialized
-	case migrationv1alpha1.ConditionMultiSiteConfigured:
-		return migrationv1alpha1.PhaseMultiSiteConfigured
-	case migrationv1alpha1.ConditionWorkloadMigrated:
-		return migrationv1alpha1.PhaseWorkloadMigrated
-	case migrationv1alpha1.ConditionSourceCleaned:
-		return migrationv1alpha1.PhaseSourceCleaned
-	case migrationv1alpha1.ConditionReady:
-		return migrationv1alpha1.PhaseSourceCleaned
-	default:
-		return migrationv1alpha1.MigrationPhase(condType)
-	}
 }
 
 // updateWorkloadProgress calculates and populates migration.Status.Progress with
