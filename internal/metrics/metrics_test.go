@@ -10,6 +10,72 @@ import (
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
 )
 
+func TestPhaseFromConditions(t *testing.T) {
+	cond := func(name string, status metav1.ConditionStatus, reason string) metav1.Condition {
+		return metav1.Condition{Type: name, Status: status, Reason: reason}
+	}
+
+	tests := []struct {
+		name       string
+		conditions []metav1.Condition
+		want       string
+	}{
+		{name: "no conditions is Pending", want: "Pending"},
+		{
+			name: "first stage in progress",
+			conditions: []metav1.Condition{
+				cond(migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing),
+			},
+			want: "InfrastructurePrepared",
+		},
+		{
+			name: "absent stage after completed stage is next stage",
+			conditions: []metav1.Condition{
+				cond(migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted),
+			},
+			want: "DestinationInitialized",
+		},
+		{
+			name: "image import stage in progress",
+			conditions: []metav1.Condition{
+				cond(migrationv1alpha1.ConditionDestinationInitialized, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted),
+				cond(migrationv1alpha1.ConditionDestinationImageImported, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing),
+			},
+			want: "DestinationImageImported",
+		},
+		{
+			name: "active stage failed",
+			conditions: []metav1.Condition{
+				cond(migrationv1alpha1.ConditionMultiSiteConfigured, metav1.ConditionFalse, migrationv1alpha1.ReasonFailed),
+			},
+			want: "Failed",
+		},
+		{
+			name: "ready paused",
+			conditions: []metav1.Condition{
+				cond(migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPaused),
+			},
+			want: "Paused",
+		},
+		{
+			name: "ready true is completed",
+			conditions: []metav1.Condition{
+				cond(migrationv1alpha1.ConditionSourceCleaned, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted),
+				cond(migrationv1alpha1.ConditionReady, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted),
+			},
+			want: "Completed",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := PhaseFromConditions(&migrationv1alpha1.VmwareCloudFoundationMigrationStatus{Conditions: tt.conditions})
+			if got != tt.want {
+				t.Errorf("PhaseFromConditions() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestUpdateMigrationMetrics(t *testing.T) {
 	InitMetrics()
 	defer ResetMetrics()
@@ -18,12 +84,12 @@ func TestUpdateMigrationMetrics(t *testing.T) {
 	startTime := metav1.NewTime(now.Add(-5 * time.Minute))
 
 	status := &migrationv1alpha1.VmwareCloudFoundationMigrationStatus{
-		Phase:     migrationv1alpha1.PhaseWorkloadMigrated,
 		StartTime: &startTime,
 		Conditions: []metav1.Condition{
 			{
 				Type:   migrationv1alpha1.ConditionWorkloadMigrated,
-				Status: metav1.ConditionTrue,
+				Status: metav1.ConditionFalse,
+				Reason: migrationv1alpha1.ReasonProgressing,
 			},
 			{
 				Type:   migrationv1alpha1.ConditionReady,
@@ -47,18 +113,18 @@ func TestUpdateMigrationMetrics(t *testing.T) {
 
 	UpdateMigrationMetrics(status)
 
-	if val := testutil.ToFloat64(MigrationPhaseGauge.WithLabelValues(string(migrationv1alpha1.PhaseWorkloadMigrated))); val != 1 {
+	if val := testutil.ToFloat64(MigrationPhaseGauge.WithLabelValues("WorkloadMigrated")); val != 1 {
 		t.Errorf("expected phase gauge for WorkloadMigrated to be 1, got %f", val)
 	}
-	if val := testutil.ToFloat64(MigrationPhaseGauge.WithLabelValues(string(migrationv1alpha1.PhasePending))); val != 0 {
+	if val := testutil.ToFloat64(MigrationPhaseGauge.WithLabelValues("Pending")); val != 0 {
 		t.Errorf("expected phase gauge for Pending to be 0, got %f", val)
 	}
 
-	if val := testutil.ToFloat64(ConditionStatusGauge.WithLabelValues(migrationv1alpha1.ConditionWorkloadMigrated, string(metav1.ConditionTrue))); val != 1 {
-		t.Errorf("expected ConditionWorkloadMigrated True gauge to be 1, got %f", val)
+	if val := testutil.ToFloat64(ConditionStatusGauge.WithLabelValues(migrationv1alpha1.ConditionWorkloadMigrated, string(metav1.ConditionFalse))); val != 1 {
+		t.Errorf("expected ConditionWorkloadMigrated False gauge to be 1, got %f", val)
 	}
-	if val := testutil.ToFloat64(ConditionStatusGauge.WithLabelValues(migrationv1alpha1.ConditionWorkloadMigrated, string(metav1.ConditionFalse))); val != 0 {
-		t.Errorf("expected ConditionWorkloadMigrated False gauge to be 0, got %f", val)
+	if val := testutil.ToFloat64(ConditionStatusGauge.WithLabelValues(migrationv1alpha1.ConditionWorkloadMigrated, string(metav1.ConditionTrue))); val != 0 {
+		t.Errorf("expected ConditionWorkloadMigrated True gauge to be 0, got %f", val)
 	}
 
 	if val := testutil.ToFloat64(WorkersTotalGauge); val != 3 {
@@ -96,9 +162,14 @@ func TestUpdateMigrationMetricsCompletion(t *testing.T) {
 	completionTime := metav1.NewTime(time.Date(2026, 1, 1, 0, 10, 0, 0, time.UTC))
 
 	status := &migrationv1alpha1.VmwareCloudFoundationMigrationStatus{
-		Phase:          migrationv1alpha1.PhaseCompleted,
 		StartTime:      &startTime,
 		CompletionTime: &completionTime,
+		Conditions: []metav1.Condition{
+			{
+				Type:   migrationv1alpha1.ConditionReady,
+				Status: metav1.ConditionTrue,
+			},
+		},
 	}
 
 	UpdateMigrationMetrics(status)
@@ -112,7 +183,12 @@ func TestResetMetrics(t *testing.T) {
 	InitMetrics()
 
 	status := &migrationv1alpha1.VmwareCloudFoundationMigrationStatus{
-		Phase: migrationv1alpha1.PhaseCompleted,
+		Conditions: []metav1.Condition{
+			{
+				Type:   migrationv1alpha1.ConditionReady,
+				Status: metav1.ConditionTrue,
+			},
+		},
 		Progress: &migrationv1alpha1.MigrationProgress{
 			Workers: &migrationv1alpha1.WorkerMigrationProgress{
 				TargetMachinesTotal: 5,
@@ -123,7 +199,7 @@ func TestResetMetrics(t *testing.T) {
 	UpdateMigrationMetrics(status)
 	ResetMetrics()
 
-	if val := testutil.ToFloat64(MigrationPhaseGauge.WithLabelValues(string(migrationv1alpha1.PhaseCompleted))); val != 0 {
+	if val := testutil.ToFloat64(MigrationPhaseGauge.WithLabelValues("Completed")); val != 0 {
 		t.Errorf("expected phase gauge to be 0 after reset, got %f", val)
 	}
 	if val := testutil.ToFloat64(WorkersTotalGauge); val != 0 {
