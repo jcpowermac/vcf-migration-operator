@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
@@ -13,10 +14,11 @@ import (
 
 var (
 	// MigrationPhaseGauge tracks the current phase of the migration workflow (1 for active, 0 for inactive).
+	// The phase is derived from status conditions, the single source of truth for stage state.
 	MigrationPhaseGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "vcf_migration_phase",
-			Help: "Current phase of the migration workflow (1 for active, 0 for inactive)",
+			Help: "Current phase of the migration workflow, derived from status conditions (1 for active, 0 for inactive)",
 		},
 		[]string{"phase"},
 	)
@@ -96,16 +98,20 @@ var (
 
 	registerOnce sync.Once
 
-	allPhases = []migrationv1alpha1.MigrationPhase{
-		migrationv1alpha1.PhasePending,
-		migrationv1alpha1.PhaseInfrastructurePrepared,
-		migrationv1alpha1.PhaseDestinationInitialized,
-		migrationv1alpha1.PhaseMultiSiteConfigured,
-		migrationv1alpha1.PhaseWorkloadMigrated,
-		migrationv1alpha1.PhaseSourceCleaned,
-		migrationv1alpha1.PhaseCompleted,
-		migrationv1alpha1.PhaseFailed,
-		migrationv1alpha1.PhasePaused,
+	// phaseOrder lists the workflow conditions in execution order.
+	phaseOrder = []string{
+		migrationv1alpha1.ConditionInfrastructurePrepared,
+		migrationv1alpha1.ConditionDestinationInitialized,
+		migrationv1alpha1.ConditionDestinationImageImported,
+		migrationv1alpha1.ConditionMultiSiteConfigured,
+		migrationv1alpha1.ConditionWorkloadMigrated,
+		migrationv1alpha1.ConditionSourceCleaned,
+	}
+
+	allPhases = []string{
+		"Pending", "InfrastructurePrepared", "DestinationInitialized",
+		"DestinationImageImported", "MultiSiteConfigured", "WorkloadMigrated",
+		"SourceCleaned", "Completed", "Failed", "Paused",
 	}
 
 	allConditionStatuses = []metav1.ConditionStatus{
@@ -138,6 +144,43 @@ func InitMetrics() {
 	})
 }
 
+// PhaseFromConditions derives the migration phase from the status conditions:
+// Completed when Ready is True, Paused when Ready is False/Paused, Failed when
+// the active workflow condition is False/Failed, the first non-True workflow
+// condition name while progressing (absent stages count as not yet reached),
+// and Pending before any workflow condition has been set.
+func PhaseFromConditions(status *migrationv1alpha1.VmwareCloudFoundationMigrationStatus) string {
+	ready := apimeta.FindStatusCondition(status.Conditions, migrationv1alpha1.ConditionReady)
+	if ready != nil && ready.Status == metav1.ConditionTrue {
+		return "Completed"
+	}
+	if ready != nil && ready.Reason == migrationv1alpha1.ReasonPaused {
+		return "Paused"
+	}
+	started := false
+	for _, condType := range phaseOrder {
+		cond := apimeta.FindStatusCondition(status.Conditions, condType)
+		if cond == nil {
+			if started {
+				// Prior stages exist, so this is the next stage.
+				return condType
+			}
+			continue
+		}
+		started = true
+		if cond.Status != metav1.ConditionTrue {
+			if cond.Reason == migrationv1alpha1.ReasonFailed {
+				return "Failed"
+			}
+			return condType
+		}
+	}
+	if started {
+		return "Completed"
+	}
+	return "Pending"
+}
+
 // UpdateMigrationMetrics updates all Prometheus metrics based on the current migration status.
 func UpdateMigrationMetrics(status *migrationv1alpha1.VmwareCloudFoundationMigrationStatus) {
 	if status == nil {
@@ -145,11 +188,12 @@ func UpdateMigrationMetrics(status *migrationv1alpha1.VmwareCloudFoundationMigra
 	}
 
 	// Update Phase gauge: 1 for active phase, 0 for all others.
+	phase := PhaseFromConditions(status)
 	for _, p := range allPhases {
-		if status.Phase == p {
-			MigrationPhaseGauge.WithLabelValues(string(p)).Set(1)
+		if phase == p {
+			MigrationPhaseGauge.WithLabelValues(p).Set(1)
 		} else {
-			MigrationPhaseGauge.WithLabelValues(string(p)).Set(0)
+			MigrationPhaseGauge.WithLabelValues(p).Set(0)
 		}
 	}
 
@@ -194,7 +238,7 @@ func UpdateMigrationMetrics(status *migrationv1alpha1.VmwareCloudFoundationMigra
 // ResetMetrics resets all Prometheus metrics gauges to zero or clears them.
 func ResetMetrics() {
 	for _, p := range allPhases {
-		MigrationPhaseGauge.WithLabelValues(string(p)).Set(0)
+		MigrationPhaseGauge.WithLabelValues(p).Set(0)
 	}
 	ConditionStatusGauge.Reset()
 	DurationSecondsGauge.Set(0)
