@@ -35,39 +35,52 @@ const (
 
 // SingletonName is the only object name the operator will reconcile. Since a
 // single OpenShift cluster can only ever have one active vCenter migration,
-// this follows OpenShift's singleton config resource convention (e.g.
-// infrastructures.config.openshift.io/cluster).
+// this follows OpenShift's singleton resource pattern (e.g.
+// infrastructures.config.openshift.io/cluster), but as a namespaced resource
+// whose singleton behavior is enforced at reconcile time via the Accepted
+// condition rather than cluster-scoped singleton=true.
 const SingletonName = "cluster"
 
 // SecretReference references a secret by name and namespace.
 type SecretReference struct {
-	// Name is the secret name.
+	// name is the secret name.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
 
-	// Namespace is the secret namespace.
+	// namespace is the secret namespace. When omitted, defaults to the namespace
+	// of the VmwareCloudFoundationMigration object.
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
 }
 
 // VmwareCloudFoundationMigrationSpec defines the desired state of VmwareCloudFoundationMigration.
 type VmwareCloudFoundationMigrationSpec struct {
-	// State controls the workflow: Pending, Running, Paused.
-	// The reconciler only acts when State is Running.
+	// state controls the workflow: Pending, Running, Paused.
+	// The migration workflow only executes when state is Running.
+	// When omitted, defaults to Pending.
+	// +optional
 	// +kubebuilder:validation:Enum=Pending;Running;Paused
 	// +kubebuilder:default=Pending
-	State MigrationState `json:"state"`
+	State MigrationState `json:"state,omitempty"`
 
-	// TargetVCenterCredentialsSecret references the secret containing target vCenter credentials.
+	// targetVCenterCredentialsSecret references the secret containing target vCenter credentials.
 	// The secret must contain keys: {target-vcenter-fqdn}.username and {target-vcenter-fqdn}.password.
+	// +required
 	TargetVCenterCredentialsSecret SecretReference `json:"targetVCenterCredentialsSecret"`
 
-	// FailureDomains defines failure domains for the target vCenter.
-	// Uses OpenShift's standard VSpherePlatformFailureDomainSpec which includes
-	// Name, Region, Zone, Server, and Topology with all necessary fields.
+	// failureDomains defines failure domains for the target vCenter. The embedded
+	// element type intentionally tracks config.openshift.io/v1 VSpherePlatformFailureDomainSpec
+	// (including Name, Region, Zone, Server, and Topology) to align with OpenShift API
+	// failure domain semantics; the schema is re-inlined on "make manifests" after
+	// dependency bumps.
+	// +required
 	// +kubebuilder:validation:MinItems=1
+	// +listType=atomic
 	FailureDomains []configv1.VSpherePlatformFailureDomainSpec `json:"failureDomains"`
 
-	// Image controls RHCOS OVA resolution and import into destination vCenter.
+	// image controls RHCOS OVA resolution and import into destination vCenter.
 	// When set, the operator downloads and imports the OVA as a VM template
 	// for each failure domain and populates topology.template automatically.
 	// When omitted, topology.template must be set manually in each failure domain.
@@ -75,70 +88,99 @@ type VmwareCloudFoundationMigrationSpec struct {
 	Image *ImageSpec `json:"image,omitempty"`
 }
 
+// DiskProvisioningMode defines the disk provisioning type for imported VM templates.
+type DiskProvisioningMode string
+
+const (
+	// DiskProvisioningModeThin allocates storage on demand as blocks are written.
+	DiskProvisioningModeThin DiskProvisioningMode = "thin"
+	// DiskProvisioningModeThick pre-allocates all storage at creation time.
+	DiskProvisioningModeThick DiskProvisioningMode = "thick"
+	// DiskProvisioningModeEagerZeroedThick pre-allocates all storage and zeroes blocks at creation time.
+	DiskProvisioningModeEagerZeroedThick DiskProvisioningMode = "eagerZeroedThick"
+)
+
 // ImageSpec controls RHCOS OVA import behavior.
 type ImageSpec struct {
-	// OVAUrl is a direct URL to the RHCOS OVA file. When set, the operator
+	// ovaUrl is a direct URL to the RHCOS OVA file. The URL must use https:// and
+	// end in .ova (an optional query string is allowed for proxy tokens or
+	// integrity digests appended by stream metadata tooling). When set, the operator
 	// downloads from this URL instead of resolving via the coreos-bootimages
 	// ConfigMap delivered by CVO.
-	// Supports both direct .ova URLs and URLs with query parameters (e.g.
-	// integrity digests appended by stream metadata tooling).
-	// Required for air-gapped environments: point to an internal HTTP(S) mirror.
+	// Required for air-gapped environments: point to an internal HTTPS mirror.
 	// +optional
 	// +kubebuilder:validation:Pattern=`^https://.*\.ova(\?.*)?$`
 	OVAUrl string `json:"ovaUrl,omitempty"`
 
-	// DiskProvisioning controls the VMDK disk provisioning type when importing
-	// the OVA. Matches the installer's behavior.
+	// diskProvisioning controls the VMDK disk provisioning type when importing
+	// the OVA (thin, thick, eagerZeroedThick). Matches the installer's behavior.
+	// When omitted, vSphere defaults to the provisioning type specified in the
+	// OVF descriptor.
 	// +optional
 	// +kubebuilder:validation:Enum=thin;thick;eagerZeroedThick
-	DiskProvisioning string `json:"diskProvisioning,omitempty"`
+	DiskProvisioning DiskProvisioningMode `json:"diskProvisioning,omitempty"`
 }
 
 // VmwareCloudFoundationMigrationStatus defines the observed state of VmwareCloudFoundationMigration.
 type VmwareCloudFoundationMigrationStatus struct {
-	// Conditions represent the current state of the migration.
-	// Each condition corresponds to a stage of the migration workflow.
-	// Standard Kubernetes conditions using metav1.Condition.
+	// conditions represent the current state of the migration.
+	// Known conditions are:
+	// - Accepted: admission gate; True is normal for the single reconciled instance (cluster),
+	//   while False indicates an unsupported object name.
+	// - InfrastructurePrepared: preflight validation and migration path selection.
+	// - DestinationInitialized: destination vCenter folders and tags created.
+	// - DestinationImageImported: RHCOS OVA imported as a VM template on destination vCenter.
+	// - MultiSiteConfigured: cluster configured for both source and target vCenters.
+	// - WorkloadMigrated: workloads migrated to destination vCenter machine sets.
+	// - SourceCleaned: source vCenter references removed and cleaned up.
+	// - Ready: aggregate condition indicating migration is complete and cluster is healthy.
+	// For stage conditions (InfrastructurePrepared through Ready), False is normal while
+	// progressing; True indicates the stage has completed. Stages execute in order.
 	// +optional
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// StartTime is when the migration started.
+	// startTime is when the migration started.
 	// +optional
 	StartTime *metav1.Time `json:"startTime,omitempty"`
 
-	// CompletionTime is when the migration completed.
+	// completionTime is when the migration completed.
 	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 
-	// Image reports the RHCOS OVA import state.
+	// image reports the RHCOS OVA import state.
 	// +optional
 	Image *ImageStatus `json:"image,omitempty"`
 }
 
+// ImageURLSource describes how the resolved OVA URL was obtained.
+type ImageURLSource string
+
+const (
+	// ImageURLSourceUser indicates the OVA URL was user-specified in spec.image.ovaUrl.
+	ImageURLSourceUser ImageURLSource = "user"
+	// ImageURLSourceAuto indicates the OVA URL was auto-resolved from stream metadata.
+	ImageURLSourceAuto ImageURLSource = "auto"
+)
+
 // ImageStatus reports the RHCOS OVA import progress and results.
 type ImageStatus struct {
-	// ResolvedOVAUrl is the URL from which the OVA was (or will be) downloaded.
+	// resolvedOVAUrl is the URL from which the OVA was (or will be) downloaded.
 	// +optional
 	ResolvedOVAUrl string `json:"resolvedOVAUrl,omitempty"`
 
-	// ResolvedSHA256 is the expected sha256 digest of the OVA file, when
+	// resolvedSHA256 is the expected sha256 digest of the OVA file, when
 	// resolved from stream metadata. Empty for user-provided URLs.
 	// +optional
 	ResolvedSHA256 string `json:"resolvedSHA256,omitempty"`
 
-	// DownloadComplete indicates the OVA has been successfully downloaded
-	// to the operator's scratch volume.
-	// +optional
-	DownloadComplete bool `json:"downloadComplete,omitempty"`
-
-	// ImportedTemplates maps failure domain names to the inventory paths
+	// importedTemplates maps failure domain names to the inventory paths
 	// of imported VM templates.
 	// +optional
 	ImportedTemplates map[string]string `json:"importedTemplates,omitempty"`
 
-	// OperatorImportedTemplates records the OVA URL each failure domain's
+	// operatorImportedTemplates records the OVA URL each failure domain's
 	// template was imported from by the operator. It is populated only for
 	// operator imports; user-pre-configured templates are not recorded here.
 	// Used to detect a changed OVA URL and re-import only operator-managed
@@ -146,12 +188,14 @@ type ImageStatus struct {
 	// +optional
 	OperatorImportedTemplates map[string]string `json:"operatorImportedTemplates,omitempty"`
 
-	// URLSource records how ResolvedOVAUrl was populated: "" (unresolved),
-	// "user" (user-specified), or "auto" (auto-resolved). Used to tell a
-	// deliberate user-clear of spec.image.ovaUrl apart from an empty
-	// auto-resolution when deciding whether to clear ResolvedOVAUrl.
+	// urlSource records how resolvedOVAUrl was populated: "" (unresolved / no opinion),
+	// "user" (user-specified), or "auto" (auto-resolved). The zero value ("")
+	// indicates no opinion or unresolved. Used to tell a deliberate user-clear
+	// of spec.image.ovaUrl apart from an empty auto-resolution when deciding
+	// whether to clear resolvedOVAUrl.
 	// +optional
-	URLSource string `json:"urlSource,omitempty"`
+	// +kubebuilder:validation:Enum="";user;auto
+	URLSource ImageURLSource `json:"urlSource,omitempty"`
 }
 
 // Condition type constants for the migration workflow.
@@ -198,8 +242,8 @@ const (
 	ReasonProgressing = "Progressing"
 	ReasonCompleted   = "Completed"
 	ReasonFailed      = "Failed"
-	ReasonPaused      = "Paused"
-	ReasonPending     = "Pending"
+	// ReasonPaused indicates migration has been paused because spec.state is set to Paused.
+	ReasonPaused = "Paused"
 
 	// ReasonUnsupportedName indicates the object's name is not SingletonName,
 	// so the operator is ignoring it.
@@ -208,7 +252,7 @@ const (
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:path=vmwarecloudfoundationmigrations,scope=Namespaced,shortName=vcfm
+// +kubebuilder:resource:path=vmwarecloudfoundationmigrations,scope=Namespaced,shortName=vcfm,categories=migration
 // +kubebuilder:printcolumn:name="State",type=string,JSONPath=`.spec.state`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
@@ -219,7 +263,12 @@ type VmwareCloudFoundationMigration struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   VmwareCloudFoundationMigrationSpec   `json:"spec,omitempty"`
+	// spec defines the desired state of VmwareCloudFoundationMigration.
+	// +optional
+	Spec VmwareCloudFoundationMigrationSpec `json:"spec,omitempty"`
+
+	// status defines the observed state of VmwareCloudFoundationMigration.
+	// +optional
 	Status VmwareCloudFoundationMigrationStatus `json:"status,omitempty"`
 }
 
@@ -229,7 +278,9 @@ type VmwareCloudFoundationMigration struct {
 type VmwareCloudFoundationMigrationList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []VmwareCloudFoundationMigration `json:"items"`
+	// items is the list of VmwareCloudFoundationMigration objects.
+	// +required
+	Items []VmwareCloudFoundationMigration `json:"items"`
 }
 
 func init() {

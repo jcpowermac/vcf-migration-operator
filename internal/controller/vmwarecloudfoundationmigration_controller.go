@@ -211,7 +211,38 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 
 	if migration.Spec.State != migrationv1alpha1.MigrationStateRunning {
 		log.V(1).Info("migration not in Running state, skipping", "state", migration.Spec.State)
+		if migration.Spec.State == migrationv1alpha1.MigrationStatePaused {
+			cond := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionReady)
+			alreadyRecorded := cond != nil &&
+				cond.Status == metav1.ConditionFalse &&
+				cond.Reason == migrationv1alpha1.ReasonPaused &&
+				cond.ObservedGeneration == migration.Generation
+			if !alreadyRecorded {
+				msg := fmt.Sprintf("Migration is paused; set spec.state to %s to resume", migrationv1alpha1.MigrationStateRunning)
+				if r.Recorder != nil {
+					r.Recorder.Eventf(migration, "Normal", migrationv1alpha1.ReasonPaused, "%s", msg)
+				}
+				r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPaused, msg)
+				if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+		}
 		return ctrl.Result{}, nil
+	}
+
+	// If resuming from Paused, clear the Paused condition on Ready and set it to Progressing.
+	cond := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionReady)
+	if cond != nil && cond.Reason == migrationv1alpha1.ReasonPaused {
+		log.V(1).Info("migration resumed from Paused state, updating Ready condition")
+		msg := "Migration is running"
+		if r.Recorder != nil {
+			r.Recorder.Eventf(migration, "Normal", migrationv1alpha1.ReasonProgressing, "%s", msg)
+		}
+		r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, msg)
+		if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Set start time on first reconcile in Running state.
@@ -546,12 +577,11 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 	// auto-resolution, so a stored stale URL does not keep being used.
 	specURL := migration.Spec.Image.OVAUrl
 	if needsOVAReresolution(specURL, migration.Status.Image.ResolvedOVAUrl, migration.Status.Image.URLSource) {
-		migration.Status.Image.DownloadComplete = false
 		migration.Status.Image.ResolvedSHA256 = ""
 		if specURL != "" {
 			// User-provided URL.
 			migration.Status.Image.ResolvedOVAUrl = specURL
-			migration.Status.Image.URLSource = "user"
+			migration.Status.Image.URLSource = migrationv1alpha1.ImageURLSourceUser
 			log.V(1).Info("using user-provided OVA URL", "url", vsphere.SanitizeOVAURL(specURL))
 		} else {
 			// Resolve from coreos-bootimages ConfigMap.
@@ -571,7 +601,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 
 			migration.Status.Image.ResolvedOVAUrl = ova.Location
 			migration.Status.Image.ResolvedSHA256 = ova.Sha256
-			migration.Status.Image.URLSource = "auto"
+			migration.Status.Image.URLSource = migrationv1alpha1.ImageURLSourceAuto
 			log.V(1).Info("resolved RHCOS OVA from stream metadata", "url", vsphere.SanitizeOVAURL(ova.Location), "sha256", ova.Sha256)
 		}
 
@@ -581,7 +611,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 	}
 
 	// Phase 3: Download OVA.
-	if !migration.Status.Image.DownloadComplete {
+	if _, cached := vsphere.CachedOVAPath(migration.Status.Image.ResolvedOVAUrl, migration.Status.Image.ResolvedSHA256); !cached {
 		// Use an explicit timeout for the download to avoid blocking the
 		// reconcile loop indefinitely on slow networks.
 		downloadCtx, downloadCancel := context.WithTimeout(ctx, ovaDownloadTimeout)
@@ -594,7 +624,6 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 			return ctrl.Result{}, fmt.Errorf("downloading OVA: %w", err)
 		}
 
-		migration.Status.Image.DownloadComplete = true
 		log.Info("OVA downloaded", "path", localPath)
 		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
 			"OVA downloaded, importing templates")
@@ -785,7 +814,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) importOVATemplate(ctx context
 			Network:          fd.Topology.Networks[0],
 			Folder:           folder,
 			ResourcePool:     fd.Topology.ResourcePool,
-			DiskProvisioning: migration.Spec.Image.DiskProvisioning,
+			DiskProvisioning: string(migration.Spec.Image.DiskProvisioning),
 		})
 		if err != nil {
 			r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonFailed,
@@ -819,17 +848,17 @@ func (r *VmwareCloudFoundationMigrationReconciler) importOVATemplate(ctx context
 
 // needsOVAReresolution reports whether the OVA URL must (re)resolve: nothing
 // has been resolved yet, the user changed spec.image.ovaUrl, or the user
-// cleared a previously user-supplied URL (URLSource == "user") to fall back to
+// cleared a previously user-supplied URL (urlSource == ImageURLSourceUser) to fall back to
 // ConfigMap auto-resolution. A URL that was auto-resolved or is unchanged is
 // left stable.
-func needsOVAReresolution(specURL, resolvedURL, urlSource string) bool {
+func needsOVAReresolution(specURL, resolvedURL string, urlSource migrationv1alpha1.ImageURLSource) bool {
 	if resolvedURL == "" {
 		return true
 	}
 	if specURL != "" && resolvedURL != specURL {
 		return true
 	}
-	return specURL == "" && urlSource == "user"
+	return specURL == "" && urlSource == migrationv1alpha1.ImageURLSourceUser
 }
 
 // populateTopologyTemplates fills each failure domain's topology.template from

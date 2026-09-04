@@ -209,7 +209,6 @@ var _ = Describe("DestinationImageImported Condition", func() {
 			// Manually simulate having already resolved the URL and downloaded.
 			migration.Status.Image = &migrationv1alpha1.ImageStatus{
 				ResolvedOVAUrl:    "https://example.com/rhcos.ova",
-				DownloadComplete:  true,
 				ImportedTemplates: make(map[string]string),
 			}
 

@@ -43,7 +43,7 @@ metadata:
         }
       ]
     capabilities: Basic Install
-    createdAt: "2026-09-02T12:29:02Z"
+    createdAt: "2026-09-03T20:53:20Z"
     features.operators.openshift.io/disconnected: "true"
     features.operators.openshift.io/fips-compliant: "false"
     features.operators.openshift.io/proxy-aware: "false"
