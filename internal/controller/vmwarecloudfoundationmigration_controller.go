@@ -280,7 +280,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 		log.V(1).Info("processing condition", "condition", condType)
 		result, err := handler(ctx, migration)
 		if err != nil {
-			r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonFailed, err.Error())
+			r.setCondition(migration, condType, metav1.ConditionFalse, reasonForError(err), err.Error())
 			r.Recorder.Eventf(migration, "Warning", "ConditionFailed", "Condition %s failed: %v", condType, err)
 		}
 
@@ -607,7 +607,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 
 		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
 			"OVA URL resolved, starting download")
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 
 	// Phase 3: Download OVA.
@@ -627,7 +627,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 		log.Info("OVA downloaded", "path", localPath)
 		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
 			"OVA downloaded, importing templates")
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 
 	// Phase 4: Import template per failure domain (one per reconcile).
@@ -640,7 +640,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 		return ctrl.Result{}, err
 	}
 	if requeue {
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 
 	// Phase 5: Populate topology.template and set condition True.
@@ -665,7 +665,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 	newlyImported := len(migration.Spec.FailureDomains) - preExisting
 	msg := fmt.Sprintf("All templates ready (%d imported, %d pre-existing)", newlyImported, preExisting)
 	r.setCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, msg)
-	r.Recorder.Event(migration, "Normal", "DestinationImageImported", msg)
+	if r.Recorder != nil {
+		r.Recorder.Event(migration, "Normal", "DestinationImageImported", msg)
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -708,8 +710,10 @@ func (r *VmwareCloudFoundationMigrationReconciler) importOVATemplate(ctx context
 					"failureDomain", fd.Name, "template", recorded,
 					"previousURL", vsphere.SanitizeOVAURL(prevURL),
 					"resolvedURL", vsphere.SanitizeOVAURL(migration.Status.Image.ResolvedOVAUrl))
-				r.Recorder.Eventf(migration, "Normal", "TemplateReimport",
-					"Re-importing template for %s after OVA URL change", fd.Name)
+				if r.Recorder != nil {
+					r.Recorder.Eventf(migration, "Normal", "TemplateReimport",
+						"Re-importing template for %s after OVA URL change", fd.Name)
+				}
 				delete(migration.Status.Image.ImportedTemplates, fd.Name)
 				delete(migration.Status.Image.OperatorImportedTemplates, fd.Name)
 				fd.Topology.Template = "" // clear so the import below recreates it
