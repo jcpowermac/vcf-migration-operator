@@ -53,7 +53,7 @@ Everything deploys to the `openshift-vcf-migration` namespace.
 
 ## Testing
 
-### Unit Tests
+### Tests
 
 ```bash
 make test

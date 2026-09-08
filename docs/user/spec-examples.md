@@ -14,7 +14,7 @@ The `VmwareCloudFoundationMigration` spec requires:
 apiVersion: migration.openshift.io/v1alpha1
 kind: VmwareCloudFoundationMigration
 metadata:
-  name: vcf-migration
+  name: cluster
   namespace: openshift-vcf-migration
 spec:
   state: Pending
@@ -43,7 +43,7 @@ spec:
 apiVersion: migration.openshift.io/v1alpha1
 kind: VmwareCloudFoundationMigration
 metadata:
-  name: vcf-migration
+  name: cluster
   namespace: openshift-vcf-migration
 spec:
   state: Pending
@@ -83,19 +83,20 @@ Multiple failure domains can share the same `region` while using different `zone
 
 ## Auto-Resolved RHCOS Image
 
-Omit `image` entirely and the operator resolves the RHCOS OVA from the CVO-delivered `coreos-bootimages` ConfigMap, imports it as a VM template into each failure domain, and populates `topology.template` automatically. `topology.template` is not required in this mode.
+Set `image` without `ovaUrl` (an empty `image` object) and the operator resolves the RHCOS OVA from the CVO-delivered `coreos-bootimages` ConfigMap, imports it as a VM template into each failure domain, and populates `topology.template` automatically. `topology.template` is not required in this mode. When `image` is omitted entirely, no image import happens and `topology.template` must be set manually in each failure domain.
 
 ```yaml
 apiVersion: migration.openshift.io/v1alpha1
 kind: VmwareCloudFoundationMigration
 metadata:
-  name: vcf-migration
+  name: cluster
   namespace: openshift-vcf-migration
 spec:
   state: Pending
   targetVCenterCredentialsSecret:
     name: target-vcenter-creds
     namespace: openshift-vcf-migration
+  image: {}
   failureDomains:
     - name: target-fd-1
       region: target-region
@@ -119,7 +120,7 @@ For air-gapped environments or when you want to control the OVA source and disk 
 apiVersion: migration.openshift.io/v1alpha1
 kind: VmwareCloudFoundationMigration
 metadata:
-  name: vcf-migration
+  name: cluster
   namespace: openshift-vcf-migration
 spec:
   state: Pending
@@ -127,7 +128,7 @@ spec:
     name: target-vcenter-creds
     namespace: openshift-vcf-migration
   image:
-    ovaUrl: "https://internal-mirror.example.com/rhcos-4.17.0-x86_64-ova.ova?token=abc123"
+    ovaUrl: "https://internal-mirror.example.com/rhcos-4.17.0-x86_64-ova.ova"
     diskProvisioning: thin
   failureDomains:
     - name: target-fd-1
@@ -145,6 +146,6 @@ spec:
 ```
 
 - `image.ovaUrl` must be an `https://` URL ending in `.ova` (a query string is allowed for proxy tokens or integrity digests). When set, it overrides auto-resolution.
-- `image.diskProvisioning` is one of `thin` (default), `thick`, or `eagerZeroedThick`.
+- `image.diskProvisioning` is one of `thin`, `thick`, or `eagerZeroedThick`; when omitted, vSphere defaults to the provisioning type specified in the OVF descriptor.
 
 When `image` is set, the operator imports the OVA during the `DestinationImageImported` phase and sets `topology.template` for each failure domain. Progress is reported in `status.image`. If `image.ovaUrl` changes after import, the operator deletes and re-imports only the templates it imported itself; user-pre-configured templates are never touched.

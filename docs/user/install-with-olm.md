@@ -102,7 +102,7 @@ Setting `storages.operator.openshift.io/cluster` to `Unmanaged` or `Removed` is 
 apiVersion: migration.openshift.io/v1alpha1
 kind: VmwareCloudFoundationMigration
 metadata:
-  name: vcf-migration
+  name: cluster
   namespace: openshift-vcf-migration
 spec:
   state: Pending
@@ -141,8 +141,8 @@ Monitor progress:
 
 ```bash
 oc get vcfm -n openshift-vcf-migration
-oc describe vcfm vcf-migration -n openshift-vcf-migration
-oc get events -n openshift-vcf-migration --field-selector involvedObject.name=vcf-migration
+oc describe vcfm cluster -n openshift-vcf-migration
+oc get events -n openshift-vcf-migration --field-selector involvedObject.name=cluster
 ```
 
 Useful events: `OldWorkersStalled` (Warning, old worker deletion blocked, e.g. by a PodDisruptionBudget; repeated at most every 5 minutes) and `SourceWorkersDeleted` (Normal, empty source MachineSets removed after cutover).
@@ -151,9 +151,9 @@ Useful events: `OldWorkersStalled` (Warning, old worker deletion blocked, e.g. b
 
 ```bash
 # Pause
-oc patch vcfm vcf-migration -n openshift-vcf-migration --type merge -p '{"spec":{"state":"Paused"}}'
+oc patch vcfm cluster -n openshift-vcf-migration --type merge -p '{"spec":{"state":"Paused"}}'
 # Resume
-oc patch vcfm vcf-migration -n openshift-vcf-migration --type merge -p '{"spec":{"state":"Running"}}'
+oc patch vcfm cluster -n openshift-vcf-migration --type merge -p '{"spec":{"state":"Running"}}'
 ```
 
 While paused, the `Ready` condition shows `False` with reason `Paused` and a message explaining how to resume. The workflow resumes where it left off.
@@ -163,7 +163,7 @@ While paused, the `Ready` condition shows `False` with reason `Paused` and a mes
 Once the migration reaches `Ready`, the operator has written a metadata secret (`{name}-metadata`, labeled `migration.openshift.io/metadata: true`) that is compatible with the OpenShift installer's vSphere schema:
 
 ```bash
-oc get secret vcf-migration-metadata -n openshift-vcf-migration \
+oc get secret cluster-metadata -n openshift-vcf-migration \
   -o jsonpath='{.data.metadata\.json}' | base64 -d > metadata.json
 ```
 
