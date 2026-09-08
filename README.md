@@ -9,7 +9,7 @@ The operator reconciles the `VmwareCloudFoundationMigration` custom resource thr
 - **User Guide**
   - [Install with OLM](docs/user/install-with-olm.md)
   - [Install without OLM](docs/user/install-without-olm.md)
-
+  - [Spec Examples](docs/user/spec-examples.md) — YAML examples of the migration spec
 - **Developer Guide**
   - [API Reference](docs/dev/api.md) — CR spec, status, condition types
   - [Architecture](docs/dev/architecture.md) — package layout, reconciliation flow, requeue strategy
@@ -25,6 +25,8 @@ make deploy IMG=<registry>/vcf-migration-operator:latest
 # Apply a sample migration
 kubectl apply -k config/samples/
 ```
+
+For full YAML examples of the migration spec, see [Spec Examples](docs/user/spec-examples.md). The operator attaches [destination cluster ownership tags](docs/user/install-with-olm.md) to the migrated inventory.
 
 See the [user docs](docs/user/) for full installation instructions and the [development guide](docs/dev/development.md) for building from source.
 

@@ -39,6 +39,9 @@ InfrastructurePrepared? ──no──→ runPreflightChecks()
   │ yes
 DestinationInitialized? ─no──→ create folders, ensure tags, attach to objects
   │ yes
+DestinationImageImported? ─no→ resolve OVA URL (auto or spec.image.ovaUrl),
+  │                             download, import VM template per failure domain
+  │ yes (immediately True when spec.image is nil)
 MultiSiteConfigured? ────no──→ update vsphere-creds, Infrastructure CR,
   │                             cloud-provider-config; restart pods; poll readiness
   │ yes

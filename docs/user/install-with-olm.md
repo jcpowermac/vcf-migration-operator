@@ -117,10 +117,13 @@ Set `spec.state` to `Running` to begin the migration. The operator progresses th
 
 1. **InfrastructurePrepared** -- preflight validation
 2. **DestinationInitialized** -- target vCenter folders and topology tags created
-3. **MultiSiteConfigured** -- cluster recognizes both vCenters
-4. **WorkloadMigrated** -- workers created on target, control plane rolled out, source MachineSets scaled to 0
-5. **SourceCleaned** -- source vCenter detached
-6. **Ready** -- migration complete
+3. **DestinationImageImported** -- RHCOS OVA imported as a VM template (skipped when `spec.image` is unset)
+4. **MultiSiteConfigured** -- cluster recognizes both vCenters
+5. **WorkloadMigrated** -- workers created on target, control plane rolled out, source MachineSets scaled to 0
+6. **SourceCleaned** -- source vCenter detached
+7. **Ready** -- migration complete
+
+For YAML examples of the migration spec, see [Spec Examples](spec-examples.md).
 
 Monitor progress:
 
@@ -128,6 +131,17 @@ Monitor progress:
 oc get vcfm -n openshift-vcf-migration
 oc describe vcfm vcf-migration -n openshift-vcf-migration
 ```
+
+## Cluster Ownership Tags
+
+Separate from topology tags, the operator mirrors the OpenShift installer's **cluster ownership** tagging on the destination vCenter (used for inventory ownership and destroy/cleanup):
+
+- Category `openshift-<infraID>` and tag `<infraID>` are created with description `Added by openshift-install do not remove` and `SINGLE` cardinality.
+- Associable types match the installer: `VirtualMachine`, `ResourcePool`, `Folder`, `Datastore`, and `StoragePod` (URN-prefixed).
+- The ownership tag is attached to the destination infraID VM folder during `DestinationInitialized`.
+- The machine-api-operator vSphere reconciler (`reconcileTags`) attaches the cluster ID tag to VMs by name from the machine cluster-ID label; this operator does **not** set `providerSpec.tagIDs`.
+
+This is distinct from `openshift-region` / `openshift-zone`. Topology tags describe failure domains; ownership tags mark cluster-owned inventory.
 
 ## Console Plugin (Optional)
 

@@ -82,10 +82,13 @@ The operator progresses through these phases:
 
 1. **InfrastructurePrepared** -- preflight validation
 2. **DestinationInitialized** -- target vCenter folders and topology tags created
-3. **MultiSiteConfigured** -- cluster recognizes both vCenters
-4. **WorkloadMigrated** -- workers created on target, control plane rolled out, source MachineSets scaled to 0
-5. **SourceCleaned** -- source vCenter detached
-6. **Ready** -- migration complete
+3. **DestinationImageImported** -- RHCOS OVA imported as a VM template (skipped when `spec.image` is unset)
+4. **MultiSiteConfigured** -- cluster recognizes both vCenters
+5. **WorkloadMigrated** -- workers created on target, control plane rolled out, source MachineSets scaled to 0
+6. **SourceCleaned** -- source vCenter detached
+7. **Ready** -- migration complete
+
+For YAML examples of the migration spec, see [Spec Examples](spec-examples.md).
 
 Monitor progress:
 
