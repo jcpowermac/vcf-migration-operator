@@ -241,6 +241,15 @@ func (m *MachineManager) UpdateCPMSFailureDomain(ctx context.Context, failureDom
 		return fmt.Errorf("CPMS has no machines_v1beta1_machine_openshift_io template")
 	}
 
+	// The migration relies on the CPMS operator's quorum-safe rolling
+	// replacement (create the replacement, wait for Ready, then remove the old
+	// machine). Any other strategy (e.g., OnDelete) would never roll the
+	// control plane, so refuse to update instead of stalling after the update.
+	// An empty type means the API server default, which is RollingUpdate.
+	if cpms.Spec.Strategy.Type != "" && cpms.Spec.Strategy.Type != machinev1.RollingUpdate {
+		return fmt.Errorf("CPMS strategy %q is not RollingUpdate; the control plane rollout would not proceed", cpms.Spec.Strategy.Type)
+	}
+
 	// Build the vSphere failure domain list.
 	vsphereFDs := make([]machinev1.VSphereFailureDomain, len(failureDomainNames))
 	for i, name := range failureDomainNames {
