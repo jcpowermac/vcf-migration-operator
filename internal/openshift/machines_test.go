@@ -58,9 +58,11 @@ func TestUpdateCPMSFailureDomain(t *testing.T) {
 		initialState  machinev1.ControlPlaneMachineSetState
 		initialFDs    *machinev1.FailureDomains
 		targetFDNames []string
+		strategy      machinev1.ControlPlaneMachineSetStrategyType
 		wantState     machinev1.ControlPlaneMachineSetState
 		wantPlatform  configv1.PlatformType
 		wantFDNames   []string
+		wantErrSub    string
 	}{
 		{
 			name:          "updates Inactive CPMS without failure domains to Active with target failure domain",
@@ -94,16 +96,50 @@ func TestUpdateCPMSFailureDomain(t *testing.T) {
 			wantPlatform:  configv1.VSpherePlatformType,
 			wantFDNames:   []string{"fd-1", "fd-2", "fd-3"},
 		},
+		{
+			name:          "preserves explicit RollingUpdate strategy",
+			initialState:  machinev1.ControlPlaneMachineSetStateInactive,
+			initialFDs:    nil,
+			targetFDNames: []string{"target-fd"},
+			strategy:      machinev1.RollingUpdate,
+			wantState:     machinev1.ControlPlaneMachineSetStateActive,
+			wantPlatform:  configv1.VSpherePlatformType,
+			wantFDNames:   []string{"target-fd"},
+		},
+		{
+			name:          "rejects OnDelete strategy",
+			initialState:  machinev1.ControlPlaneMachineSetStateInactive,
+			initialFDs:    nil,
+			targetFDNames: []string{"target-fd"},
+			strategy:      machinev1.OnDelete,
+			wantErrSub:    "is not RollingUpdate",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cpms := newTestCPMS(tt.initialState, tt.initialFDs)
+			cpms.Spec.Strategy.Type = tt.strategy
 			machineClient := fakemachineclient.NewClientset(cpms)
 			mgr := NewMachineManager(fakekube.NewClientset(), machineClient, nil)
 
 			ctx := context.Background()
-			if err := mgr.UpdateCPMSFailureDomain(ctx, tt.targetFDNames); err != nil {
+			err := mgr.UpdateCPMSFailureDomain(ctx, tt.targetFDNames)
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("UpdateCPMSFailureDomain error = %v, want containing %q", err, tt.wantErrSub)
+				}
+				// The spec must be untouched on rejection.
+				got, gerr := machineClient.MachineV1().ControlPlaneMachineSets(MachineAPINamespace).Get(ctx, "cluster", metav1.GetOptions{})
+				if gerr != nil {
+					t.Fatalf("getting CPMS after rejected update: %v", gerr)
+				}
+				if got.Spec.State != tt.initialState || got.Spec.Template.OpenShiftMachineV1Beta1Machine.FailureDomains != nil {
+					t.Errorf("spec mutated despite rejected update: state=%q failureDomains=%v", got.Spec.State, got.Spec.Template.OpenShiftMachineV1Beta1Machine.FailureDomains)
+				}
+				return
+			}
+			if err != nil {
 				t.Fatalf("UpdateCPMSFailureDomain: %v", err)
 			}
 
@@ -111,6 +147,10 @@ func TestUpdateCPMSFailureDomain(t *testing.T) {
 			got, err := machineClient.MachineV1().ControlPlaneMachineSets(MachineAPINamespace).Get(ctx, "cluster", metav1.GetOptions{})
 			if err != nil {
 				t.Fatalf("getting CPMS after update: %v", err)
+			}
+
+			if got.Spec.Strategy.Type != tt.strategy {
+				t.Errorf("strategy = %q, want preserved %q", got.Spec.Strategy.Type, tt.strategy)
 			}
 
 			if got.Spec.State != tt.wantState {

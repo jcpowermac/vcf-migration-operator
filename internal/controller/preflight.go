@@ -261,7 +261,7 @@ func validateFailureDomain(ctx context.Context, migration *migrationv1alpha1.Vmw
 	}
 
 	if migration.Spec.Image != nil && fd.Topology.Template == "" {
-		if err := validateImageImportPrivileges(ctx, session, cluster, fd.Topology.ResourcePool); err != nil {
+		if err := validateImageImportPrivileges(ctx, session, datacenter, cluster, fd.Topology.ResourcePool, fd.Topology.Datastore, fd.Topology.Folder); err != nil {
 			return fmt.Errorf("validating image import privileges for failure domain %q: %w", fd.Name, err)
 		}
 	}
@@ -277,10 +277,13 @@ var imageImportPrivileges = []string{
 }
 
 // validateImageImportPrivileges checks that the authenticated user has the
-// privileges required for OVA import on the effective resource pool.
-// When resourcePoolPath is non-empty, privileges are checked against that
-// specific resource pool; otherwise, the cluster's default resource pool is used.
-func validateImageImportPrivileges(ctx context.Context, session *vsphere.Session, cluster *object.ClusterComputeResource, resourcePoolPath string) error {
+// privileges required for OVA import: the resource pool set on the effective
+// resource pool (the failure domain's pool when resourcePoolPath is non-empty,
+// otherwise the cluster's default pool), Datastore.AllocateSpace on the target
+// datastore (required by OvfManager.CreateImportSpec's datastore parameter),
+// and VirtualMachine.Provisioning.MarkAsTemplate on the VM folder the imported
+// template lands in (vmFolder, or the datacenter VM folder when empty).
+func validateImageImportPrivileges(ctx context.Context, session *vsphere.Session, datacenter *object.Datacenter, cluster *object.ClusterComputeResource, resourcePoolPath, datastore, vmFolder string) error {
 	if session == nil || session.Client == nil || session.Client.Client == nil {
 		return fmt.Errorf("session client must not be nil")
 	}
@@ -308,22 +311,54 @@ func validateImageImportPrivileges(ctx context.Context, session *vsphere.Session
 		}
 	}
 
-	results, err := authMgr.HasUserPrivilegeOnEntities(ctx,
-		[]types.ManagedObjectReference{rp.Reference()},
-		userSession.UserName, imageImportPrivileges)
+	if err := checkPrivilegesOnEntity(ctx, authMgr, userSession.UserName, rp.Reference(), imageImportPrivileges, "resource pool"); err != nil {
+		return fmt.Errorf("missing required image import privileges: %w", err)
+	}
+
+	ds, err := session.Finder.Datastore(ctx, datastore)
 	if err != nil {
-		return fmt.Errorf("checking image import privileges: %w", err)
+		return fmt.Errorf("finding datastore %q: %w", datastore, err)
+	}
+	if err := checkPrivilegesOnEntity(ctx, authMgr, userSession.UserName, ds.Reference(),
+		[]string{"Datastore.AllocateSpace"}, fmt.Sprintf("datastore %q", datastore)); err != nil {
+		return err
 	}
 
+	var folder *object.Folder
+	if vmFolder != "" {
+		folder, err = session.Finder.Folder(ctx, vmFolder)
+		if err != nil {
+			return fmt.Errorf("finding folder %q: %w", vmFolder, err)
+		}
+	} else {
+		folders, err := datacenter.Folders(ctx)
+		if err != nil {
+			return fmt.Errorf("getting datacenter folders: %w", err)
+		}
+		folder = folders.VmFolder
+	}
+	if err := checkPrivilegesOnEntity(ctx, authMgr, userSession.UserName, folder.Reference(),
+		[]string{"VirtualMachine.Provisioning.MarkAsTemplate"}, fmt.Sprintf("VM folder %q", folder.InventoryPath)); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// checkPrivilegesOnEntity verifies the user has all the given privileges on a
+// single entity, returning an error naming the missing ones.
+func checkPrivilegesOnEntity(ctx context.Context, authMgr *object.AuthorizationManager, user string, ref types.ManagedObjectReference, privileges []string, label string) error {
+	results, err := authMgr.HasUserPrivilegeOnEntities(ctx, []types.ManagedObjectReference{ref}, user, privileges)
+	if err != nil {
+		return fmt.Errorf("checking privileges on %s: %w", label, err)
+	}
 	if len(results) == 0 {
-		return fmt.Errorf("no privilege check results returned for resource pool")
+		return fmt.Errorf("no privilege check results returned for %s", label)
 	}
-
-	missing := missingPrivileges(results[0], imageImportPrivileges)
+	missing := missingPrivileges(results[0], privileges)
 	if len(missing) > 0 {
-		return fmt.Errorf("missing required image import privileges on resource pool: %s", strings.Join(missing, ", "))
+		return fmt.Errorf("user %q is missing %s on %s", user, strings.Join(missing, ", "), label)
 	}
-
 	return nil
 }
 
