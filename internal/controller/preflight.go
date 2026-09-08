@@ -344,14 +344,10 @@ func validateImageImportPrivileges(ctx context.Context, session *vsphere.Session
 			return fmt.Errorf("finding folder %q: %w", vmFolder, err)
 		}
 	} else {
-		folders, err := datacenter.Folders(ctx)
+		folder, err = dcVMFolder(ctx, datacenter)
 		if err != nil {
-			return fmt.Errorf("getting datacenter folders: %w", err)
+			return err
 		}
-		if folders.VmFolder == nil {
-			return fmt.Errorf("datacenter %q has no VM folder", datacenter.Name())
-		}
-		folder = folders.VmFolder
 	}
 	if err := checkPrivilegesOnEntity(ctx, authMgr, userSession.UserName, folder.Reference(),
 		[]string{"VirtualMachine.Provisioning.MarkAsTemplate"}, fmt.Sprintf("VM folder %q", folder.InventoryPath)); err != nil {
@@ -519,6 +515,20 @@ func checkInterferingRolloutResources(ctx context.Context, dynamicClient dynamic
 	return fmt.Errorf("remove interfering rollout resources before migration: %s", strings.Join(blockers, "; "))
 }
 
+// dcVMFolder returns the datacenter's VM folder. Every vSphere datacenter
+// has one, but Folders() can still return nil, so callers get a descriptive
+// error instead of a nil dereference.
+func dcVMFolder(ctx context.Context, datacenter *object.Datacenter) (*object.Folder, error) {
+	folders, err := datacenter.Folders(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting datacenter folders: %w", err)
+	}
+	if folders.VmFolder == nil {
+		return nil, fmt.Errorf("datacenter %q has no VM folder", datacenter.Name())
+	}
+	return folders.VmFolder, nil
+}
+
 func validateTargetPrivileges(ctx context.Context, session *vsphere.Session, datacenter *object.Datacenter, cluster *object.ClusterComputeResource) error {
 	if session == nil || session.Client == nil || session.Client.Client == nil {
 		return fmt.Errorf("session client must not be nil")
@@ -533,9 +543,9 @@ func validateTargetPrivileges(ctx context.Context, session *vsphere.Session, dat
 	}
 
 	authMgr := object.NewAuthorizationManager(session.Client.Client)
-	folders, err := datacenter.Folders(ctx)
+	vmFolder, err := dcVMFolder(ctx, datacenter)
 	if err != nil {
-		return fmt.Errorf("getting datacenter folders: %w", err)
+		return err
 	}
 
 	checks := []struct {
@@ -549,9 +559,9 @@ func validateTargetPrivileges(ctx context.Context, session *vsphere.Session, dat
 			label:      "root folder",
 		},
 		{
-			entity:     folders.VmFolder.Reference(),
+			entity:     vmFolder.Reference(),
 			privileges: vmFolderPrivileges,
-			label:      fmt.Sprintf("VM folder %q", folders.VmFolder.InventoryPath),
+			label:      fmt.Sprintf("VM folder %q", vmFolder.InventoryPath),
 		},
 		{
 			entity:     datacenter.Reference(),
