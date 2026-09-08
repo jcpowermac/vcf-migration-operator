@@ -6,6 +6,7 @@
 - Access to both source and target vCenter instances
 - Cluster admin privileges
 - `oc` CLI authenticated to the cluster
+- vSphere CSI storage removed from the cluster (required by preflight; see [Preflight: vSphere CSI storage](#preflight-vsphere-csi-storage) below)
 
 ## Install the Operator
 
@@ -42,6 +43,17 @@ data:
 ```
 
 The secret keys must follow the format `<vcenter-fqdn>.username` and `<vcenter-fqdn>.password`.
+
+## Preflight: vSphere CSI storage
+
+vSphere storage is not supported in the current release. Preflight **fails** unless the vSphere CSI driver is removed from the cluster:
+
+```bash
+oc patch clustercsidrivers.operator.openshift.io csi.vsphere.vmware.com \
+  --type merge -p '{"spec":{"managementState":"Removed"}}'
+```
+
+Setting `storages.operator.openshift.io/cluster` to `Unmanaged` or `Removed` is recommended; if it is still `Managed`, preflight passes with a warning.
 
 ## Create a Migration
 
@@ -84,9 +96,9 @@ The operator progresses through these phases:
 2. **DestinationInitialized** -- target vCenter folders and topology tags created
 3. **DestinationImageImported** -- RHCOS OVA imported as a VM template (skipped when `spec.image` is unset)
 4. **MultiSiteConfigured** -- cluster recognizes both vCenters
-5. **WorkloadMigrated** -- workers created on target, control plane rolled out, source MachineSets scaled to 0
+5. **WorkloadMigrated** -- workers created on target (ready counts reported in the condition message), control plane rolled out, source MachineSets scaled to 0 and deleted
 6. **SourceCleaned** -- source vCenter detached
-7. **Ready** -- migration complete
+7. **Ready** -- migration complete; requires all operators and MachineConfigPools to be stable and sustained for ~3 minutes
 
 For YAML examples of the migration spec, see [Spec Examples](spec-examples.md).
 
@@ -95,16 +107,32 @@ Monitor progress:
 ```bash
 oc get vcfm -n openshift-vcf-migration
 oc describe vcfm vcf-migration -n openshift-vcf-migration
+oc get events -n openshift-vcf-migration --field-selector involvedObject.name=vcf-migration
 ```
 
-## Console Plugin (Optional)
+Useful events: `OldWorkersStalled` (Warning, old worker deletion blocked, e.g. by a PodDisruptionBudget; repeated at most every 5 minutes) and `SourceWorkersDeleted` (Normal, empty source MachineSets removed after cutover).
 
-Deploy the web UI for managing migrations:
+## Pausing and Resuming
 
 ```bash
-make console-plugin-image console-plugin-push CONSOLE_PLUGIN_IMG=<registry>/vcf-migration-console-plugin:latest
-make deploy-console-plugin CONSOLE_PLUGIN_IMG=<registry>/vcf-migration-console-plugin:latest
+# Pause
+oc patch vcfm vcf-migration -n openshift-vcf-migration --type merge -p '{"spec":{"state":"Paused"}}'
+# Resume
+oc patch vcfm vcf-migration -n openshift-vcf-migration --type merge -p '{"spec":{"state":"Running"}}'
 ```
+
+While paused, the `Ready` condition shows `False` with reason `Paused` and a message explaining how to resume. The workflow resumes where it left off.
+
+## After Migration: Destroying Source Infrastructure
+
+Once the migration reaches `Ready`, the operator has written a metadata secret (`{name}-metadata`, labeled `migration.openshift.io/metadata: true`) that is compatible with the OpenShift installer's vSphere schema:
+
+```bash
+oc get secret vcf-migration-metadata -n openshift-vcf-migration \
+  -o jsonpath='{.data.metadata\.json}' | base64 -d > metadata.json
+```
+
+Use this `metadata.json` with `openshift-install destroy cluster` to tear down the source infrastructure.
 
 ## Uninstall
 

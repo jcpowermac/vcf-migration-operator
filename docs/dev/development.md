@@ -15,11 +15,6 @@ make build
 
 # Build the container image
 make operator-image IMG=<registry>/vcf-migration-operator:dev
-
-# Build the console plugin
-make console-plugin-frontend
-make console-plugin-backend
-make console-plugin-image CONSOLE_PLUGIN_IMG=<registry>/vcf-migration-console-plugin:dev
 ```
 
 ## Code Generation
@@ -52,10 +47,6 @@ The controller listens on `:8081` (health) and `:8443` (metrics).
 # Build, push, and deploy
 make operator-image operator-push IMG=<registry>/vcf-migration-operator:dev
 make deploy IMG=<registry>/vcf-migration-operator:dev
-
-# Deploy console plugin (optional)
-make console-plugin-image console-plugin-push CONSOLE_PLUGIN_IMG=<registry>/vcf-migration-console-plugin:dev
-make deploy-console-plugin CONSOLE_PLUGIN_IMG=<registry>/vcf-migration-console-plugin:dev
 ```
 
 Everything deploys to the `openshift-vcf-migration` namespace.
@@ -153,7 +144,6 @@ OpenShift operations live in `internal/openshift/`. Each manager type (`Infrastr
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `IMG` | `registry.ci.openshift.org/origin/vcf-migration-operator:latest` | Operator image |
-| `CONSOLE_PLUGIN_IMG` | `vcf-migration-console-plugin:latest` | Console plugin image |
 | `CONTAINER_TOOL` | `podman` | Container build tool |
 | `VERSION` | `0.0.1` | Project version |
 | `CHANNELS` | `dev-preview` | OLM bundle channel |

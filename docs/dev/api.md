@@ -55,7 +55,7 @@ When `image` is set, the operator imports the OVA during the `DestinationImageIm
 | `topology.networks` | `[]string` | Yes (min 1) | Port group network names |
 | `topology.resourcePool` | `string` | No | Path: `/<dc>/host/<cluster>/Resources/<pool>` |
 | `topology.folder` | `string` | No | Path: `/<dc>/vm/<folder>` |
-| `topology.template` | `string` | No | Template path. Defaults to `/<dc>/vm/{infraID}-rhcos-{region}-{zone}` |
+| `topology.template` | `string` | Conditional | Template path. **Required when `spec.image` is unset** (rejected otherwise); when `spec.image` is set, the operator imports the OVA and populates it per failure domain |
 
 ## Status
 
@@ -76,6 +76,8 @@ When `image` is set, the operator imports the OVA during the `DestinationImageIm
 | `operatorImportedTemplates` | `map[string]string` | Failure domain name → OVA URL used by the operator for its imports |
 | `urlSource` | `ImageURLSource` | How `resolvedOVAUrl` was populated: `user`, `auto`, or empty (unresolved) |
 
+If the OVA URL changes after import, the operator deletes and re-imports only the templates it imported itself (`operatorImportedTemplates`); user-pre-configured templates are never touched.
+
 ### Condition Types (in order)
 
 | Type | Description |
@@ -92,6 +94,8 @@ When `image` is set, the operator imports the OVA during the `DestinationImageIm
 ### Condition Reasons
 
 `Progressing`, `Completed`, `Failed`, `Paused`, `UnsupportedName`
+
+`Paused` is applied to the `Ready` condition while `spec.state` is `Paused` (message explains how to resume); it is cleared and replaced with `Progressing` when the migration is resumed.
 
 ## Print Columns
 

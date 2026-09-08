@@ -17,10 +17,6 @@ internal/
     operators.go                ClusterOperator health checks
     version.go                  Cluster version, feature gate detection
   metadata/                     Migration metadata generation and storage
-console-plugin/
-  cmd/plugin/                   Console plugin backend (Go HTTP server)
-  pkg/                          Plugin API handlers and SSE
-  web/                          React/PatternFly frontend
 config/                         Kustomize manifests (CRDs, RBAC, manager, samples)
 bundle/                         OLM bundle (CSV, annotations)
 test/e2e/                       End-to-end tests (Kind cluster)
@@ -45,13 +41,21 @@ DestinationImageImported? ─no→ resolve OVA URL (auto or spec.image.ovaUrl),
 MultiSiteConfigured? ────no──→ update vsphere-creds, Infrastructure CR,
   │                             cloud-provider-config; restart pods; poll readiness
   │ yes
-WorkloadMigrated? ───────no──→ create target MachineSets; wait for nodes;
-  │                             update CPMS; wait for rollout; scale down source
+WorkloadMigrated? ───────no──→ create target MachineSets; wait for nodes (reporting
+  │                             ready counts in the condition message);
+  │                             update CPMS; wait for rollout; scale down source;
+  │                             delete source MachineSets; surface stalled
+  │                             old-worker deletion with Warning events
   │ yes
 SourceCleaned? ──────────no──→ remove source from Infrastructure, config, creds;
-  │                             restart pods; generate metadata secret
+  │                             restart pods; generate installer-compatible metadata secret
   │ yes
-Ready? ──────────────────no──→ check operator health; verify only target vCenters
+Ready? ──────────────────no──→ all ClusterOperators stable (Available, not
+  │                             Progressing, not Degraded) AND all
+  │                             MachineConfigPools converged (Updated, full machine
+  │                             count), sustained for 6 consecutive observations ≥30s
+  │                             apart; any failure or >90s reconcile gap resets the
+  │                             counter; verify only target vCenters in Infrastructure
   │ yes
   ▼
 Done (set completionTime)
@@ -68,6 +72,8 @@ Done (set completionTime)
 | Control plane rollout | 30s |
 | Old machine deletion | 30s |
 | Operator health check | 30s |
+| Ready stability observations | 30s minimum spacing (6 required to converge `Ready`); counter resets after a >90s reconcile gap |
+| Old-worker stall events | debounced to one per 5 minutes per MachineSet |
 | Error backoff | 5s base, 5m max (exponential) |
 
 ### Error Handling
@@ -97,5 +103,6 @@ Each `Session` holds a govmomi SOAP client, an inventory `Finder` scoped to a da
 | openshift/client-go | v0.0.0-20260512113608-deb4dc54551a | OpenShift API clients |
 | govmomi | v0.52.0 | vSphere SOAP/REST client |
 | cloud-provider-vsphere | v1.35.0 | Cloud provider config types |
+| stream-metadata-go | v0.4.11 | RHCOS OVA stream metadata resolution (auto image import) |
 | k8s.io/api | v0.36.0-alpha.0 | Kubernetes API types |
 | ginkgo/v2 | v2.27.2 | Test framework |

@@ -147,4 +147,4 @@ spec:
 - `image.ovaUrl` must be an `https://` URL ending in `.ova` (a query string is allowed for proxy tokens or integrity digests). When set, it overrides auto-resolution.
 - `image.diskProvisioning` is one of `thin` (default), `thick`, or `eagerZeroedThick`.
 
-When `image` is set, the operator imports the OVA during the `DestinationImageImported` phase and sets `topology.template` for each failure domain. Progress is reported in `status.image`.
+When `image` is set, the operator imports the OVA during the `DestinationImageImported` phase and sets `topology.template` for each failure domain. Progress is reported in `status.image`. If `image.ovaUrl` changes after import, the operator deletes and re-imports only the templates it imported itself; user-pre-configured templates are never touched.
