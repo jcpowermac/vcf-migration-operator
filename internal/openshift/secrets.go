@@ -15,6 +15,10 @@ const (
 	VSphereCredsSecretName = "vsphere-creds"
 	// VSphereCredsSecretNamespace is the namespace containing the vSphere credentials secret.
 	VSphereCredsSecretNamespace = "kube-system"
+	// credsUsernameSuffix and credsPasswordSuffix are appended to a vCenter server
+	// name to form the per-server credential keys in the secret.
+	credsUsernameSuffix = ".username"
+	credsPasswordSuffix = ".password"
 )
 
 // SecretManager manages OpenShift secrets for vSphere credential operations.
@@ -46,8 +50,8 @@ func (s *SecretManager) GetVSphereCredsSecret(ctx context.Context) (*corev1.Secr
 func (s *SecretManager) AddTargetVCenterCreds(ctx context.Context, secret *corev1.Secret, server, username, password string) (*corev1.Secret, error) {
 	log := klog.FromContext(ctx)
 
-	usernameKey := server + ".username"
-	passwordKey := server + ".password"
+	usernameKey := server + credsUsernameSuffix
+	passwordKey := server + credsPasswordSuffix
 
 	if _, exists := secret.Data[usernameKey]; exists {
 		log.V(2).Info("credentials already exist for server, skipping", "server", server)
@@ -80,8 +84,8 @@ func (s *SecretManager) RemoveSourceVCenterCreds(ctx context.Context, secret *co
 		return nil, fmt.Errorf("secret must not be nil")
 	}
 
-	usernameKey := server + ".username"
-	passwordKey := server + ".password"
+	usernameKey := server + credsUsernameSuffix
+	passwordKey := server + credsPasswordSuffix
 
 	log.V(2).Info("removing source vCenter credentials", "server", server)
 
@@ -117,8 +121,8 @@ func (s *SecretManager) GetVCenterCredsFromSecret(ctx context.Context, namespace
 		return "", "", fmt.Errorf("getting secret %s/%s: %w", namespace, name, err)
 	}
 
-	usernameKey := server + ".username"
-	passwordKey := server + ".password"
+	usernameKey := server + credsUsernameSuffix
+	passwordKey := server + credsPasswordSuffix
 
 	usernameBytes, ok := secret.Data[usernameKey]
 	if !ok {

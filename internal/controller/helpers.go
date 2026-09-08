@@ -33,6 +33,8 @@ const (
 	mcoNamespace = "openshift-machine-config-operator"
 	// mcoPodPrefix is the pod name prefix for the machine-config-operator pod.
 	mcoPodPrefix = "machine-config-operator-"
+	// eventReasonControlPlaneRollout is the event reason while the control plane rolls out.
+	eventReasonControlPlaneRollout = "ControlPlaneRollout"
 )
 
 // getVSphereSession creates a vSphere session for the given server and datacenter

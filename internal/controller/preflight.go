@@ -25,6 +25,15 @@ import (
 )
 
 const vsphereCSIDriverName = "csi.vsphere.vmware.com"
+
+// Management states for the spec.managementState field read from ClusterCSIDriver
+// and Storage operators during preflight.
+const (
+	// managementStateRemoved indicates the operator is removed and inert.
+	managementStateRemoved = "Removed"
+	// managementStateUnmanaged indicates the operator no longer manages the platform.
+	managementStateUnmanaged = "Unmanaged"
+)
 const preflightVSphereTimeout = 2 * time.Minute
 const rhcosArchAMD64 = "x86_64"
 
@@ -430,7 +439,7 @@ func checkVSphereStorageManagement(ctx context.Context, dynamicClient dynamic.In
 		return "", fmt.Errorf("vSphere CSI driver is not supported for migration; unable to read ClusterCSIDriver/%s: %w", vsphereCSIDriverName, err)
 	}
 	log.V(1).Info("checked vSphere CSI driver management state", "clusterCSIDriver", vsphereCSIDriverName, "managementState", csiState)
-	if csiState != "Removed" {
+	if csiState != managementStateRemoved {
 		return "", fmt.Errorf("vSphere CSI driver is not supported for migration; set ClusterCSIDriver/%s spec.managementState to Removed (current: %s)", vsphereCSIDriverName, csiState)
 	}
 
@@ -441,7 +450,7 @@ func checkVSphereStorageManagement(ctx context.Context, dynamicClient dynamic.In
 	}
 	log.V(1).Info("checked Storage operator management state", "storage", "cluster", "managementState", storageState)
 	switch storageState {
-	case "Unmanaged", "Removed":
+	case managementStateUnmanaged, managementStateRemoved:
 		return "", nil
 	default:
 		return fmt.Sprintf("Storage/cluster managementState is %s; consider setting Unmanaged or Removed (only ClusterCSIDriver Removed is required)", storageState), nil

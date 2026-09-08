@@ -36,6 +36,8 @@ type PodSelector struct {
 //   - CSI: app=vmware-vsphere-csi-driver-* (older) and app=vsphere-csi-driver-* (newer).
 //   - Cluster storage operator: present in 4.x; namespace may not exist on minimal clusters.
 //   - CCM operator and kube-controller-manager: standard labels.
+const csiDriversNamespace = "openshift-cluster-csi-drivers"
+
 var VSpherePodsSelectors = []PodSelector{
 	// Cloud controller manager (vSphere CCM) — 4.18–4.21
 	{
@@ -53,25 +55,25 @@ var VSpherePodsSelectors = []PodSelector{
 	},
 	// Machine API controller — 4.18–4.21
 	{
-		Namespace: "openshift-machine-api",
+		Namespace: MachineAPINamespace,
 		Labels:    map[string]string{"api": "clusterapi"},
 	},
 	// CSI driver controller — vmware-vsphere-* (4.18/4.19), vsphere-* (4.20+)
 	{
-		Namespace: "openshift-cluster-csi-drivers",
+		Namespace: csiDriversNamespace,
 		Labels:    map[string]string{"app": "vmware-vsphere-csi-driver-controller"},
 	},
 	{
-		Namespace: "openshift-cluster-csi-drivers",
+		Namespace: csiDriversNamespace,
 		Labels:    map[string]string{"app": "vsphere-csi-driver-controller"},
 	},
 	// CSI driver node
 	{
-		Namespace: "openshift-cluster-csi-drivers",
+		Namespace: csiDriversNamespace,
 		Labels:    map[string]string{"app": "vmware-vsphere-csi-driver-node"},
 	},
 	{
-		Namespace: "openshift-cluster-csi-drivers",
+		Namespace: csiDriversNamespace,
 		Labels:    map[string]string{"app": "vsphere-csi-driver-node"},
 	},
 	// Cluster storage operator — skip if namespace not present (e.g. 4.18 minimal)

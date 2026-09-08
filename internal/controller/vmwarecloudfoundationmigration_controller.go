@@ -313,7 +313,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureInfrastructurePrepared(
 	}
 
 	r.setCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, message)
-	r.Recorder.Event(migration, "Normal", "InfrastructurePrepared", "Preflight validation passed")
+	r.Recorder.Event(migration, "Normal", migrationv1alpha1.ConditionInfrastructurePrepared, "Preflight validation passed")
 	return ctrl.Result{}, nil
 }
 
@@ -459,7 +459,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationInitialized(
 	}
 
 	r.setCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Destination vCenter initialized with folders and tags")
-	r.Recorder.Event(migration, "Normal", "DestinationInitialized", "VM folders and tags created on target vCenter")
+	r.Recorder.Event(migration, "Normal", migrationv1alpha1.ConditionDestinationInitialized, "VM folders and tags created on target vCenter")
 	return ctrl.Result{}, nil
 }
 
@@ -585,7 +585,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 			log.V(1).Info("using user-provided OVA URL", "url", vsphere.SanitizeOVAURL(specURL))
 		} else {
 			// Resolve from coreos-bootimages ConfigMap.
-			cm, err := r.KubeClient.CoreV1().ConfigMaps("openshift-machine-config-operator").Get(ctx, "coreos-bootimages", metav1.GetOptions{})
+			cm, err := r.KubeClient.CoreV1().ConfigMaps(mcoNamespace).Get(ctx, "coreos-bootimages", metav1.GetOptions{})
 			if err != nil {
 				r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonFailed,
 					fmt.Sprintf("Failed to read coreos-bootimages ConfigMap: %v. Set spec.image.ovaUrl or omit spec.image.", err))
@@ -666,7 +666,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 	msg := fmt.Sprintf("All templates ready (%d imported, %d pre-existing)", newlyImported, preExisting)
 	r.setCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, msg)
 	if r.Recorder != nil {
-		r.Recorder.Event(migration, "Normal", "DestinationImageImported", msg)
+		r.Recorder.Event(migration, "Normal", migrationv1alpha1.ConditionDestinationImageImported, msg)
 	}
 	return ctrl.Result{}, nil
 }
@@ -989,7 +989,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureMultiSiteConfigured(ctx
 	}
 
 	r.setCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Multi-site vCenter configured and pods ready")
-	r.Recorder.Event(migration, "Normal", "MultiSiteConfigured", "Cluster configured for both source and target vCenters")
+	r.Recorder.Event(migration, "Normal", migrationv1alpha1.ConditionMultiSiteConfigured, "Cluster configured for both source and target vCenters")
 	return ctrl.Result{}, nil
 }
 
@@ -1145,7 +1145,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigratedRollout
 		log.V(1).Info("CPMS generation not yet observed", "generation", generation, "observedGeneration", observedGeneration)
 		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
 			fmt.Sprintf("Waiting for control plane rollout to start (CPMS generation %d/%d observed)", generation, observedGeneration))
-		r.Recorder.Eventf(migration, "Normal", "ControlPlaneRollout", "waiting for rollout to start (CPMS generation %d/%d observed)", generation, observedGeneration)
+		r.Recorder.Eventf(migration, "Normal", eventReasonControlPlaneRollout, "waiting for rollout to start (CPMS generation %d/%d observed)", generation, observedGeneration)
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 	complete, replicas, updated, ready, err := machineMgr.CheckControlPlaneRolloutStatus(ctx)
@@ -1156,7 +1156,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigratedRollout
 		log.V(1).Info("control plane rollout in progress", "replicas", replicas, "updated", updated, "ready", ready)
 		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
 			fmt.Sprintf("Control plane rolling out (%d/%d updated, %d/%d ready)", updated, replicas, ready, replicas))
-		r.Recorder.Eventf(migration, "Normal", "ControlPlaneRollout", "control plane rolling out (%d/%d updated, %d/%d ready)", updated, replicas, ready, replicas)
+		r.Recorder.Eventf(migration, "Normal", eventReasonControlPlaneRollout, "control plane rolling out (%d/%d updated, %d/%d ready)", updated, replicas, ready, replicas)
 		if machines, merr := machineMgr.ListControlPlaneMachines(ctx); merr != nil {
 			log.V(2).Info("listing control plane machines failed", "err", merr)
 		} else {
@@ -1251,7 +1251,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigratedRollout
 	}
 
 	r.setCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Workload migrated to target vCenter")
-	r.Recorder.Event(migration, "Normal", "WorkloadMigrated", "All workloads migrated to target vCenter")
+	r.Recorder.Event(migration, "Normal", migrationv1alpha1.ConditionWorkloadMigrated, "All workloads migrated to target vCenter")
 	return ctrl.Result{}, nil
 }
 
@@ -1361,7 +1361,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureSourceCleaned(ctx conte
 	log.V(1).Info("metadata saved", "secret", secretName)
 
 	r.setCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Source vCenter cleaned")
-	r.Recorder.Event(migration, "Normal", "SourceCleaned", "Source vCenter removed from cluster configuration")
+	r.Recorder.Event(migration, "Normal", migrationv1alpha1.ConditionSourceCleaned, "Source vCenter removed from cluster configuration")
 	return ctrl.Result{}, nil
 }
 
