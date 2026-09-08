@@ -291,7 +291,11 @@ var imageImportPrivileges = []string{
 // otherwise the cluster's default pool), Datastore.AllocateSpace on the target
 // datastore (required by OvfManager.CreateImportSpec's datastore parameter),
 // and VirtualMachine.Provisioning.MarkAsTemplate on the VM folder the imported
-// template lands in (vmFolder, or the datacenter VM folder when empty).
+// template lands in (vmFolder, or the datacenter VM folder when empty). When
+// vmFolder is empty the effective target is /<datacenter>/vm/<infraID>, which
+// is created after preflight (ensureDestinationInitialized) and inherits its
+// privileges from the datacenter VM folder, so validating the parent here is
+// the equivalent check.
 func validateImageImportPrivileges(ctx context.Context, session *vsphere.Session, datacenter *object.Datacenter, cluster *object.ClusterComputeResource, resourcePoolPath, datastore, vmFolder string) error {
 	if session == nil || session.Client == nil || session.Client.Client == nil {
 		return fmt.Errorf("session client must not be nil")
@@ -343,6 +347,9 @@ func validateImageImportPrivileges(ctx context.Context, session *vsphere.Session
 		folders, err := datacenter.Folders(ctx)
 		if err != nil {
 			return fmt.Errorf("getting datacenter folders: %w", err)
+		}
+		if folders.VmFolder == nil {
+			return fmt.Errorf("datacenter %q has no VM folder", datacenter.Name())
 		}
 		folder = folders.VmFolder
 	}
