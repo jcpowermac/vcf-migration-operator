@@ -160,8 +160,8 @@ func parseCloudProviderConfig(cm *corev1.ConfigMap) (*cloudProviderConfigYAML, e
 	// modify InsecureFlag or other fields; OpenShift defaults to insecure true
 	// and existing config must be preserved.
 	if cfg.Global.SecretName == "" && cfg.Global.SecretNamespace == "" {
-		cfg.Global.SecretName = "vsphere-creds"
-		cfg.Global.SecretNamespace = "kube-system"
+		cfg.Global.SecretName = VSphereCredsSecretName
+		cfg.Global.SecretNamespace = VSphereCredsSecretNamespace
 	}
 
 	return cfg, nil

@@ -23,6 +23,11 @@ import (
 const (
 	// MachineAPINamespace is the namespace used by the Machine API components.
 	MachineAPINamespace = "openshift-machine-api"
+	// machineSetLabelKey is the Machine API label binding a Machine (or MachineSet
+	// template) to its owning MachineSet.
+	machineSetLabelKey = "machine.openshift.io/cluster-api-machineset"
+	// machinePhaseRunning is the Machine phase for healthy, node-bound machines.
+	machinePhaseRunning = "Running"
 )
 
 // MachineManager manages Machine API resources including MachineSets and
@@ -69,11 +74,11 @@ func (m *MachineManager) CreateWorkerMachineSet(ctx context.Context, name string
 	if newMS.Spec.Selector.MatchLabels == nil {
 		newMS.Spec.Selector.MatchLabels = make(map[string]string)
 	}
-	newMS.Spec.Selector.MatchLabels["machine.openshift.io/cluster-api-machineset"] = name
+	newMS.Spec.Selector.MatchLabels[machineSetLabelKey] = name
 	if newMS.Spec.Template.Labels == nil {
 		newMS.Spec.Template.Labels = make(map[string]string)
 	}
-	newMS.Spec.Template.Labels["machine.openshift.io/cluster-api-machineset"] = name
+	newMS.Spec.Template.Labels[machineSetLabelKey] = name
 	newMS.Spec.Template.Labels["machine.openshift.io/cluster-api-cluster"] = infraID
 
 	// Update the provider spec with the failure domain topology.
@@ -359,7 +364,7 @@ func (m *MachineManager) machinesetSelectorLabel(ctx context.Context, machineSet
 	if err != nil {
 		return "", fmt.Errorf("getting machineset %q: %w", machineSetName, err)
 	}
-	if v, ok := ms.Spec.Selector.MatchLabels["machine.openshift.io/cluster-api-machineset"]; ok && v != "" {
+	if v, ok := ms.Spec.Selector.MatchLabels[machineSetLabelKey]; ok && v != "" {
 		return v, nil
 	}
 	return machineSetName, nil
@@ -375,7 +380,7 @@ func (m *MachineManager) CheckMachinesReady(ctx context.Context, machineSetName 
 		return false, 0, 0, err
 	}
 	machines, err := m.machineClient.MachineV1beta1().Machines(MachineAPINamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("machine.openshift.io/cluster-api-machineset=%s", labelValue),
+		LabelSelector: fmt.Sprintf("%s=%s", machineSetLabelKey, labelValue),
 	})
 	if err != nil {
 		return false, 0, 0, fmt.Errorf("listing machines for machineset %q: %w", machineSetName, err)
@@ -384,7 +389,7 @@ func (m *MachineManager) CheckMachinesReady(ctx context.Context, machineSetName 
 	total = int32(len(machines.Items))
 	for i := range machines.Items {
 		machine := &machines.Items[i]
-		if machine.Status.Phase != nil && *machine.Status.Phase == "Running" && machine.Status.NodeRef != nil {
+		if machine.Status.Phase != nil && *machine.Status.Phase == machinePhaseRunning && machine.Status.NodeRef != nil {
 			ready++
 		}
 	}
@@ -405,7 +410,7 @@ func (m *MachineManager) CheckNodesReady(ctx context.Context, machineSetName str
 		return false, 0, 0, err
 	}
 	machines, err := m.machineClient.MachineV1beta1().Machines(MachineAPINamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("machine.openshift.io/cluster-api-machineset=%s", labelValue),
+		LabelSelector: fmt.Sprintf("%s=%s", machineSetLabelKey, labelValue),
 	})
 	if err != nil {
 		return false, 0, 0, fmt.Errorf("listing machines for machineset %q: %w", machineSetName, err)
@@ -448,7 +453,7 @@ func (m *MachineManager) CheckMachinesDeleted(ctx context.Context, machineSetNam
 		return false, 0, err
 	}
 	machines, err := m.machineClient.MachineV1beta1().Machines(MachineAPINamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("machine.openshift.io/cluster-api-machineset=%s", labelValue),
+		LabelSelector: fmt.Sprintf("%s=%s", machineSetLabelKey, labelValue),
 	})
 	if err != nil {
 		return false, 0, fmt.Errorf("listing machines for machineset %q: %w", machineSetName, err)
@@ -471,7 +476,7 @@ func (m *MachineManager) CheckNodesDeletedForMachines(ctx context.Context, machi
 		return false, 0, err
 	}
 	machines, err := m.machineClient.MachineV1beta1().Machines(MachineAPINamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("machine.openshift.io/cluster-api-machineset=%s", labelValue),
+		LabelSelector: fmt.Sprintf("%s=%s", machineSetLabelKey, labelValue),
 	})
 	if err != nil {
 		return false, 0, fmt.Errorf("listing machines for machineset %q: %w", machineSetName, err)
@@ -504,7 +509,7 @@ func (m *MachineManager) ListMachinesForMachineSet(ctx context.Context, machineS
 		return nil, err
 	}
 	machines, err := m.machineClient.MachineV1beta1().Machines(MachineAPINamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("machine.openshift.io/cluster-api-machineset=%s", labelValue),
+		LabelSelector: fmt.Sprintf("%s=%s", machineSetLabelKey, labelValue),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("listing machines for machineset %q: %w", machineSetName, err)
