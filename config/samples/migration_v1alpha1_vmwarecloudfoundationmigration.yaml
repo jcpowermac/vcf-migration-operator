@@ -10,6 +10,26 @@ spec:
   targetVCenterCredentialsSecret:
     name: target-vcenter-creds
     namespace: openshift-vcf-migration
+  # nodeMigration controls how nodes move to the target vCenter.
+  # When omitted, the operator uses the MachineSet/CPMS replacement path (IPI).
+  #
+  # IPI cluster — omit nodeMigration entirely, or set type: Recreate:
+  # nodeMigration:
+  #   workers:
+  #     type: Recreate
+  #   controlPlane:
+  #     type: Recreate
+  #
+  # UPI cluster — no MachineSets/CPMS, must use VMotion:
+  # nodeMigration:
+  #   workers:
+  #     type: VMotion
+  #     vmotion:
+  #       mode: Auto            # Auto | Hot | Cold (default: Auto)
+  #     maxUnavailable: 25%
+  #   controlPlane:
+  #     type: VMotion
+  #     maxUnavailable: 1
   failureDomains:
     - name: target-fd-1
       region: target-region

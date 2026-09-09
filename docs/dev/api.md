@@ -14,6 +14,7 @@
 | `targetVCenterCredentialsSecret` | `SecretReference` | Yes | | Secret with target vCenter credentials. |
 | `failureDomains` | `[]VSpherePlatformFailureDomainSpec` | Yes (min 1) | | Target failure domains. Uses the OpenShift `configv1` type. |
 | `image` | `ImageSpec` | No | | RHCOS OVA resolution and import controls. |
+| `nodeMigration` | `NodeMigrationSpec` | No | | Controls how nodes move to the target vCenter. When omitted, uses MachineSet/CPMS replacement. See [Node Migration API](node-migration-api.md). |
 
 ### MigrationState Enum
 
@@ -65,6 +66,7 @@ When `image` is set, the operator imports the OVA during the `DestinationImageIm
 | `startTime` | `*metav1.Time` | When migration entered `Running` |
 | `completionTime` | `*metav1.Time` | When migration reached `Ready` |
 | `image` | `ImageStatus` | RHCOS OVA import state |
+| `nodeMigration` | `NodeMigrationStatus` | Per-node move progress. Nil when using MachineSet/CPMS replacement. |
 
 ### ImageStatus
 
