@@ -1064,3 +1064,42 @@ func TestFDFailureDomainTemplateMissing(t *testing.T) {
 		t.Fatalf("error should name the first empty template (failure domain b), got: %v", err)
 	}
 }
+
+func TestDCVMFolderMissingVMPFolder(t *testing.T) {
+	ctx := context.Background()
+	model := simulator.VPX()
+	if err := model.Create(); err != nil {
+		t.Fatalf("Create simulator model: %v", err)
+	}
+	defer model.Remove()
+
+	model.Service.TLS = new(tls.Config)
+	model.Service.RegisterEndpoints = true
+	server := model.Service.NewServer()
+	defer server.Close()
+
+	client, err := govmomi.NewClient(ctx, server.URL, true)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	// Absent the vmFolder property: Folders() still returns a non-nil
+	// VmFolder, but with a zero managed-object reference.
+	simDC, ok := model.Service.Context.Map.Any("Datacenter").(*simulator.Datacenter)
+	if !ok {
+		t.Fatal("TestDCVMFolderMissingVMPFolder: simulator datacenter not found")
+	}
+	simDC.VmFolder = types.ManagedObjectReference{}
+
+	finder := find.NewFinder(client.Client)
+	datacenter, err := finder.Datacenter(ctx, "DC0")
+	if err != nil {
+		t.Fatalf("Finder.Datacenter: %v", err)
+	}
+
+	if _, err := dcVMFolder(ctx, datacenter); err == nil {
+		t.Fatal("dcVMFolder: expected error for datacenter without vmFolder property")
+	} else if !strings.Contains(err.Error(), "has no VM folder") {
+		t.Fatalf("dcVMFolder: unexpected error: %v", err)
+	}
+}

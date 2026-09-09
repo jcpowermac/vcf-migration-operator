@@ -516,14 +516,17 @@ func checkInterferingRolloutResources(ctx context.Context, dynamicClient dynamic
 }
 
 // dcVMFolder returns the datacenter's VM folder. Every vSphere datacenter
-// has one, but Folders() can still return nil, so callers get a descriptive
-// error instead of a nil dereference.
+// has one, but Folders() can still yield an unusable folder when the
+// vmFolder property is absent — NewFolder wraps a zero managed-object
+// reference in a non-nil *Folder — so callers get a descriptive error
+// instead of a nil dereference or an empty reference passed to the
+// privilege API.
 func dcVMFolder(ctx context.Context, datacenter *object.Datacenter) (*object.Folder, error) {
 	folders, err := datacenter.Folders(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("getting datacenter folders: %w", err)
 	}
-	if folders.VmFolder == nil {
+	if folders.VmFolder == nil || folders.VmFolder.Reference().Value == "" {
 		return nil, fmt.Errorf("datacenter %q has no VM folder", datacenter.Name())
 	}
 	return folders.VmFolder, nil
