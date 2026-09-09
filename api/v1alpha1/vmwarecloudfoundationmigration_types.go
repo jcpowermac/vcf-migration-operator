@@ -88,8 +88,9 @@ type VmwareCloudFoundationMigrationSpec struct {
 	// +optional
 	Image *ImageSpec `json:"image,omitempty"`
 
-	// NodeMigration controls how nodes move to the target vCenter.
+	// nodeMigration controls how nodes move to the target vCenter.
 	// When omitted, the operator keeps the current MachineSet/CPMS replacement path.
+	// When set, type is the cluster-wide engine; roles cannot override it.
 	// +optional
 	NodeMigration *NodeMigrationSpec `json:"nodeMigration,omitempty"`
 }
@@ -127,15 +128,15 @@ type ImageSpec struct {
 	DiskProvisioning DiskProvisioningMode `json:"diskProvisioning,omitempty"`
 }
 
-// NodeMigrationStrategy defines the engine type used to move nodes to the
-// target vCenter.
-type NodeMigrationStrategy string
+// NodeMigrationType is the cluster-wide engine used to move nodes to the
+// target vCenter. It is the tagged-union discriminator for NodeMigrationSpec.
+type NodeMigrationType string
 
 const (
-	// NodeMigrationStrategyVMotion uses vMotion (Hot or Cold) to relocate VMs.
-	NodeMigrationStrategyVMotion NodeMigrationStrategy = "VMotion"
-	// NodeMigrationStrategyRecreate uses a Day-2 recreate (MachineSet) path.
-	NodeMigrationStrategyRecreate NodeMigrationStrategy = "Recreate"
+	// NodeMigrationTypeVMotion relocates existing VMs (Hot or Cold).
+	NodeMigrationTypeVMotion NodeMigrationType = "VMotion"
+	// NodeMigrationTypeRecreate replaces VMs via MachineSets/CPMS.
+	NodeMigrationTypeRecreate NodeMigrationType = "Recreate"
 )
 
 // VMotionMode selects live vs cold relocation for vMotion.
@@ -150,59 +151,56 @@ const (
 	VMotionModeCold VMotionMode = "Cold"
 )
 
-// NodeMigrationRole identifies the node role a migration setting applies to.
-type NodeMigrationRole string
-
-const (
-	// NodeMigrationRoleControlPlane is the control-plane role.
-	NodeMigrationRoleControlPlane NodeMigrationRole = "ControlPlane"
-	// NodeMigrationRoleWorker is the worker role.
-	NodeMigrationRoleWorker NodeMigrationRole = "Worker"
-)
-
 // NodeMigrationSpec controls how nodes move to the target vCenter.
+// Each role independently selects its migration engine (VMotion or Recreate)
+// and, when VMotion, the relocation mode (Auto, Hot, Cold).
 type NodeMigrationSpec struct {
-	// Strategy defines the engine type: VMotion (Hot/Cold) or Recreate (Day-2).
-	// The vmotion field applies only when strategy is VMotion.
-	// +kubebuilder:validation:Enum=VMotion;Recreate
-	// +kubebuilder:default=VMotion
-	// +optional
-	Strategy NodeMigrationStrategy `json:"strategy,omitempty"`
-
-	// VMotion is vMotion-specific behavior. Ignored unless strategy is VMotion.
-	// +optional
-	VMotion *VMotionSpec `json:"vmotion,omitempty"`
-
-	// Workers are worker-node rolling limits.
+	// workers are worker-node rolling limits and optional VMotion mode overrides.
 	// +optional
 	Workers *RoleMigrationSpec `json:"workers,omitempty"`
 
-	// ControlPlane is control-plane rolling limits.
+	// controlPlane is control-plane rolling limits and optional VMotion mode overrides.
 	// maxUnavailable is validated to 1 for this role.
 	// +optional
 	ControlPlane *RoleMigrationSpec `json:"controlPlane,omitempty"`
 }
 
-// VMotionSpec is vMotion-specific migration behavior.
+// RoleMigrationSpec holds the migration engine selection and rolling limits
+// for one node role. type is a tagged-union discriminator: vmotion is only
+// valid when type is VMotion.
+// +union
+// +kubebuilder:validation:XValidation:rule="!has(self.type) || self.type == 'VMotion' || !has(self.vmotion)",message="vmotion is only valid when type is VMotion"
+type RoleMigrationSpec struct {
+	// type is the migration engine for this role.
+	// VMotion relocates existing VMs. Recreate replaces VMs via MachineSets/CPMS.
+	// +kubebuilder:validation:Enum=VMotion;Recreate
+	// +kubebuilder:default=VMotion
+	// +unionDiscriminator
+	// +optional
+	Type NodeMigrationType `json:"type,omitempty"`
+
+	// vmotion is VMotion-specific behavior. Allowed only when type is VMotion;
+	// optional (omission means mode Auto). Forbidden when type is Recreate.
+	// +unionMember,optional
+	// +optional
+	VMotion *VMotionSpec `json:"vmotion,omitempty"`
+
+	// maxUnavailable is a rolling window (count or percent of this role).
+	// Control plane is validated to 1.
+	// +kubebuilder:validation:XIntOrString
+	// +kubebuilder:validation:XValidation:rule="type(self) == int ? self >= 1 : self.matches('^(100|[0-9]{1,2})%$')",message="maxUnavailable must be a positive integer or a percentage between 0% and 100%"
+	// +optional
+	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
+}
+
+// VMotionSpec is VMotion-specific migration behavior.
 type VMotionSpec struct {
-	// Mode selects live vs cold relocation.
+	// mode selects live vs cold relocation.
 	// Auto tries Hot and falls back to Cold.
 	// +kubebuilder:validation:Enum=Auto;Hot;Cold
 	// +kubebuilder:default=Auto
 	// +optional
 	Mode VMotionMode `json:"mode,omitempty"`
-}
-
-// RoleMigrationSpec holds rolling limits for one node role.
-type RoleMigrationSpec struct {
-	// Mode overrides spec.nodeMigration.vmotion.mode for this role.
-	// +kubebuilder:validation:Enum=Auto;Hot;Cold
-	// +optional
-	Mode *VMotionMode `json:"mode,omitempty"`
-	// MaxUnavailable is a rolling window (count or percent of this role).
-	// Control plane is validated to 1.
-	// +optional
-	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 }
 
 // VmwareCloudFoundationMigrationStatus defines the observed state of VmwareCloudFoundationMigration.
@@ -237,7 +235,8 @@ type VmwareCloudFoundationMigrationStatus struct {
 	// +optional
 	Image *ImageStatus `json:"image,omitempty"`
 
-	// NodeMigration reports node-migration progress.
+	// nodeMigration reports per-node move progress.
+	// Nil when the MachineSet/CPMS replacement path is used.
 	// +optional
 	NodeMigration *NodeMigrationStatus `json:"nodeMigration,omitempty"`
 }
@@ -288,53 +287,59 @@ type ImageStatus struct {
 
 // NodeMigrationStatus reports node-migration progress.
 type NodeMigrationStatus struct {
-	// Strategy is the engine selected when WorkloadMigrated started.
+	// type is the engine selected when WorkloadMigrated started.
 	// +kubebuilder:validation:Enum=VMotion;Recreate
 	// +optional
-	Strategy NodeMigrationStrategy `json:"strategy,omitempty"`
+	Type NodeMigrationType `json:"type,omitempty"`
 
-	// Progress is a human-readable rollup for kubectl get,
+	// progress is a human-readable rollup for kubectl get,
 	// for example "control plane 2/3, workers 4/10".
 	// +optional
 	Progress string `json:"progress,omitempty"`
 
-	// ControlPlane is the rollup for control-plane nodes.
+	// controlPlane is control-plane progress: counts plus per-node entries.
 	// +optional
 	ControlPlane *RoleMigrationStatus `json:"controlPlane,omitempty"`
 
-	// Workers is the rollup for worker nodes.
+	// workers is worker progress: counts plus per-node entries.
 	// +optional
 	Workers *RoleMigrationStatus `json:"workers,omitempty"`
+}
 
-	// Nodes is per-node progress keyed by Kubernetes node name.
+// RoleMigrationStatus is progress for one role. Counts are derived from nodes.
+type RoleMigrationStatus struct {
+	// requestedMode is the vMotion mode from spec for this role
+	// (inherited from spec.nodeMigration.vmotion.mode when the role omits mode).
+	// Auto is spec policy, not what vCenter ran; see observedMode.
+	// +kubebuilder:validation:Enum=Auto;Hot;Cold
+	// +optional
+	RequestedMode VMotionMode `json:"requestedMode,omitempty"`
+	// observedMode is the relocation that actually ran for this role: Hot or Cold.
+	// Never Auto. Empty until at least one node has started relocating, and empty
+	// if Auto produced a mix of Hot and Cold (inspect nodes[].observedMode).
+	// +kubebuilder:validation:Enum=Hot;Cold
+	// +optional
+	ObservedMode VMotionMode `json:"observedMode,omitempty"`
+	// total is the number of discovered nodes in this role.
+	// +optional
+	Total int32 `json:"total,omitempty"`
+	// pending is nodes not yet started.
+	// +optional
+	Pending int32 `json:"pending,omitempty"`
+	// inProgress is nodes in Preparing, Migrating, or WaitingForNode.
+	// +optional
+	InProgress int32 `json:"inProgress,omitempty"`
+	// succeeded is nodes in Succeeded.
+	// +optional
+	Succeeded int32 `json:"succeeded,omitempty"`
+	// failed is nodes in Failed.
+	// +optional
+	Failed int32 `json:"failed,omitempty"`
+	// nodes is per-node progress for this role, keyed by Kubernetes node name.
 	// +optional
 	// +listType=map
 	// +listMapKey=name
 	Nodes []NodeMigrationProgress `json:"nodes,omitempty"`
-}
-
-// RoleMigrationStatus rolls up one role (control plane or workers).
-type RoleMigrationStatus struct {
-	// RequestedMode is the vMotion mode from spec for this role
-	// (inherited from spec.nodeMigration.vmotion.mode when the role omits mode).
-	// +kubebuilder:validation:Enum=Auto;Hot;Cold
-	// +optional
-	RequestedMode VMotionMode `json:"requestedMode,omitempty"`
-	// Total is the number of discovered nodes in this role.
-	// +optional
-	Total int32 `json:"total,omitempty"`
-	// Pending is nodes not yet started.
-	// +optional
-	Pending int32 `json:"pending,omitempty"`
-	// InProgress is nodes in Preparing, Migrating, or WaitingForNode.
-	// +optional
-	InProgress int32 `json:"inProgress,omitempty"`
-	// Succeeded is nodes in Succeeded.
-	// +optional
-	Succeeded int32 `json:"succeeded,omitempty"`
-	// Failed is nodes in Failed.
-	// +optional
-	Failed int32 `json:"failed,omitempty"`
 }
 
 // NodeMigrationPhase is the node-local relocation state.
@@ -357,50 +362,46 @@ const (
 
 // NodeMigrationProgress is observed state for a single node/VM.
 type NodeMigrationProgress struct {
-	// Name is the Kubernetes Node name. List merge key.
+	// name is the Kubernetes Node name. List merge key.
 	// +required
 	Name string `json:"name"`
-	// Role is ControlPlane or Worker.
-	// +kubebuilder:validation:Enum=ControlPlane;Worker
-	// +required
-	Role NodeMigrationRole `json:"role"`
-	// Phase is the node-local relocation state.
+	// phase is the node-local relocation state.
 	// +kubebuilder:validation:Enum=Pending;Preparing;Migrating;WaitingForNode;Succeeded;Failed
 	// +required
 	Phase NodeMigrationPhase `json:"phase"`
-	// RequestedMode is the mode in force when this node started.
+	// requestedMode is the mode in force when this node started.
 	// Frozen for in-flight nodes if spec changes later.
 	// +kubebuilder:validation:Enum=Auto;Hot;Cold
 	// +optional
 	RequestedMode VMotionMode `json:"requestedMode,omitempty"`
-	// ObservedMode is the relocation that actually ran: Hot or Cold.
+	// observedMode is the relocation that actually ran: Hot or Cold.
 	// Empty until RelocateVM starts. Auto resolves here, never in spec.
 	// +kubebuilder:validation:Enum=Hot;Cold
 	// +optional
 	ObservedMode VMotionMode `json:"observedMode,omitempty"`
-	// InstanceUUID is the VM BIOS UUID (node spec.providerID, without vsphere://).
+	// instanceUUID is the VM BIOS UUID (node spec.providerID, without vsphere://).
 	// Stable identity across vCenters; MoRef is not.
 	// +optional
 	InstanceUUID string `json:"instanceUUID,omitempty"`
-	// TargetFailureDomain is the spec.failureDomains[].name chosen for placement.
+	// targetFailureDomain is the spec.failureDomains[].name chosen for placement.
 	// +optional
 	TargetFailureDomain string `json:"targetFailureDomain,omitempty"`
-	// SourceInventoryPath is the VM path before relocation.
+	// sourceInventoryPath is the VM path before relocation.
 	// +optional
 	SourceInventoryPath string `json:"sourceInventoryPath,omitempty"`
-	// TargetInventoryPath is the VM path after relocation.
+	// targetInventoryPath is the VM path after relocation.
 	// +optional
 	TargetInventoryPath string `json:"targetInventoryPath,omitempty"`
-	// Message is a short human-readable explanation of phase or failure.
+	// message is a short human-readable explanation of phase or failure.
 	// +optional
 	Message string `json:"message,omitempty"`
-	// LastTransitionTime is when phase last changed.
+	// lastTransitionTime is when phase last changed.
 	// +optional
 	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
-	// StartedAt is when Preparing began.
+	// startedAt is when Preparing began.
 	// +optional
 	StartedAt *metav1.Time `json:"startedAt,omitempty"`
-	// CompletedAt is when phase became Succeeded or Failed.
+	// completedAt is when phase became Succeeded or Failed.
 	// +optional
 	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
 }
