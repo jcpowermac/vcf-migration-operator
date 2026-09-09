@@ -13,6 +13,7 @@
 | `state` | `MigrationState` | No | `Pending` | `Pending`, `Running`, or `Paused`. Reconciler only acts when `Running`. |
 | `targetVCenterCredentialsSecret` | `SecretReference` | Yes | | Secret with target vCenter credentials. |
 | `failureDomains` | `[]VSpherePlatformFailureDomainSpec` | Yes (min 1) | | Target failure domains. Uses the OpenShift `configv1` type. |
+| `nodeMigration` | `NodeMigrationSpec` | No | | Controls how nodes move to the target vCenter. When omitted, uses MachineSet/CPMS replacement. See [Node Migration API](node-migration-api.md). |
 
 ### MigrationState Enum
 
@@ -97,6 +98,7 @@ stops new probe VM cleanup requests; any remaining probes must be handled during
 | `conditions` | `[]metav1.Condition` | Ordered migration phase conditions |
 | `startTime` | `*metav1.Time` | When migration entered `Running` |
 | `completionTime` | `*metav1.Time` | When migration reached `Ready` |
+| `nodeMigration` | `NodeMigrationStatus` | Per-node move progress. Nil when using MachineSet/CPMS replacement. |
 
 ### Condition Types (in order)
 
