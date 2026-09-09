@@ -22,9 +22,6 @@ spec:
     - jsonPath: .spec.state
       name: State
       type: string
-    - jsonPath: .status.phase
-      name: Phase
-      type: string
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
       type: string
