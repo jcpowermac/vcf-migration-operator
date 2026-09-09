@@ -163,7 +163,7 @@ const (
 // NodeMigrationSpec controls how nodes move to the target vCenter.
 type NodeMigrationSpec struct {
 	// Strategy defines the engine type: VMotion (Hot/Cold) or Recreate (Day-2).
-	// TODO: does Recreate need a distinct MachineSet-based strategy value?
+	// The vmotion field applies only when strategy is VMotion.
 	// +kubebuilder:validation:Enum=VMotion;Recreate
 	// +kubebuilder:default=VMotion
 	// +optional
@@ -178,8 +178,7 @@ type NodeMigrationSpec struct {
 	Workers *RoleMigrationSpec `json:"workers,omitempty"`
 
 	// ControlPlane is control-plane rolling limits.
-	// maxUnavailable is always 1 for this role.
-	// TODO: would this break SNO?
+	// maxUnavailable is validated to 1 for this role.
 	// +optional
 	ControlPlane *RoleMigrationSpec `json:"controlPlane,omitempty"`
 }
@@ -197,6 +196,7 @@ type VMotionSpec struct {
 // RoleMigrationSpec holds rolling limits for one node role.
 type RoleMigrationSpec struct {
 	// Mode overrides spec.nodeMigration.vmotion.mode for this role.
+	// +kubebuilder:validation:Enum=Auto;Hot;Cold
 	// +optional
 	Mode *VMotionMode `json:"mode,omitempty"`
 	// MaxUnavailable is a rolling window (count or percent of this role).
@@ -289,7 +289,7 @@ type ImageStatus struct {
 // NodeMigrationStatus reports node-migration progress.
 type NodeMigrationStatus struct {
 	// Strategy is the engine selected when WorkloadMigrated started.
-	// +kubebuilder:validation:Enum=VMotion
+	// +kubebuilder:validation:Enum=VMotion;Recreate
 	// +optional
 	Strategy NodeMigrationStrategy `json:"strategy,omitempty"`
 
@@ -322,19 +322,19 @@ type RoleMigrationStatus struct {
 	RequestedMode VMotionMode `json:"requestedMode,omitempty"`
 	// Total is the number of discovered nodes in this role.
 	// +optional
-	Total int `json:"total,omitempty"`
+	Total int32 `json:"total,omitempty"`
 	// Pending is nodes not yet started.
 	// +optional
-	Pending int `json:"pending,omitempty"`
+	Pending int32 `json:"pending,omitempty"`
 	// InProgress is nodes in Preparing, Migrating, or WaitingForNode.
 	// +optional
-	InProgress int `json:"inProgress,omitempty"`
+	InProgress int32 `json:"inProgress,omitempty"`
 	// Succeeded is nodes in Succeeded.
 	// +optional
-	Succeeded int `json:"succeeded,omitempty"`
+	Succeeded int32 `json:"succeeded,omitempty"`
 	// Failed is nodes in Failed.
 	// +optional
-	Failed int `json:"failed,omitempty"`
+	Failed int32 `json:"failed,omitempty"`
 }
 
 // NodeMigrationPhase is the node-local relocation state.
