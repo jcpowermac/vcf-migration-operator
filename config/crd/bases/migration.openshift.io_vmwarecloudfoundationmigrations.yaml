@@ -295,6 +295,69 @@ spec:
                     pattern: ^https://.*\.ova(\?.*)?$
                     type: string
                 type: object
+              nodeMigration:
+                description: |-
+                  NodeMigration controls how nodes move to the target vCenter.
+                  When omitted, the operator keeps the current MachineSet/CPMS replacement path.
+                properties:
+                  controlPlane:
+                    description: |-
+                      ControlPlane is control-plane rolling limits.
+                      maxUnavailable is always 1 for this role.
+                    properties:
+                      maxUnavailable:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          MaxUnavailable is a rolling window (count or percent of this role).
+                          Control plane is validated to 1.
+                        x-kubernetes-int-or-string: true
+                      mode:
+                        description: Mode overrides spec.nodeMigration.vmotion.mode
+                          for this role.
+                        type: string
+                    type: object
+                  strategy:
+                    default: VMotion
+                    description: 'Strategy defines the engine type: VMotion (Hot/Cold)
+                      or Recreate (Day-2).'
+                    enum:
+                    - VMotion
+                    - Recreate
+                    type: string
+                  vmotion:
+                    description: VMotion is vMotion-specific behavior. Ignored unless
+                      strategy is VMotion.
+                    properties:
+                      mode:
+                        default: Auto
+                        description: |-
+                          Mode selects live vs cold relocation.
+                          Auto tries Hot and falls back to Cold.
+                        enum:
+                        - Auto
+                        - Hot
+                        - Cold
+                        type: string
+                    type: object
+                  workers:
+                    description: Workers are worker-node rolling limits.
+                    properties:
+                      maxUnavailable:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          MaxUnavailable is a rolling window (count or percent of this role).
+                          Control plane is validated to 1.
+                        x-kubernetes-int-or-string: true
+                      mode:
+                        description: Mode overrides spec.nodeMigration.vmotion.mode
+                          for this role.
+                        type: string
+                    type: object
+                type: object
               state:
                 default: Pending
                 description: |-
@@ -449,6 +512,166 @@ spec:
                     - user
                     - auto
                     type: string
+                type: object
+              nodeMigration:
+                description: NodeMigration reports node-migration progress.
+                properties:
+                  controlPlane:
+                    description: ControlPlane is the rollup for control-plane nodes.
+                    properties:
+                      failed:
+                        description: Failed is nodes in Failed.
+                        type: integer
+                      inProgress:
+                        description: InProgress is nodes in Preparing, Migrating,
+                          or WaitingForNode.
+                        type: integer
+                      pending:
+                        description: Pending is nodes not yet started.
+                        type: integer
+                      requestedMode:
+                        description: |-
+                          RequestedMode is the vMotion mode from spec for this role
+                          (inherited from spec.nodeMigration.vmotion.mode when the role omits mode).
+                        enum:
+                        - Auto
+                        - Hot
+                        - Cold
+                        type: string
+                      succeeded:
+                        description: Succeeded is nodes in Succeeded.
+                        type: integer
+                      total:
+                        description: Total is the number of discovered nodes in this
+                          role.
+                        type: integer
+                    type: object
+                  nodes:
+                    description: Nodes is per-node progress keyed by Kubernetes node
+                      name.
+                    items:
+                      description: NodeMigrationProgress is observed state for a single
+                        node/VM.
+                      properties:
+                        completedAt:
+                          description: CompletedAt is when phase became Succeeded
+                            or Failed.
+                          format: date-time
+                          type: string
+                        instanceUUID:
+                          description: |-
+                            InstanceUUID is the VM BIOS UUID (node spec.providerID, without vsphere://).
+                            Stable identity across vCenters; MoRef is not.
+                          type: string
+                        lastTransitionTime:
+                          description: LastTransitionTime is when phase last changed.
+                          format: date-time
+                          type: string
+                        message:
+                          description: Message is a short human-readable explanation
+                            of phase or failure.
+                          type: string
+                        name:
+                          description: Name is the Kubernetes Node name. List merge
+                            key.
+                          type: string
+                        observedMode:
+                          description: |-
+                            ObservedMode is the relocation that actually ran: Hot or Cold.
+                            Empty until RelocateVM starts. Auto resolves here, never in spec.
+                          enum:
+                          - Hot
+                          - Cold
+                          type: string
+                        phase:
+                          description: Phase is the node-local relocation state.
+                          enum:
+                          - Pending
+                          - Preparing
+                          - Migrating
+                          - WaitingForNode
+                          - Succeeded
+                          - Failed
+                          type: string
+                        requestedMode:
+                          description: |-
+                            RequestedMode is the mode in force when this node started.
+                            Frozen for in-flight nodes if spec changes later.
+                          enum:
+                          - Auto
+                          - Hot
+                          - Cold
+                          type: string
+                        role:
+                          description: Role is ControlPlane or Worker.
+                          enum:
+                          - ControlPlane
+                          - Worker
+                          type: string
+                        sourceInventoryPath:
+                          description: SourceInventoryPath is the VM path before relocation.
+                          type: string
+                        startedAt:
+                          description: StartedAt is when Preparing began.
+                          format: date-time
+                          type: string
+                        targetFailureDomain:
+                          description: TargetFailureDomain is the spec.failureDomains[].name
+                            chosen for placement.
+                          type: string
+                        targetInventoryPath:
+                          description: TargetInventoryPath is the VM path after relocation.
+                          type: string
+                      required:
+                      - name
+                      - phase
+                      - role
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                  progress:
+                    description: |-
+                      Progress is a human-readable rollup for kubectl get,
+                      for example "control plane 2/3, workers 4/10".
+                    type: string
+                  strategy:
+                    description: Strategy is the engine selected when WorkloadMigrated
+                      started.
+                    enum:
+                    - VMotion
+                    type: string
+                  workers:
+                    description: Workers is the rollup for worker nodes.
+                    properties:
+                      failed:
+                        description: Failed is nodes in Failed.
+                        type: integer
+                      inProgress:
+                        description: InProgress is nodes in Preparing, Migrating,
+                          or WaitingForNode.
+                        type: integer
+                      pending:
+                        description: Pending is nodes not yet started.
+                        type: integer
+                      requestedMode:
+                        description: |-
+                          RequestedMode is the vMotion mode from spec for this role
+                          (inherited from spec.nodeMigration.vmotion.mode when the role omits mode).
+                        enum:
+                        - Auto
+                        - Hot
+                        - Cold
+                        type: string
+                      succeeded:
+                        description: Succeeded is nodes in Succeeded.
+                        type: integer
+                      total:
+                        description: Total is the number of discovered nodes in this
+                          role.
+                        type: integer
+                    type: object
                 type: object
               startTime:
                 description: startTime is when the migration started.
