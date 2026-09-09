@@ -303,7 +303,7 @@ spec:
                   controlPlane:
                     description: |-
                       ControlPlane is control-plane rolling limits.
-                      maxUnavailable is always 1 for this role.
+                      maxUnavailable is validated to 1 for this role.
                     properties:
                       maxUnavailable:
                         anyOf:
@@ -316,12 +316,17 @@ spec:
                       mode:
                         description: Mode overrides spec.nodeMigration.vmotion.mode
                           for this role.
+                        enum:
+                        - Auto
+                        - Hot
+                        - Cold
                         type: string
                     type: object
                   strategy:
                     default: VMotion
-                    description: 'Strategy defines the engine type: VMotion (Hot/Cold)
-                      or Recreate (Day-2).'
+                    description: |-
+                      Strategy defines the engine type: VMotion (Hot/Cold) or Recreate (Day-2).
+                      The vmotion field applies only when strategy is VMotion.
                     enum:
                     - VMotion
                     - Recreate
@@ -355,6 +360,10 @@ spec:
                       mode:
                         description: Mode overrides spec.nodeMigration.vmotion.mode
                           for this role.
+                        enum:
+                        - Auto
+                        - Hot
+                        - Cold
                         type: string
                     type: object
                 type: object
@@ -521,13 +530,16 @@ spec:
                     properties:
                       failed:
                         description: Failed is nodes in Failed.
+                        format: int32
                         type: integer
                       inProgress:
                         description: InProgress is nodes in Preparing, Migrating,
                           or WaitingForNode.
+                        format: int32
                         type: integer
                       pending:
                         description: Pending is nodes not yet started.
+                        format: int32
                         type: integer
                       requestedMode:
                         description: |-
@@ -540,10 +552,12 @@ spec:
                         type: string
                       succeeded:
                         description: Succeeded is nodes in Succeeded.
+                        format: int32
                         type: integer
                       total:
                         description: Total is the number of discovered nodes in this
                           role.
+                        format: int32
                         type: integer
                     type: object
                   nodes:
@@ -641,19 +655,23 @@ spec:
                       started.
                     enum:
                     - VMotion
+                    - Recreate
                     type: string
                   workers:
                     description: Workers is the rollup for worker nodes.
                     properties:
                       failed:
                         description: Failed is nodes in Failed.
+                        format: int32
                         type: integer
                       inProgress:
                         description: InProgress is nodes in Preparing, Migrating,
                           or WaitingForNode.
+                        format: int32
                         type: integer
                       pending:
                         description: Pending is nodes not yet started.
+                        format: int32
                         type: integer
                       requestedMode:
                         description: |-
@@ -666,10 +684,12 @@ spec:
                         type: string
                       succeeded:
                         description: Succeeded is nodes in Succeeded.
+                        format: int32
                         type: integer
                       total:
                         description: Total is the number of discovered nodes in this
                           role.
+                        format: int32
                         type: integer
                     type: object
                 type: object
