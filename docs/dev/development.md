@@ -93,8 +93,8 @@ Uses golangci-lint v2.1.0. Config in `.golangci.yml`.
 make bundle
 
 # Build and push bundle + catalog images
-make bundle-build bundle-push BUNDLE_IMG=<registry>/vcf-migration-operator-bundle:v0.0.1
-make catalog-build catalog-push CATALOG_IMG=<registry>/vcf-migration-operator-catalog:v0.0.1
+make bundle-build bundle-push BUNDLE_IMG=<registry>/vcf-migration-operator-bundle:v0.1.0
+make catalog-build catalog-push CATALOG_IMG=<registry>/vcf-migration-operator-catalog:v0.1.0
 ```
 
 `make bundle-verify` checks that the bundle is up-to-date with the current code.
@@ -145,7 +145,7 @@ OpenShift operations live in `internal/openshift/`. Each manager type (`Infrastr
 |----------|---------|-------------|
 | `IMG` | `registry.ci.openshift.org/origin/vcf-migration-operator:latest` | Operator image |
 | `CONTAINER_TOOL` | `podman` | Container build tool |
-| `VERSION` | `0.0.1` | Project version |
+| `VERSION` | `0.1.0` | Project version |
 | `CHANNELS` | `dev-preview` | OLM bundle channel |
 | `KIND_CLUSTER` | `vcf-migration-operator-test-e2e` | Kind cluster name for e2e |
 | `ENVTEST_K8S_VERSION` | `1.35.0` | Kubernetes version for envtest |

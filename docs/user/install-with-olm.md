@@ -13,13 +13,13 @@
 
 ```bash
 make operator-image operator-push IMG=<registry>/vcf-migration-operator:latest
-make bundle-build bundle-push BUNDLE_IMG=<registry>/vcf-migration-operator-bundle:v0.0.1
+make bundle-build bundle-push BUNDLE_IMG=<registry>/vcf-migration-operator-bundle:v0.1.0
 ```
 
 2. Build and push the catalog image:
 
 ```bash
-make catalog-build catalog-push CATALOG_IMG=<registry>/vcf-migration-operator-catalog:v0.0.1
+make catalog-build catalog-push CATALOG_IMG=<registry>/vcf-migration-operator-catalog:v0.1.0
 ```
 
 3. Create the `CatalogSource` on the cluster:
@@ -32,7 +32,7 @@ metadata:
   namespace: openshift-marketplace
 spec:
   sourceType: grpc
-  image: <registry>/vcf-migration-operator-catalog:v0.0.1
+  image: <registry>/vcf-migration-operator-catalog:v0.1.0
   displayName: VCF Migration Operator
 ```
 

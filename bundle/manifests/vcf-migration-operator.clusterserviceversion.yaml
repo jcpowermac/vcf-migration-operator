@@ -55,7 +55,7 @@ metadata:
       Platform Plus"]'
     operators.operatorframework.io/builder: operator-sdk-v1.42.0
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
-  name: vcf-migration-operator.v0.0.1
+  name: vcf-migration-operator.v0.1.0
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -358,4 +358,4 @@ spec:
   maturity: alpha
   provider:
     name: Red Hat
-  version: 0.0.1
+  version: 0.1.0
