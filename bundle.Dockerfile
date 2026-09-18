@@ -24,9 +24,9 @@ COPY bundle/tests/scorecard /tests/scorecard/
 LABEL com.redhat.component="VCF Migration Operator"
 LABEL distribution-scope="public"
 LABEL name="vcf-migration/vcf-migration-operator-bundle"
-LABEL release="0.0.1"
-LABEL version="0.0.1"
-LABEL cpe="cpe:/a:redhat:vcf_migration_operator:0.0::el9"
+LABEL release="0.1.0"
+LABEL version="0.1.0"
+LABEL cpe="cpe:/a:redhat:vcf_migration_operator:0.1::el9"
 LABEL url="https://github.com/openshift/vcf-migration-operator"
 LABEL vendor="Red Hat, Inc."
 LABEL description="The VCF Migration Operator automates migrating OpenShift clusters between VMware vCenters \
