@@ -99,6 +99,11 @@ make catalog-build catalog-push CATALOG_IMG=<registry>/vcf-migration-operator-ca
 
 `make bundle-verify` checks that the bundle is up-to-date with the current code.
 
+Two constraints when generating images:
+
+- Pass the operator image you push as `IMG=` to `make bundle`. The image ref is baked into the CSV's deployment; a mismatch causes the operator pod to `ImagePullBackOff` after the CSV installs.
+- `BUNDLE_IMGS` (default `$(BUNDLE_IMG)`) must be a pullable registry reference. Local refs such as `containers-storage:...` produce a catalog whose bundle OLM cannot fetch (`invalid reference format` during bundle unpacking).
+
 ## Adding a New Reconciliation Phase
 
 1. Add a condition constant in `api/v1alpha1/vmwarecloudfoundationmigration_types.go`:

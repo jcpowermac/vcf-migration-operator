@@ -69,6 +69,16 @@ spec:
   sourceNamespace: openshift-marketplace
 ```
 
+### Verify the Installation
+
+```bash
+oc get csv -n openshift-vcf-migration          # wait for PHASE to be Succeeded
+oc get pods -n openshift-vcf-migration         # controller-manager pod Running
+oc get crd vmwarecloudfoundationmigrations.migration.openshift.io
+```
+
+The CSV takes a minute or two to move from `Installing` to `Succeeded`.
+
 ## Create the Target vCenter Secret
 
 ```yaml
