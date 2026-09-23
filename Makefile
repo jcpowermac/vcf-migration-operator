@@ -324,7 +324,8 @@ bundle-verify: ## Verify that 'make bundle' was run and the bundle is up-to-date
 	@for file in *.clusterserviceversion.yaml.created-at; do \
 		[ -e "$${file}" ] || break; \
 		created_at=$$(cat $${file}); \
-		sed -i "s/createdAt: .*/createdAt: \"$${created_at}\"/" bundle/manifests/$${file%.created-at}; \
+		sed -i.bak "s/createdAt: .*/createdAt: \"$${created_at}\"/" bundle/manifests/$${file%.created-at}; \
+		rm -f bundle/manifests/$${file%.created-at}.bak; \
 	done
 	@rm -f ./*.clusterserviceversion.yaml.created-at
 	@echo "################################################################################################"
