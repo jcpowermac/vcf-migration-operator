@@ -93,14 +93,6 @@ spec:
           - watch
         - apiGroups:
           - ""
-          - events.k8s.io
-          resources:
-          - events
-          verbs:
-          - create
-          - patch
-        - apiGroups:
-          - ""
           resources:
           - nodes
           - persistentvolumes
@@ -108,6 +100,14 @@ spec:
           - get
           - list
           - watch
+        - apiGroups:
+          - ""
+          - events.k8s.io
+          resources:
+          - events
+          verbs:
+          - create
+          - patch
         - apiGroups:
           - apps
           resources:
