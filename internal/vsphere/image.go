@@ -97,22 +97,26 @@ func ResolveRHCOSOVAFromConfigMap(cm *corev1.ConfigMap, arch, streamName string)
 }
 
 func streamMetadataJSON(cm *corev1.ConfigMap, streamName string) (string, error) {
-	if streamName != "" && cm.Data["streams"] != "" {
-		streams := map[string]json.RawMessage{}
-		if err := json.Unmarshal([]byte(cm.Data["streams"]), &streams); err != nil {
-			return "", fmt.Errorf("failed to parse CoreOS stream metadata from coreos-bootimages ConfigMap: %w", err)
+	if streamName == "" {
+		streamJSON, ok := cm.Data["stream"]
+		if !ok || streamJSON == "" {
+			return "", fmt.Errorf("coreos-bootimages ConfigMap missing 'stream' key")
 		}
-		if metadata, ok := streams[streamName]; ok && len(metadata) > 0 {
-			return string(metadata), nil
-		}
-		return "", fmt.Errorf("coreos-bootimages ConfigMap missing stream %q", streamName)
+		return streamJSON, nil
 	}
 
-	streamJSON, ok := cm.Data["stream"]
-	if !ok || streamJSON == "" {
-		return "", fmt.Errorf("coreos-bootimages ConfigMap missing 'stream' key")
+	streamsJSON, ok := cm.Data["streams"]
+	if !ok || streamsJSON == "" {
+		return "", fmt.Errorf("coreos-bootimages ConfigMap missing 'streams' key for requested stream %q", streamName)
 	}
-	return streamJSON, nil
+	streams := map[string]json.RawMessage{}
+	if err := json.Unmarshal([]byte(streamsJSON), &streams); err != nil {
+		return "", fmt.Errorf("failed to parse CoreOS stream metadata from coreos-bootimages ConfigMap: %w", err)
+	}
+	if metadata, ok := streams[streamName]; ok && len(metadata) > 0 {
+		return string(metadata), nil
+	}
+	return "", fmt.Errorf("coreos-bootimages ConfigMap missing stream %q", streamName)
 }
 
 // ovaCacheFilename derives the on-disk cache filename for an OVA URL. The

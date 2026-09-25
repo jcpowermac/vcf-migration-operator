@@ -583,30 +583,30 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 	}
 
 	// Phase 2: Resolve OVA URL. Re-resolve when the user corrects
-	// spec.image.ovaUrl, or clears it to fall back to ConfigMap
-	// auto-resolution, so a stored stale URL does not keep being used.
+	// spec.image.ovaUrl, clears it, or the source MachineSet stream changed.
 	specURL := migration.Spec.Image.OVAUrl
-	if needsOVAReresolution(specURL, migration.Status.Image.ResolvedOVAUrl, migration.Status.Image.URLSource) {
+	streamName := ""
+	if specURL == "" {
+		machineMgr := openshift.NewMachineManager(r.KubeClient, r.MachineClient, r.DynamicClient)
+		sourceVC, err := infraMgr.GetSourceVCenter(ctx)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("getting source vCenter for RHCOS stream: %w", err)
+		}
+		streamName, err = sourceMachineSetOSStream(ctx, machineMgr, sourceVC.Server)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("getting source MachineSet RHCOS stream: %w", err)
+		}
+	}
+	if needsOVAReresolution(specURL, migration.Status.Image.ResolvedOVAUrl, migration.Status.Image.URLSource, migration.Status.Image.ResolvedOSStream, streamName) {
 		migration.Status.Image.ResolvedSHA256 = ""
 		if specURL != "" {
 			// User-provided URL.
 			migration.Status.Image.ResolvedOVAUrl = specURL
+			migration.Status.Image.ResolvedOSStream = ""
 			migration.Status.Image.URLSource = migrationv1alpha1.ImageURLSourceUser
 			log.V(1).Info("using user-provided OVA URL", "url", vsphere.SanitizeOVAURL(specURL))
 		} else {
-			// Resolve from coreos-bootimages ConfigMap using the stream of the
-			// existing source MachineSet. An empty stream preserves the legacy
-			// release-4.20 single-stream behavior.
-			machineMgr := openshift.NewMachineManager(r.KubeClient, r.MachineClient, r.DynamicClient)
-			sourceVC, err := infraMgr.GetSourceVCenter(ctx)
-			if err != nil {
-				return ctrl.Result{}, fmt.Errorf("getting source vCenter for RHCOS stream: %w", err)
-			}
-			streamName, err := sourceMachineSetOSStream(ctx, machineMgr, sourceVC.Server)
-			if err != nil {
-				return ctrl.Result{}, fmt.Errorf("getting source MachineSet RHCOS stream: %w", err)
-			}
-
+			// An empty stream preserves the legacy release-4.20 single-stream behavior.
 			cm, err := r.KubeClient.CoreV1().ConfigMaps(mcoNamespace).Get(ctx, "coreos-bootimages", metav1.GetOptions{})
 			if err != nil {
 				r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonFailed,
@@ -623,8 +623,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 
 			migration.Status.Image.ResolvedOVAUrl = ova.Location
 			migration.Status.Image.ResolvedSHA256 = ova.Sha256
+			migration.Status.Image.ResolvedOSStream = streamName
 			migration.Status.Image.URLSource = migrationv1alpha1.ImageURLSourceAuto
-			log.V(1).Info("resolved RHCOS OVA from stream metadata", "url", vsphere.SanitizeOVAURL(ova.Location), "sha256", ova.Sha256)
+			log.V(1).Info("resolved RHCOS OVA from stream metadata", "url", vsphere.SanitizeOVAURL(ova.Location), "sha256", ova.Sha256, "stream", streamName)
 		}
 
 		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
@@ -899,18 +900,17 @@ func (r *VmwareCloudFoundationMigrationReconciler) importOVATemplate(ctx context
 }
 
 // needsOVAReresolution reports whether the OVA URL must (re)resolve: nothing
-// has been resolved yet, the user changed spec.image.ovaUrl, or the user
-// cleared a previously user-supplied URL (urlSource == ImageURLSourceUser) to fall back to
-// ConfigMap auto-resolution. A URL that was auto-resolved or is unchanged is
-// left stable.
-func needsOVAReresolution(specURL, resolvedURL string, urlSource migrationv1alpha1.ImageURLSource) bool {
+// has been resolved yet, the user changed spec.image.ovaUrl, the user cleared a
+// previously user-supplied URL, or the source MachineSet stream changed.
+func needsOVAReresolution(specURL, resolvedURL string, urlSource migrationv1alpha1.ImageURLSource, resolvedStream, sourceStream string) bool {
 	if resolvedURL == "" {
 		return true
 	}
 	if specURL != "" && resolvedURL != specURL {
 		return true
 	}
-	return specURL == "" && urlSource == migrationv1alpha1.ImageURLSourceUser
+	return specURL == "" && (urlSource == migrationv1alpha1.ImageURLSourceUser ||
+		(urlSource == migrationv1alpha1.ImageURLSourceAuto && resolvedStream != sourceStream))
 }
 
 // populateTopologyTemplates fills each failure domain's topology.template from

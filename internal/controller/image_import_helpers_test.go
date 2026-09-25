@@ -13,20 +13,24 @@ func TestNeedsOVAReresolution(t *testing.T) {
 	tests := []struct {
 		name     string
 		specURL  string
-		resolved string
-		source   migrationv1alpha1.ImageURLSource
-		want     bool
+		resolved       string
+		source         migrationv1alpha1.ImageURLSource
+		resolvedStream string
+		sourceStream   string
+		want           bool
 	}{
 		{name: "initial", specURL: "", resolved: "", source: "", want: true},
 		{name: "user new", specURL: "https://a", resolved: "", source: "", want: true},
 		{name: "user changed", specURL: "https://b", resolved: "https://a", source: migrationv1alpha1.ImageURLSourceUser, want: true},
 		{name: "user cleared to auto", specURL: "", resolved: "https://a", source: migrationv1alpha1.ImageURLSourceUser, want: true},
-		{name: "auto stable", specURL: "", resolved: "https://a", source: migrationv1alpha1.ImageURLSourceAuto, want: false},
+		{name: "auto stable", specURL: "", resolved: "https://a", source: migrationv1alpha1.ImageURLSourceAuto, resolvedStream: "rhel-10", sourceStream: "rhel-10", want: false},
+		{name: "auto status predates stream provenance", specURL: "", resolved: "https://a", source: migrationv1alpha1.ImageURLSourceAuto, sourceStream: "rhel-10", want: true},
+		{name: "auto stream changed", specURL: "", resolved: "https://a", source: migrationv1alpha1.ImageURLSourceAuto, resolvedStream: "rhel-9", sourceStream: "rhel-10", want: true},
 		{name: "user unchanged", specURL: "https://a", resolved: "https://a", source: migrationv1alpha1.ImageURLSourceUser, want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := needsOVAReresolution(tt.specURL, tt.resolved, tt.source); got != tt.want {
+			if got := needsOVAReresolution(tt.specURL, tt.resolved, tt.source, tt.resolvedStream, tt.sourceStream); got != tt.want {
 				t.Fatalf("needsOVAReresolution(%q, %q, %q) = %v, want %v", tt.specURL, tt.resolved, tt.source, got, tt.want)
 			}
 		})

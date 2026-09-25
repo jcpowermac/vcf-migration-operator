@@ -134,6 +134,14 @@ func TestResolveRHCOSOVAFromConfigMap(t *testing.T) {
 		}
 	})
 
+	t.Run("rejects requested stream when only legacy metadata exists", func(t *testing.T) {
+		cm := &corev1.ConfigMap{Data: map[string]string{"stream": streamJSON}}
+		_, err := ResolveRHCOSOVAFromConfigMap(cm, "x86_64", "rhel-10")
+		if err == nil || !strings.Contains(err.Error(), `missing 'streams' key`) {
+			t.Fatalf("error = %v, want missing streams error", err)
+		}
+	})
+
 	t.Run("rejects nil ConfigMap", func(t *testing.T) {
 		_, err := ResolveRHCOSOVAFromConfigMap(nil, "x86_64", "")
 		if err == nil {

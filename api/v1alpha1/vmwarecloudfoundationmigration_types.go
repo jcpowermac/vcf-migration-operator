@@ -223,6 +223,11 @@ type ImageStatus struct {
 	// +optional
 	ResolvedSHA256 string `json:"resolvedSHA256,omitempty"`
 
+	// resolvedOSStream records the source MachineSet RHCOS stream used for
+	// automatic resolution. Empty for user-provided URLs and legacy single-stream clusters.
+	// +optional
+	ResolvedOSStream string `json:"resolvedOSStream,omitempty"`
+
 	// importedTemplates maps failure domain names to the inventory paths
 	// of imported VM templates.
 	// +optional
