@@ -672,6 +672,7 @@ var _ = Describe("updateStatus", func() {
 
 	It("persists Image status so image import does not re-resolve on every reconcile", func() {
 		resource := newStatusTestResource()
+		resource.Spec.Image = &migrationv1alpha1.ImageSpec{}
 		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 
 		reconciler := &VmwareCloudFoundationMigrationReconciler{
@@ -704,6 +705,7 @@ var _ = Describe("updateStatus", func() {
 
 	It("preserves newer Image status when a stale reconcile updates another field", func() {
 		resource := newStatusTestResource()
+		resource.Spec.Image = &migrationv1alpha1.ImageSpec{}
 		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 
 		reconciler := &VmwareCloudFoundationMigrationReconciler{
@@ -745,6 +747,35 @@ var _ = Describe("updateStatus", func() {
 		Expect(final.Status.Image.ResolvedSHA256).To(Equal("new-digest"))
 		Expect(final.Status.Image.ImportedTemplates).To(HaveKeyWithValue("target-fd-1", "/TargetDC/vm/new-template"))
 		Expect(apimeta.FindStatusCondition(final.Status.Conditions, migrationv1alpha1.ConditionDestinationInitialized)).NotTo(BeNil())
+	})
+
+	It("clears delayed Image status after image import is removed", func() {
+		resource := newStatusTestResource()
+		resource.Spec.Image = &migrationv1alpha1.ImageSpec{}
+		Expect(k8sClient.Create(ctx, resource)).To(Succeed(), "failed to create image status removal resource")
+
+		stale := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, stale)).To(Succeed(), "failed to read delayed reconcile snapshot")
+		staleBase := *stale.Status.DeepCopy()
+
+		current := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, current)).To(Succeed(), "failed to read current image status resource")
+		currentBase := *current.Status.DeepCopy()
+		current.Status.Image = &migrationv1alpha1.ImageStatus{ResolvedOVAUrl: "https://example.com/rhcos.ova"}
+		reconciler := &VmwareCloudFoundationMigrationReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		Expect(reconciler.updateStatus(ctx, current, currentBase)).To(Succeed(), "failed to persist initial image status")
+
+		updated := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed(), "failed to read resource before image removal")
+		updated.Spec.Image = nil
+		Expect(k8sClient.Update(ctx, updated)).To(Succeed(), "failed to remove image specification")
+
+		stale.Status.Image = &migrationv1alpha1.ImageStatus{ResolvedOVAUrl: "https://example.com/stale.ova"}
+		Expect(reconciler.updateStatus(ctx, stale, staleBase)).To(Succeed(), "failed to persist delayed reconcile status")
+
+		final := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, final)).To(Succeed(), "failed to read final image status")
+		Expect(final.Status.Image).To(BeNil(), "image status must be cleared after image specification removal")
 	})
 
 	It("persists CompletionTime when migration is finished", func() {

@@ -1648,9 +1648,16 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 			latest.Status.CompletionTime = migration.Status.CompletionTime
 			hasChanges = true
 		}
-		if image, changed := mergeImageStatus(latest.Status.Image, baseStatus.Image, migration.Status.Image); changed {
-			latest.Status.Image = image
-			hasChanges = true
+		if latest.Spec.Image == nil {
+			if latest.Status.Image != nil {
+				latest.Status.Image = nil
+				hasChanges = true
+			}
+		} else if migration.Generation == latest.Generation {
+			if image, changed := mergeImageStatus(latest.Status.Image, baseStatus.Image, migration.Status.Image); changed {
+				latest.Status.Image = image
+				hasChanges = true
+			}
 		}
 
 		if !hasChanges && latest.Status.LastUpdateTime != nil {
