@@ -175,6 +175,32 @@ var _ = Describe("VmwareCloudFoundationMigration Controller", func() {
 			Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
 			Expect(apimeta.FindStatusCondition(resource.Status.Conditions, migrationv1alpha1.ConditionReady)).To(BeNil())
 			Expect(resource.Status.StartTime).To(BeNil())
+			Expect(resource.Status.LastUpdateTime).NotTo(BeNil())
+		})
+
+		It("should record a paused Ready condition when in Paused state", func() {
+			resource := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
+			resource.Spec.State = migrationv1alpha1.MigrationStatePaused
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
+
+			controllerReconciler := &VmwareCloudFoundationMigrationReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+			paused := apimeta.FindStatusCondition(updated.Status.Conditions, migrationv1alpha1.ConditionReady)
+			Expect(paused).NotTo(BeNil())
+			Expect(paused.Status).To(Equal(metav1.ConditionFalse))
+			Expect(paused.Reason).To(Equal(migrationv1alpha1.ReasonPaused))
+			Expect(updated.Status.LastUpdateTime).NotTo(BeNil())
 		})
 	})
 
@@ -253,6 +279,7 @@ var _ = Describe("VmwareCloudFoundationMigration Controller", func() {
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(cond.Reason).To(Equal(migrationv1alpha1.ReasonUnsupportedName))
+			Expect(resource.Status.LastUpdateTime).NotTo(BeNil())
 
 			// No workflow conditions should have been set since the resource was never processed.
 			Expect(apimeta.FindStatusCondition(resource.Status.Conditions, migrationv1alpha1.ConditionInfrastructurePrepared)).To(BeNil())
@@ -512,6 +539,57 @@ var _ = Describe("updateStatus", func() {
 		Expect(destCond.ObservedGeneration).To(Equal(migrationCurrent.Generation))
 	})
 
+	It("does not let a stale-generation reconcile overwrite current-generation Progress", func() {
+		resource := newStatusTestResource()
+		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+		reconciler := &VmwareCloudFoundationMigrationReconciler{
+			Client: k8sClient,
+			Scheme: k8sClient.Scheme(),
+		}
+
+		// Capture an in-memory copy from generation 1 before any spec change.
+		migrationStale := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, migrationStale)).To(Succeed())
+		baseStale := *migrationStale.Status.DeepCopy()
+
+		// Bump the resource generation with a spec update.
+		current := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, current)).To(Succeed())
+		current.Spec.FailureDomains[0].Name = "renamed-fd"
+		Expect(k8sClient.Update(ctx, current)).To(Succeed())
+
+		// A current-generation reconcile commits Progress.
+		migrationCurrent := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, migrationCurrent)).To(Succeed())
+		baseCurrent := *migrationCurrent.Status.DeepCopy()
+		migrationCurrent.Status.Progress = &migrationv1alpha1.MigrationProgress{
+			Workers: &migrationv1alpha1.WorkerMigrationProgress{
+				TargetMachinesTotal:     3,
+				TargetMachinesReady:     3,
+				SourceMachinesRemaining: 2,
+			},
+			ControlPlane: &migrationv1alpha1.ControlPlaneProgress{Replicas: 3},
+		}
+		Expect(reconciler.updateStatus(ctx, migrationCurrent, baseCurrent)).To(Succeed())
+
+		// The stale reconcile still holds generation 1 and tries to persist
+		// its own Progress.
+		migrationStale.Status.Progress = &migrationv1alpha1.MigrationProgress{
+			Workers:      &migrationv1alpha1.WorkerMigrationProgress{SourceMachinesRemaining: 1},
+			ControlPlane: &migrationv1alpha1.ControlPlaneProgress{Replicas: 1},
+		}
+		Expect(reconciler.updateStatus(ctx, migrationStale, baseStale)).To(Succeed())
+
+		final := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, final)).To(Succeed())
+
+		Expect(final.Status.Progress).NotTo(BeNil())
+		Expect(final.Status.Progress.Workers.TargetMachinesTotal).To(Equal(int32(3)))
+		Expect(final.Status.Progress.Workers.SourceMachinesRemaining).To(Equal(int32(2)))
+		Expect(final.Status.Progress.ControlPlane.Replicas).To(Equal(int32(3)))
+	})
+
 	It("does not let a stale failure overwrite a concurrent success on the same condition", func() {
 		resource := newStatusTestResource()
 		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -545,5 +623,115 @@ var _ = Describe("updateStatus", func() {
 		Expect(destCond).NotTo(BeNil())
 		Expect(destCond.Status).To(Equal(metav1.ConditionTrue), "a later stale failure must not overwrite a committed success")
 		Expect(destCond.Reason).To(Equal(migrationv1alpha1.ReasonCompleted))
+	})
+
+	It("persists Progress and updates LastUpdateTime", func() {
+		resource := newStatusTestResource()
+		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+		reconciler := &VmwareCloudFoundationMigrationReconciler{
+			Client: k8sClient,
+			Scheme: k8sClient.Scheme(),
+		}
+
+		migration := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, migration)).To(Succeed())
+		base := *migration.Status.DeepCopy()
+
+		migration.Status.Progress = &migrationv1alpha1.MigrationProgress{
+			Workers: &migrationv1alpha1.WorkerMigrationProgress{
+				TargetMachinesTotal:     3,
+				TargetMachinesReady:     2,
+				TargetNodesReady:        2,
+				SourceMachinesRemaining: 1,
+			},
+			ControlPlane: &migrationv1alpha1.ControlPlaneProgress{
+				Replicas:        3,
+				UpdatedReplicas: 2,
+				ReadyReplicas:   2,
+			},
+		}
+
+		Expect(reconciler.updateStatus(ctx, migration, base)).To(Succeed())
+
+		final := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, final)).To(Succeed())
+
+		Expect(final.Status.LastUpdateTime).NotTo(BeNil())
+		Expect(final.Status.Progress).NotTo(BeNil())
+		Expect(final.Status.Progress.Workers).NotTo(BeNil())
+		Expect(final.Status.Progress.Workers.TargetMachinesTotal).To(Equal(int32(3)))
+		Expect(final.Status.Progress.Workers.TargetMachinesReady).To(Equal(int32(2)))
+		Expect(final.Status.Progress.Workers.TargetNodesReady).To(Equal(int32(2)))
+		Expect(final.Status.Progress.Workers.SourceMachinesRemaining).To(Equal(int32(1)))
+		Expect(final.Status.Progress.ControlPlane).NotTo(BeNil())
+		Expect(final.Status.Progress.ControlPlane.Replicas).To(Equal(int32(3)))
+		Expect(final.Status.Progress.ControlPlane.UpdatedReplicas).To(Equal(int32(2)))
+		Expect(final.Status.Progress.ControlPlane.ReadyReplicas).To(Equal(int32(2)))
+	})
+
+	It("persists CompletionTime when migration is finished", func() {
+		resource := newStatusTestResource()
+		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+		reconciler := &VmwareCloudFoundationMigrationReconciler{
+			Client: k8sClient,
+			Scheme: k8sClient.Scheme(),
+		}
+
+		migration := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, migration)).To(Succeed())
+		base := *migration.Status.DeepCopy()
+
+		now := metav1.Now()
+		migration.Status.CompletionTime = &now
+		reconciler.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Migration complete")
+
+		Expect(reconciler.updateStatus(ctx, migration, base)).To(Succeed())
+
+		final := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, final)).To(Succeed())
+
+		Expect(final.Status.CompletionTime).NotTo(BeNil())
+		Expect(final.Status.LastUpdateTime).NotTo(BeNil())
+		readyCond := apimeta.FindStatusCondition(final.Status.Conditions, migrationv1alpha1.ConditionReady)
+		Expect(readyCond).NotTo(BeNil())
+		Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
+	})
+})
+
+var _ = Describe("seedReadyCondition", func() {
+	It("seeds Ready as False/Progressing when the condition is absent", func() {
+		r := &VmwareCloudFoundationMigrationReconciler{}
+		migration := &migrationv1alpha1.VmwareCloudFoundationMigration{
+			ObjectMeta: metav1.ObjectMeta{Name: migrationv1alpha1.SingletonName, Generation: 1},
+		}
+		r.seedReadyCondition(migration)
+
+		cond := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionReady)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(cond.Reason).To(Equal(migrationv1alpha1.ReasonProgressing))
+		Expect(cond.ObservedGeneration).To(Equal(int64(1)))
+	})
+
+	It("leaves an existing Ready condition untouched", func() {
+		r := &VmwareCloudFoundationMigrationReconciler{}
+		migration := &migrationv1alpha1.VmwareCloudFoundationMigration{
+			ObjectMeta: metav1.ObjectMeta{Name: migrationv1alpha1.SingletonName, Generation: 2},
+			Status: migrationv1alpha1.VmwareCloudFoundationMigrationStatus{
+				Conditions: []metav1.Condition{{
+					Type:   migrationv1alpha1.ConditionReady,
+					Status: metav1.ConditionTrue,
+					Reason: migrationv1alpha1.ReasonCompleted,
+				}},
+			},
+		}
+		r.seedReadyCondition(migration)
+
+		cond := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionReady)
+		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+		Expect(cond.Reason).To(Equal(migrationv1alpha1.ReasonCompleted))
+		Expect(migration.Status.Conditions).To(HaveLen(1))
 	})
 })

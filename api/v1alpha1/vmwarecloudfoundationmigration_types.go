@@ -33,6 +33,46 @@ const (
 	MigrationStatePaused MigrationState = "Paused"
 )
 
+// MigrationProgress contains real-time counters and details of resource migration.
+type MigrationProgress struct {
+	// Workers tracks worker machine and node migration progress.
+	// +optional
+	Workers *WorkerMigrationProgress `json:"workers,omitempty"`
+
+	// ControlPlane tracks ControlPlaneMachineSet rollout progress.
+	// +optional
+	ControlPlane *ControlPlaneProgress `json:"controlPlane,omitempty"`
+}
+
+// WorkerMigrationProgress surfaces worker machine and node counts across source and target.
+type WorkerMigrationProgress struct {
+	// targetMachinesTotal is the desired number of worker machines in target failure domains.
+	// +optional
+	TargetMachinesTotal int32 `json:"targetMachinesTotal,omitempty"`
+	// targetMachinesReady is the number of target worker machines in Running phase with a NodeRef.
+	// +optional
+	TargetMachinesReady int32 `json:"targetMachinesReady,omitempty"`
+	// targetNodesReady is the number of target worker nodes reporting NodeReady=True.
+	// +optional
+	TargetNodesReady int32 `json:"targetNodesReady,omitempty"`
+	// sourceMachinesRemaining is the number of source worker machines still existing.
+	// +optional
+	SourceMachinesRemaining int32 `json:"sourceMachinesRemaining,omitempty"`
+}
+
+// ControlPlaneProgress surfaces CPMS rollout counts.
+type ControlPlaneProgress struct {
+	// replicas is the total desired control plane replicas.
+	// +optional
+	Replicas int32 `json:"replicas,omitempty"`
+	// updatedReplicas is the number of control plane replicas matching the target spec.
+	// +optional
+	UpdatedReplicas int32 `json:"updatedReplicas,omitempty"`
+	// readyReplicas is the number of control plane replicas running and ready.
+	// +optional
+	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
+}
+
 // SingletonName is the only object name the operator will reconcile. Since a
 // single OpenShift cluster can only ever have one active vCenter migration,
 // this follows OpenShift's singleton resource pattern (e.g.
@@ -123,6 +163,10 @@ type ImageSpec struct {
 
 // VmwareCloudFoundationMigrationStatus defines the observed state of VmwareCloudFoundationMigration.
 type VmwareCloudFoundationMigrationStatus struct {
+	// progress surfaces real-time counts for worker and control-plane migration.
+	// +optional
+	Progress *MigrationProgress `json:"progress,omitempty"`
+
 	// conditions represent the current state of the migration.
 	// Known conditions are:
 	// - Accepted: admission gate; True is normal for the single reconciled instance (cluster),
@@ -144,6 +188,10 @@ type VmwareCloudFoundationMigrationStatus struct {
 	// startTime is when the migration started.
 	// +optional
 	StartTime *metav1.Time `json:"startTime,omitempty"`
+
+	// lastUpdateTime is when the migration status was last updated.
+	// +optional
+	LastUpdateTime *metav1.Time `json:"lastUpdateTime,omitempty"`
 
 	// completionTime is when the migration completed.
 	// +optional
@@ -260,6 +308,7 @@ const (
 // +kubebuilder:resource:path=vmwarecloudfoundationmigrations,scope=Namespaced,shortName=vcfm,categories=migration
 // +kubebuilder:printcolumn:name="State",type=string,JSONPath=`.spec.state`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Completed",type=date,JSONPath=`.status.completionTime`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // VmwareCloudFoundationMigration is the Schema for the vmwarecloudfoundationmigrations API.

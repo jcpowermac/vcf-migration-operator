@@ -25,6 +25,9 @@ spec:
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
       type: string
+    - jsonPath: .status.completionTime
+      name: Completed
+      type: date
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -452,6 +455,60 @@ spec:
                     - user
                     - auto
                     type: string
+                type: object
+              lastUpdateTime:
+                description: lastUpdateTime is when the migration status was last
+                  updated.
+                format: date-time
+                type: string
+              progress:
+                description: progress surfaces real-time counts for worker and control-plane
+                  migration.
+                properties:
+                  controlPlane:
+                    description: ControlPlane tracks ControlPlaneMachineSet rollout
+                      progress.
+                    properties:
+                      readyReplicas:
+                        description: readyReplicas is the number of control plane
+                          replicas running and ready.
+                        format: int32
+                        type: integer
+                      replicas:
+                        description: replicas is the total desired control plane replicas.
+                        format: int32
+                        type: integer
+                      updatedReplicas:
+                        description: updatedReplicas is the number of control plane
+                          replicas matching the target spec.
+                        format: int32
+                        type: integer
+                    type: object
+                  workers:
+                    description: Workers tracks worker machine and node migration
+                      progress.
+                    properties:
+                      sourceMachinesRemaining:
+                        description: sourceMachinesRemaining is the number of source
+                          worker machines still existing.
+                        format: int32
+                        type: integer
+                      targetMachinesReady:
+                        description: targetMachinesReady is the number of target worker
+                          machines in Running phase with a NodeRef.
+                        format: int32
+                        type: integer
+                      targetMachinesTotal:
+                        description: targetMachinesTotal is the desired number of
+                          worker machines in target failure domains.
+                        format: int32
+                        type: integer
+                      targetNodesReady:
+                        description: targetNodesReady is the number of target worker
+                          nodes reporting NodeReady=True.
+                        format: int32
+                        type: integer
+                    type: object
                 type: object
               startTime:
                 description: startTime is when the migration started.
