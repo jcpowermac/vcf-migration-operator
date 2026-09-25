@@ -65,16 +65,18 @@ func ValidateTemplateName(name string) error {
 // vmware OVA artifact for the given architecture.
 //
 // The ConfigMap contains the full RHCOS stream metadata JSON under the "stream"
-// key. This function uses stream-metadata-go to parse it and extract the
-// vmware OVA download URL and sha256 digest.
-func ResolveRHCOSOVAFromConfigMap(cm *corev1.ConfigMap, arch string) (*stream.Artifact, error) {
+// key on legacy clusters. Newer dual-stream clusters also expose the metadata
+// under "streams", keyed by the stream used by the source MachineSet.
+// This function uses stream-metadata-go to parse it and extract the vmware OVA
+// download URL and sha256 digest.
+func ResolveRHCOSOVAFromConfigMap(cm *corev1.ConfigMap, arch, streamName string) (*stream.Artifact, error) {
 	if cm == nil {
 		return nil, fmt.Errorf("coreos-bootimages ConfigMap is nil")
 	}
 
-	streamJSON, ok := cm.Data["stream"]
-	if !ok || streamJSON == "" {
-		return nil, fmt.Errorf("coreos-bootimages ConfigMap missing 'stream' key")
+	streamJSON, err := streamMetadataJSON(cm, streamName)
+	if err != nil {
+		return nil, err
 	}
 
 	streamData := new(stream.Stream)
@@ -92,6 +94,25 @@ func ResolveRHCOSOVAFromConfigMap(cm *corev1.ConfigMap, arch string) (*stream.Ar
 	}
 
 	return ova, nil
+}
+
+func streamMetadataJSON(cm *corev1.ConfigMap, streamName string) (string, error) {
+	if streamName != "" && cm.Data["streams"] != "" {
+		streams := map[string]json.RawMessage{}
+		if err := json.Unmarshal([]byte(cm.Data["streams"]), &streams); err != nil {
+			return "", fmt.Errorf("failed to parse CoreOS stream metadata from coreos-bootimages ConfigMap: %w", err)
+		}
+		if metadata, ok := streams[streamName]; ok && len(metadata) > 0 {
+			return string(metadata), nil
+		}
+		return "", fmt.Errorf("coreos-bootimages ConfigMap missing stream %q", streamName)
+	}
+
+	streamJSON, ok := cm.Data["stream"]
+	if !ok || streamJSON == "" {
+		return "", fmt.Errorf("coreos-bootimages ConfigMap missing 'stream' key")
+	}
+	return streamJSON, nil
 }
 
 // ovaCacheFilename derives the on-disk cache filename for an OVA URL. The

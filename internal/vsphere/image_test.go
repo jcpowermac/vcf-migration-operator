@@ -94,7 +94,7 @@ func TestResolveRHCOSOVAFromConfigMap(t *testing.T) {
 			},
 		}
 
-		ova, err := ResolveRHCOSOVAFromConfigMap(cm, "x86_64")
+		ova, err := ResolveRHCOSOVAFromConfigMap(cm, "x86_64", "")
 		if err != nil {
 			t.Fatalf("ResolveRHCOSOVAFromConfigMap: %v", err)
 		}
@@ -108,8 +108,34 @@ func TestResolveRHCOSOVAFromConfigMap(t *testing.T) {
 		}
 	})
 
+	t.Run("selects the source MachineSet stream from dual-stream metadata", func(t *testing.T) {
+		rhel10JSON := strings.ReplaceAll(streamJSON, "418.94.202501010000-0", "510.1.202501010000-0")
+		cm := &corev1.ConfigMap{Data: map[string]string{
+			"stream":  streamJSON,
+			"streams": fmt.Sprintf(`{"rhel-9":%s,"rhel-10":%s}`, streamJSON, rhel10JSON),
+		}}
+
+		ova, err := ResolveRHCOSOVAFromConfigMap(cm, "x86_64", "rhel-10")
+		if err != nil {
+			t.Fatalf("ResolveRHCOSOVAFromConfigMap: %v", err)
+		}
+		if !strings.Contains(ova.Location, "510.1.202501010000-0") {
+			t.Errorf("Location = %q, want RHEL 10 stream artifact", ova.Location)
+		}
+	})
+
+	t.Run("rejects an unavailable requested stream", func(t *testing.T) {
+		cm := &corev1.ConfigMap{Data: map[string]string{
+			"streams": fmt.Sprintf(`{"rhel-9":%s}`, streamJSON),
+		}}
+		_, err := ResolveRHCOSOVAFromConfigMap(cm, "x86_64", "rhel-10")
+		if err == nil || !strings.Contains(err.Error(), `missing stream "rhel-10"`) {
+			t.Fatalf("error = %v, want missing stream error", err)
+		}
+	})
+
 	t.Run("rejects nil ConfigMap", func(t *testing.T) {
-		_, err := ResolveRHCOSOVAFromConfigMap(nil, "x86_64")
+		_, err := ResolveRHCOSOVAFromConfigMap(nil, "x86_64", "")
 		if err == nil {
 			t.Fatal("expected error for nil ConfigMap")
 		}
@@ -119,7 +145,7 @@ func TestResolveRHCOSOVAFromConfigMap(t *testing.T) {
 		cm := &corev1.ConfigMap{
 			Data: map[string]string{"other": "data"},
 		}
-		_, err := ResolveRHCOSOVAFromConfigMap(cm, "x86_64")
+		_, err := ResolveRHCOSOVAFromConfigMap(cm, "x86_64", "")
 		if err == nil {
 			t.Fatal("expected error for missing stream key")
 		}
@@ -132,7 +158,7 @@ func TestResolveRHCOSOVAFromConfigMap(t *testing.T) {
 		cm := &corev1.ConfigMap{
 			Data: map[string]string{"stream": "not-json"},
 		}
-		_, err := ResolveRHCOSOVAFromConfigMap(cm, "x86_64")
+		_, err := ResolveRHCOSOVAFromConfigMap(cm, "x86_64", "")
 		if err == nil {
 			t.Fatal("expected error for malformed JSON")
 		}
@@ -142,7 +168,7 @@ func TestResolveRHCOSOVAFromConfigMap(t *testing.T) {
 		cm := &corev1.ConfigMap{
 			Data: map[string]string{"stream": streamJSON},
 		}
-		_, err := ResolveRHCOSOVAFromConfigMap(cm, "arm64")
+		_, err := ResolveRHCOSOVAFromConfigMap(cm, "arm64", "")
 		if err == nil {
 			t.Fatal("expected error for missing arm64 architecture")
 		}
