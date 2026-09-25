@@ -33,6 +33,64 @@ func TestNeedsOVAReresolution(t *testing.T) {
 	}
 }
 
+func TestMergeImageStatus(t *testing.T) {
+	t.Helper()
+	base := &migrationv1alpha1.ImageStatus{
+		ResolvedOVAUrl: "https://example.com/base.ova",
+		ImportedTemplates: map[string]string{
+			"fd1": "/base/template",
+		},
+	}
+
+	desired := &migrationv1alpha1.ImageStatus{
+		ResolvedOVAUrl: "https://example.com/desired.ova",
+		ResolvedSHA256: "desired-digest",
+		ImportedTemplates: map[string]string{
+			"fd1": "/desired/template",
+			"fd2": "/second/template",
+		},
+	}
+
+	got, changed := mergeImageStatus(nil, nil, desired)
+	if !changed {
+		t.Fatal("mergeImageStatus() changed = false, want true")
+	}
+	if got == desired {
+		t.Fatal("mergeImageStatus() returned the desired pointer")
+	}
+	if got.ResolvedOVAUrl != desired.ResolvedOVAUrl || got.ResolvedSHA256 != desired.ResolvedSHA256 {
+		t.Fatalf("mergeImageStatus() = %#v, want desired fields", got)
+	}
+
+	latest := &migrationv1alpha1.ImageStatus{
+		ResolvedOVAUrl: "https://example.com/newer.ova",
+		ResolvedSHA256: "newer-digest",
+		ImportedTemplates: map[string]string{
+			"fd1": "/newer/template",
+			"fd3": "/current/template",
+		},
+	}
+	got, changed = mergeImageStatus(latest, nil, desired)
+	if changed {
+		t.Fatal("mergeImageStatus() changed stale fields, want false")
+	}
+	if got.ResolvedOVAUrl != "https://example.com/newer.ova" || got.ResolvedSHA256 != "newer-digest" {
+		t.Fatalf("mergeImageStatus() overwrote newer scalar fields: %#v", got)
+	}
+	if got.ImportedTemplates["fd1"] != "/newer/template" || got.ImportedTemplates["fd3"] != "/current/template" {
+		t.Fatalf("mergeImageStatus() overwrote newer map entries: %#v", got.ImportedTemplates)
+	}
+
+	latest = base.DeepCopy()
+	got, changed = mergeImageStatus(latest, base, desired)
+	if !changed || got.ResolvedOVAUrl != desired.ResolvedOVAUrl || got.ResolvedSHA256 != desired.ResolvedSHA256 {
+		t.Fatalf("mergeImageStatus() did not apply current changes: changed=%v, got=%#v", changed, got)
+	}
+	if got.ImportedTemplates["fd1"] != "/desired/template" || got.ImportedTemplates["fd2"] != "/second/template" {
+		t.Fatalf("mergeImageStatus() did not merge current map changes: %#v", got.ImportedTemplates)
+	}
+}
+
 func TestPopulateTopologyTemplates(t *testing.T) {
 	t.Helper()
 	tests := []struct {

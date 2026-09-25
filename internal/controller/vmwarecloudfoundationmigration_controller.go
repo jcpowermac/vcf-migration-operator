@@ -1570,6 +1570,18 @@ func statusConditionChanged(prev, next metav1.Condition) bool {
 		!prev.LastTransitionTime.Equal(&next.LastTransitionTime)
 }
 
+// mergeImageStatus persists image changes unless another reconcile already
+// changed image status since this reconcile started.
+func mergeImageStatus(latest, base, desired *migrationv1alpha1.ImageStatus) (*migrationv1alpha1.ImageStatus, bool) {
+	if desired == nil || reflect.DeepEqual(base, desired) {
+		return latest, false
+	}
+	if latest == nil || reflect.DeepEqual(latest, base) {
+		return desired.DeepCopy(), true
+	}
+	return latest, false
+}
+
 // updateStatus persists this reconcile's status changes using optimistic
 // concurrency. It re-fetches the latest resource and applies only the
 // conditions and timestamps this reconcile changed relative to baseStatus (the
@@ -1634,6 +1646,10 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 		}
 		if migration.Status.CompletionTime != nil && latest.Status.CompletionTime == nil {
 			latest.Status.CompletionTime = migration.Status.CompletionTime
+			hasChanges = true
+		}
+		if image, changed := mergeImageStatus(latest.Status.Image, baseStatus.Image, migration.Status.Image); changed {
+			latest.Status.Image = image
 			hasChanges = true
 		}
 
