@@ -84,6 +84,8 @@ func TestImageSpecDiffersFromStatus(t *testing.T) {
 		{name: "changed URL during interrupted import", spec: &migrationv1alpha1.ImageSpec{OVAUrl: "https://b"}, status: &migrationv1alpha1.ImageStatus{ResolvedOVAUrl: "https://a", URLSource: migrationv1alpha1.ImageURLSourceUser}, wantDiff: true},
 		{name: "same user URL", spec: &migrationv1alpha1.ImageSpec{OVAUrl: "https://a"}, status: &migrationv1alpha1.ImageStatus{ResolvedOVAUrl: "https://a", URLSource: migrationv1alpha1.ImageURLSourceUser}, wantDiff: false},
 		{name: "cleared user URL", spec: &migrationv1alpha1.ImageSpec{}, status: &migrationv1alpha1.ImageStatus{ResolvedOVAUrl: "https://a", URLSource: migrationv1alpha1.ImageURLSourceUser}, wantDiff: true},
+		{name: "user template ignores disk provisioning", spec: &migrationv1alpha1.ImageSpec{OVAUrl: "https://a", DiskProvisioning: "thick"}, status: &migrationv1alpha1.ImageStatus{ResolvedOVAUrl: "https://a", URLSource: migrationv1alpha1.ImageURLSourceUser, DiskProvisioning: "thin"}, wantDiff: false},
+		{name: "same URL and no operator provenance", spec: &migrationv1alpha1.ImageSpec{OVAUrl: "https://a", DiskProvisioning: "thin"}, status: &migrationv1alpha1.ImageStatus{ResolvedOVAUrl: "https://a", URLSource: migrationv1alpha1.ImageURLSourceUser, DiskProvisioning: "thin"}, wantDiff: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -95,6 +97,70 @@ func TestImageSpecDiffersFromStatus(t *testing.T) {
 				t.Fatalf("imageSpecDiffersFromStatus() = %v, want %v", got, tt.wantDiff)
 			}
 		})
+	}
+}
+
+func TestImageSpecDiffersFromStatusWithMultipleFailureDomains(t *testing.T) {
+	migration := &migrationv1alpha1.VmwareCloudFoundationMigration{
+		Spec: migrationv1alpha1.VmwareCloudFoundationMigrationSpec{
+			Image:          &migrationv1alpha1.ImageSpec{OVAUrl: "https://a", DiskProvisioning: migrationv1alpha1.DiskProvisioningModeThick},
+			FailureDomains: []configv1.VSpherePlatformFailureDomainSpec{{Name: "fd1"}, {Name: "fd2"}},
+		},
+		Status: migrationv1alpha1.VmwareCloudFoundationMigrationStatus{
+			Image: &migrationv1alpha1.ImageStatus{
+				ResolvedOVAUrl:            "https://a",
+				URLSource:                 migrationv1alpha1.ImageURLSourceUser,
+				DiskProvisioning:          migrationv1alpha1.DiskProvisioningModeThick,
+				OperatorImportedTemplates: map[string]string{"fd1": "https://a", "fd2": "https://a"},
+				ImportedTemplates:         map[string]string{"fd1": "/fd1", "fd2": "/fd2"},
+				OperatorImportedDiskProvisioning: map[string]migrationv1alpha1.DiskProvisioningMode{
+					"fd1": migrationv1alpha1.DiskProvisioningModeThick,
+					"fd2": migrationv1alpha1.DiskProvisioningModeThin,
+				},
+			},
+		},
+	}
+	if !imageSpecDiffersFromStatus(migration) {
+		t.Fatal("imageSpecDiffersFromStatus() = false with fd2 still using thin provisioning")
+	}
+	migration.Status.Image.OperatorImportedDiskProvisioning["fd2"] = migrationv1alpha1.DiskProvisioningModeThick
+	if imageSpecDiffersFromStatus(migration) {
+		t.Fatal("imageSpecDiffersFromStatus() = true after all operator templates use thick provisioning")
+	}
+}
+
+func TestImageSpecDiffersFromStatusLegacyProvisioning(t *testing.T) {
+	migration := &migrationv1alpha1.VmwareCloudFoundationMigration{
+		Spec: migrationv1alpha1.VmwareCloudFoundationMigrationSpec{
+			Image:          &migrationv1alpha1.ImageSpec{OVAUrl: "https://a", DiskProvisioning: migrationv1alpha1.DiskProvisioningModeThick},
+			FailureDomains: []configv1.VSpherePlatformFailureDomainSpec{{Name: "fd1"}},
+		},
+		Status: migrationv1alpha1.VmwareCloudFoundationMigrationStatus{Image: &migrationv1alpha1.ImageStatus{
+			ResolvedOVAUrl: "https://a", URLSource: migrationv1alpha1.ImageURLSourceUser,
+			OperatorImportedTemplates: map[string]string{"fd1": "https://a"}, ImportedTemplates: map[string]string{"fd1": "/fd1"},
+		}},
+	}
+	if imageSpecDiffersFromStatus(migration) {
+		t.Fatal("legacy status without provisioning provenance must not trigger destructive re-import")
+	}
+}
+
+func TestImageSpecDiffersFromStatusRemovedFailureDomain(t *testing.T) {
+	migration := &migrationv1alpha1.VmwareCloudFoundationMigration{
+		Spec: migrationv1alpha1.VmwareCloudFoundationMigrationSpec{
+			Image:          &migrationv1alpha1.ImageSpec{OVAUrl: "https://a", DiskProvisioning: migrationv1alpha1.DiskProvisioningModeThick},
+			FailureDomains: []configv1.VSpherePlatformFailureDomainSpec{{Name: "fd1"}},
+		},
+		Status: migrationv1alpha1.VmwareCloudFoundationMigrationStatus{Image: &migrationv1alpha1.ImageStatus{
+			ResolvedOVAUrl: "https://a", URLSource: migrationv1alpha1.ImageURLSourceUser, DiskProvisioning: migrationv1alpha1.DiskProvisioningModeThick,
+			OperatorImportedTemplates: map[string]string{"fd1": "https://a", "removed": "https://a"},
+			OperatorImportedDiskProvisioning: map[string]migrationv1alpha1.DiskProvisioningMode{
+				"fd1": migrationv1alpha1.DiskProvisioningModeThick, "removed": migrationv1alpha1.DiskProvisioningModeThin,
+			},
+		}},
+	}
+	if imageSpecDiffersFromStatus(migration) {
+		t.Fatal("removed failure domain must not keep image import incomplete")
 	}
 }
 

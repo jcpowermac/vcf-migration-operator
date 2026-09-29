@@ -42,6 +42,15 @@ func TestMigrationProgressDeepCopy(t *testing.T) {
 	}
 }
 
+func TestImageStatusDeepCopyProvisioning(t *testing.T) {
+	original := &ImageStatus{OperatorImportedDiskProvisioning: map[string]DiskProvisioningMode{"fd1": DiskProvisioningModeThin}}
+	copy := original.DeepCopy()
+	copy.OperatorImportedDiskProvisioning["fd1"] = DiskProvisioningModeThick
+	if original.OperatorImportedDiskProvisioning["fd1"] != DiskProvisioningModeThin {
+		t.Fatal("DeepCopy shared operator provisioning map with original")
+	}
+}
+
 func TestMigrationProgressNilDeepCopy(t *testing.T) {
 	var orig *MigrationProgress
 	copied := orig.DeepCopy()

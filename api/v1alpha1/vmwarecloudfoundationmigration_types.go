@@ -244,6 +244,20 @@ type ImageStatus struct {
 	// +optional
 	// +kubebuilder:validation:Enum="";user;auto
 	URLSource ImageURLSource `json:"urlSource,omitempty"`
+
+	// diskProvisioning records the VMDK provisioning mode used when the
+	// operator imported the templates. Empty when the OVF descriptor default
+	// was used or the templates were user-pre-configured. Used to detect a
+	// spec.image.diskProvisioning change and re-import operator-managed
+	// templates.
+	// +optional
+	// +kubebuilder:validation:Enum="";thin;thick;eagerZeroedThick
+	DiskProvisioning DiskProvisioningMode `json:"diskProvisioning,omitempty"`
+
+	// operatorImportedDiskProvisioning records the provisioning mode of each
+	// operator-imported template so a change can re-import every failure domain.
+	// +optional
+	OperatorImportedDiskProvisioning map[string]DiskProvisioningMode `json:"operatorImportedDiskProvisioning,omitempty"`
 }
 
 // Condition type constants for the migration workflow.

@@ -271,6 +271,19 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 
 	r.seedReadyCondition(migration)
 
+	// A spec.image change re-opens the completed image import; the downstream
+	// stage conditions and completionTime no longer reflect the in-progress
+	// re-import. Reset them so their handlers re-run after the OVA is replaced
+	// and consumers don't observe a stale "complete" while templates are deleted.
+	if imageImportNeedsReconcile(migration) {
+		r.resetReadyStability()
+		r.setCondition(migration, migrationv1alpha1.ConditionMultiSiteConfigured, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Reset for OVA re-import after spec.image change")
+		r.setCondition(migration, migrationv1alpha1.ConditionWorkloadMigrated, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Reset for OVA re-import after spec.image change")
+		r.setCondition(migration, migrationv1alpha1.ConditionSourceCleaned, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Reset for OVA re-import after spec.image change")
+		r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Reset for OVA re-import after spec.image change")
+		migration.Status.CompletionTime = nil
+	}
+
 	for _, condType := range conditionOrder {
 		if r.isConditionTrue(migration, condType) {
 			continue
@@ -323,6 +336,13 @@ func imageSpecDiffersFromStatus(migration *migrationv1alpha1.VmwareCloudFoundati
 	}
 	if migration.Spec.Image == nil {
 		return true
+	}
+	for _, fd := range migration.Spec.FailureDomains {
+		if _, imported := migration.Status.Image.OperatorImportedTemplates[fd.Name]; imported {
+			if mode, known := migration.Status.Image.OperatorImportedDiskProvisioning[fd.Name]; known && mode != migration.Spec.Image.DiskProvisioning {
+				return true
+			}
+		}
 	}
 	if migration.Spec.Image.OVAUrl != "" {
 		return migration.Status.Image.ResolvedOVAUrl != migration.Spec.Image.OVAUrl
@@ -671,6 +691,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureDestinationImageImporte
 	if requeue {
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
+	migration.Status.Image.DiskProvisioning = migration.Spec.Image.DiskProvisioning
 
 	// Phase 5: Populate topology.template and set condition True.
 	// Count pre-existing templates before we fill in the blanks so the
@@ -715,13 +736,13 @@ func (r *VmwareCloudFoundationMigrationReconciler) importOVATemplate(ctx context
 	for i := range migration.Spec.FailureDomains {
 		fd := &migration.Spec.FailureDomains[i]
 
-		// Skip if already imported, unless this operator-imported template was
-		// built from a different OVA URL than the one now resolved: a
-		// corrected ovaUrl must delete and re-import it. User-pre-configured
-		// templates (never tracked in OperatorImportedTemplates) are left
-		// alone.
+		// Re-import operator-managed templates when their URL or provisioning
+		// differs. User-provided templates have no operator provenance and are left alone.
 		if recorded, done := migration.Status.Image.ImportedTemplates[fd.Name]; done {
-			if prevURL, ok := migration.Status.Image.OperatorImportedTemplates[fd.Name]; ok && prevURL != migration.Status.Image.ResolvedOVAUrl {
+			prevMode, modeKnown := migration.Status.Image.OperatorImportedDiskProvisioning[fd.Name]
+			if prevURL, ok := migration.Status.Image.OperatorImportedTemplates[fd.Name]; ok &&
+				(prevURL != migration.Status.Image.ResolvedOVAUrl ||
+					(modeKnown && prevMode != migration.Spec.Image.DiskProvisioning)) {
 				staleUser, stalePass, err := getTargetCredentials(ctx, r.KubeClient, migration, fd.Server)
 				if err != nil {
 					return false, fmt.Errorf("getting credentials for %s: %w", fd.Server, err)
@@ -735,16 +756,18 @@ func (r *VmwareCloudFoundationMigrationReconciler) importOVATemplate(ctx context
 						fmt.Sprintf("Failed to delete stale template for %s: %v", fd.Name, err))
 					return false, fmt.Errorf("deleting stale template for %s: %w", fd.Name, err)
 				}
-				log.V(1).Info("OVA URL changed, deleting stale operator template for re-import",
+				log.V(1).Info("operator template needs re-import after spec.image change, deleting stale template",
 					"failureDomain", fd.Name, "template", recorded,
 					"previousURL", vsphere.SanitizeOVAURL(prevURL),
-					"resolvedURL", vsphere.SanitizeOVAURL(migration.Status.Image.ResolvedOVAUrl))
+					"resolvedURL", vsphere.SanitizeOVAURL(migration.Status.Image.ResolvedOVAUrl),
+					"diskProvisioning", migration.Status.Image.DiskProvisioning)
 				if r.Recorder != nil {
 					r.Recorder.Eventf(migration, nil, "Normal", "TemplateReimport", "TemplateReimport",
-						"Re-importing template for %s after OVA URL change", fd.Name)
+						"Re-importing operator template for %s after spec.image change", fd.Name)
 				}
 				delete(migration.Status.Image.ImportedTemplates, fd.Name)
 				delete(migration.Status.Image.OperatorImportedTemplates, fd.Name)
+				delete(migration.Status.Image.OperatorImportedDiskProvisioning, fd.Name)
 				fd.Topology.Template = "" // clear so the import below recreates it
 			} else {
 				continue
@@ -788,6 +811,10 @@ func (r *VmwareCloudFoundationMigrationReconciler) importOVATemplate(ctx context
 				migration.Status.Image.OperatorImportedTemplates = make(map[string]string)
 			}
 			migration.Status.Image.OperatorImportedTemplates[fd.Name] = migration.Status.Image.ResolvedOVAUrl
+			if migration.Status.Image.OperatorImportedDiskProvisioning == nil {
+				migration.Status.Image.OperatorImportedDiskProvisioning = make(map[string]migrationv1alpha1.DiskProvisioningMode)
+			}
+			migration.Status.Image.OperatorImportedDiskProvisioning[fd.Name] = migration.Spec.Image.DiskProvisioning
 			log.V(1).Info("template already exists, skipping import", "failureDomain", fd.Name, "path", inventoryPath)
 			r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
 				fmt.Sprintf("Skipped existing template for %s (%d/%d)", fd.Name, len(migration.Status.Image.ImportedTemplates), len(migration.Spec.FailureDomains)))
@@ -873,6 +900,10 @@ func (r *VmwareCloudFoundationMigrationReconciler) importOVATemplate(ctx context
 			migration.Status.Image.OperatorImportedTemplates = make(map[string]string)
 		}
 		migration.Status.Image.OperatorImportedTemplates[fd.Name] = migration.Status.Image.ResolvedOVAUrl
+		if migration.Status.Image.OperatorImportedDiskProvisioning == nil {
+			migration.Status.Image.OperatorImportedDiskProvisioning = make(map[string]migrationv1alpha1.DiskProvisioningMode)
+		}
+		migration.Status.Image.OperatorImportedDiskProvisioning[fd.Name] = migration.Spec.Image.DiskProvisioning
 		log.Info("template imported", "failureDomain", fd.Name, "path", vm.InventoryPath)
 
 		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
@@ -1664,13 +1695,14 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 				log.V(1).Info("skipping stale generation condition update", "condition", cond.Type, "observedGeneration", cond.ObservedGeneration, "latestGeneration", latest.Generation)
 				continue
 			}
-			// Never downgrade a success another reconcile already committed.
+			// Never downgrade a success another reconcile already committed,
+			// except when a spec.image change legitimately re-opens the import
+			// and resets the downstream stage conditions.
 			if existing := apimeta.FindStatusCondition(latest.Status.Conditions, cond.Type); existing != nil &&
-				existing.Status == metav1.ConditionTrue && cond.Status != metav1.ConditionTrue {
-				if cond.Type != migrationv1alpha1.ConditionDestinationImageImported || !imageSpecDiffersFromStatus(latest) {
-					log.V(1).Info("keeping committed condition success over stale update", "condition", cond.Type)
-					continue
-				}
+				existing.Status == metav1.ConditionTrue && cond.Status != metav1.ConditionTrue &&
+				!imageSpecDiffersFromStatus(latest) {
+				log.V(1).Info("keeping committed condition success over stale update", "condition", cond.Type)
+				continue
 			}
 			existingCond := apimeta.FindStatusCondition(latest.Status.Conditions, cond.Type)
 			if existingCond == nil || statusConditionChanged(*existingCond, cond) {
@@ -1694,6 +1726,17 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 		}
 		if migration.Status.CompletionTime != nil && latest.Status.CompletionTime == nil {
 			latest.Status.CompletionTime = migration.Status.CompletionTime
+			hasChanges = true
+		}
+		// Clear completionTime only when this reconcile started with it set, this
+		// reconcile removed it (the spec.image reset path), and the drift is still
+		// visible on the freshly fetched object - mirroring the condition downgrade
+		// guard above. Without the baseStatus check a delayed writer that started
+		// before completion (leader handoff) can permanently erase a committed
+		// completionTime that no later reconcile re-sets.
+		if migration.Status.CompletionTime == nil && baseStatus.CompletionTime != nil &&
+			latest.Status.CompletionTime != nil && imageSpecDiffersFromStatus(latest) {
+			latest.Status.CompletionTime = nil
 			hasChanges = true
 		}
 		if mergeImageStatusIntoLatest(latest, migration, baseStatus) {

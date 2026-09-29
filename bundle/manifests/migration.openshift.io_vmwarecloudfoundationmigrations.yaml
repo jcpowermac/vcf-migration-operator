@@ -417,12 +417,34 @@ spec:
               image:
                 description: image reports the RHCOS OVA import state.
                 properties:
+                  diskProvisioning:
+                    description: |-
+                      diskProvisioning records the VMDK provisioning mode used when the
+                      operator imported the templates. Empty when the OVF descriptor default
+                      was used or the templates were user-pre-configured. Used to detect a
+                      spec.image.diskProvisioning change and re-import operator-managed
+                      templates.
+                    enum:
+                    - ""
+                    - thin
+                    - thick
+                    - eagerZeroedThick
+                    type: string
                   importedTemplates:
                     additionalProperties:
                       type: string
                     description: |-
                       importedTemplates maps failure domain names to the inventory paths
                       of imported VM templates.
+                    type: object
+                  operatorImportedDiskProvisioning:
+                    additionalProperties:
+                      description: DiskProvisioningMode defines the disk provisioning
+                        type for imported VM templates.
+                      type: string
+                    description: |-
+                      operatorImportedDiskProvisioning records the provisioning mode of each
+                      operator-imported template so a change can re-import every failure domain.
                     type: object
                   operatorImportedTemplates:
                     additionalProperties:

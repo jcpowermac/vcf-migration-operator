@@ -445,6 +445,7 @@ var _ = Describe("image import reconciliation", func() {
 		}
 		resource.Status.StartTime = &metav1.Time{Time: time.Now()}
 		now := metav1.Now()
+		resource.Status.CompletionTime = &now
 		for _, conditionType := range conditionOrder {
 			resource.Status.Conditions = append(resource.Status.Conditions, metav1.Condition{
 				Type: conditionType, Status: metav1.ConditionTrue, ObservedGeneration: resource.Generation,
@@ -491,6 +492,12 @@ var _ = Describe("image import reconciliation", func() {
 		Expect(condition.Reason).To(Equal(migrationv1alpha1.ReasonProgressing), "image import must report progress while resolving URL B")
 		Expect(final.Status.Image.ResolvedOVAUrl).To(Equal("https://example.com/image-b.ova"), "resolved OVA URL must update to URL B")
 		Expect(final.Status.Image.URLSource).To(Equal(migrationv1alpha1.ImageURLSourceUser), "replacement URL must remain user-provided")
+		Expect(final.Status.CompletionTime).To(BeNil(), "completionTime must clear while image import is in progress")
+		for _, conditionType := range conditionOrder[3:] {
+			condition = apimeta.FindStatusCondition(final.Status.Conditions, conditionType)
+			Expect(condition).NotTo(BeNil(), "downstream %s condition must exist", conditionType)
+			Expect(condition.Status).To(Equal(metav1.ConditionFalse), "downstream %s must be reset during re-import", conditionType)
+		}
 	})
 })
 
@@ -891,6 +898,38 @@ var _ = Describe("updateStatus", func() {
 		readyCond := apimeta.FindStatusCondition(final.Status.Conditions, migrationv1alpha1.ConditionReady)
 		Expect(readyCond).NotTo(BeNil())
 		Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
+	})
+
+	It("does not clear a committed CompletionTime for a delayed writer that started before completion", func() {
+		// spec.image differs from status (never imported), so imageSpecDiffersFromStatus(latest)
+		// is true; without the baseStatus guard a late writer could clear the committed time.
+		resource := newStatusTestResource()
+		resource.Spec.Image = &migrationv1alpha1.ImageSpec{OVAUrl: "https://example.com/rhcos.ova"}
+		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+		reconciler := &VmwareCloudFoundationMigrationReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+
+		// The writer that completes the migration: its base snapshot already carries CompletionTime.
+		completed := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, completed)).To(Succeed())
+		completedBase := *completed.Status.DeepCopy()
+		now := metav1.Now()
+		completed.Status.CompletionTime = &now
+		Expect(reconciler.updateStatus(ctx, completed, completedBase)).To(Succeed())
+
+		// A delayed writer that started before completion. It captured its in-memory snapshot
+		// before CompletionTime existed, so its in-memory status has no CompletionTime even though
+		// etcd now holds the committed value; both must be nil for it to be a true pre-completion writer.
+		stale := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, stale)).To(Succeed())
+		stale.Status.CompletionTime = nil
+		staleBase := *stale.Status.DeepCopy()
+		Expect(staleBase.CompletionTime).To(BeNil(), "delayed writer must start before completion")
+		Expect(reconciler.updateStatus(ctx, stale, staleBase)).To(Succeed())
+
+		final := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, final)).To(Succeed())
+		Expect(final.Status.CompletionTime).NotTo(BeNil(), "delayed pre-completion writer must not clear CompletionTime")
 	})
 })
 
