@@ -309,6 +309,27 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 	return ctrl.Result{}, nil
 }
 
+func imageImportNeedsReconcile(migration *migrationv1alpha1.VmwareCloudFoundationMigration) bool {
+	condition := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionDestinationImageImported)
+	return condition != nil && condition.Status == metav1.ConditionTrue && imageSpecDiffersFromStatus(migration)
+}
+
+func imageSpecDiffersFromStatus(migration *migrationv1alpha1.VmwareCloudFoundationMigration) bool {
+	if migration.Spec.Image != nil && migration.Status.Image == nil {
+		return true
+	}
+	if migration.Status.Image == nil {
+		return false
+	}
+	if migration.Spec.Image == nil {
+		return true
+	}
+	if migration.Spec.Image.OVAUrl != "" {
+		return migration.Status.Image.ResolvedOVAUrl != migration.Spec.Image.OVAUrl
+	}
+	return migration.Status.Image.URLSource == migrationv1alpha1.ImageURLSourceUser
+}
+
 // ensureInfrastructurePrepared validates preflight checks and selects the
 // migration path without performing disruptive cluster changes.
 func (r *VmwareCloudFoundationMigrationReconciler) ensureInfrastructurePrepared(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) (ctrl.Result, error) {
@@ -763,6 +784,10 @@ func (r *VmwareCloudFoundationMigrationReconciler) importOVATemplate(ctx context
 
 		if found {
 			migration.Status.Image.ImportedTemplates[fd.Name] = inventoryPath
+			if migration.Status.Image.OperatorImportedTemplates == nil {
+				migration.Status.Image.OperatorImportedTemplates = make(map[string]string)
+			}
+			migration.Status.Image.OperatorImportedTemplates[fd.Name] = migration.Status.Image.ResolvedOVAUrl
 			log.V(1).Info("template already exists, skipping import", "failureDomain", fd.Name, "path", inventoryPath)
 			r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
 				fmt.Sprintf("Skipped existing template for %s (%d/%d)", fd.Name, len(migration.Status.Image.ImportedTemplates), len(migration.Spec.FailureDomains)))
@@ -1556,7 +1581,10 @@ func (r *VmwareCloudFoundationMigrationReconciler) setCondition(migration *migra
 // isConditionTrue checks whether the named condition has status True.
 func (r *VmwareCloudFoundationMigrationReconciler) isConditionTrue(migration *migrationv1alpha1.VmwareCloudFoundationMigration, conditionType string) bool {
 	cond := apimeta.FindStatusCondition(migration.Status.Conditions, conditionType)
-	return cond != nil && cond.Status == metav1.ConditionTrue
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		return false
+	}
+	return conditionType != migrationv1alpha1.ConditionDestinationImageImported || !imageImportNeedsReconcile(migration)
 }
 
 // statusConditionChanged reports whether two conditions of the same type
@@ -1568,6 +1596,36 @@ func statusConditionChanged(prev, next metav1.Condition) bool {
 		prev.Message != next.Message ||
 		prev.ObservedGeneration != next.ObservedGeneration ||
 		!prev.LastTransitionTime.Equal(&next.LastTransitionTime)
+}
+
+// mergeImageStatus persists image changes unless another reconcile already
+// changed image status since this reconcile started.
+func mergeImageStatus(latest, base, desired *migrationv1alpha1.ImageStatus) (*migrationv1alpha1.ImageStatus, bool) {
+	if desired == nil || reflect.DeepEqual(base, desired) {
+		return latest, false
+	}
+	if latest == nil || reflect.DeepEqual(latest, base) {
+		return desired.DeepCopy(), true
+	}
+	return latest, false
+}
+
+func mergeImageStatusIntoLatest(latest *migrationv1alpha1.VmwareCloudFoundationMigration, migration *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus) bool {
+	if latest.Spec.Image == nil {
+		if latest.Status.Image != nil {
+			latest.Status.Image = nil
+			return true
+		}
+		return false
+	}
+	if migration.Generation != latest.Generation {
+		return false
+	}
+	image, changed := mergeImageStatus(latest.Status.Image, baseStatus.Image, migration.Status.Image)
+	if changed {
+		latest.Status.Image = image
+	}
+	return changed
 }
 
 // updateStatus persists this reconcile's status changes using optimistic
@@ -1609,8 +1667,10 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 			// Never downgrade a success another reconcile already committed.
 			if existing := apimeta.FindStatusCondition(latest.Status.Conditions, cond.Type); existing != nil &&
 				existing.Status == metav1.ConditionTrue && cond.Status != metav1.ConditionTrue {
-				log.V(1).Info("keeping committed condition success over stale update", "condition", cond.Type)
-				continue
+				if cond.Type != migrationv1alpha1.ConditionDestinationImageImported || !imageSpecDiffersFromStatus(latest) {
+					log.V(1).Info("keeping committed condition success over stale update", "condition", cond.Type)
+					continue
+				}
 			}
 			existingCond := apimeta.FindStatusCondition(latest.Status.Conditions, cond.Type)
 			if existingCond == nil || statusConditionChanged(*existingCond, cond) {
@@ -1634,6 +1694,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 		}
 		if migration.Status.CompletionTime != nil && latest.Status.CompletionTime == nil {
 			latest.Status.CompletionTime = migration.Status.CompletionTime
+			hasChanges = true
+		}
+		if mergeImageStatusIntoLatest(latest, migration, baseStatus) {
 			hasChanges = true
 		}
 
