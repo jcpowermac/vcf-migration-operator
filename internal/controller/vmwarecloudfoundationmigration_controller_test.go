@@ -19,10 +19,12 @@ package controller
 import (
 	"context"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	configv1 "github.com/openshift/api/config/v1"
+	configfake "github.com/openshift/client-go/config/clientset/versioned/fake"
 	"k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
@@ -408,6 +410,90 @@ var _ = Describe("VmwareCloudFoundationMigration Controller", func() {
 	})
 })
 
+var _ = Describe("image import reconciliation", func() {
+	It("re-enters image import when the OVA URL changes after completion", func() {
+		ctx := context.Background()
+		name := types.NamespacedName{Name: migrationv1alpha1.SingletonName, Namespace: "default"}
+		DeferCleanup(func() {
+			resource := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+			if err := k8sClient.Get(ctx, name, resource); err == nil {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			} else {
+				Expect(errors.IsNotFound(err)).To(BeTrue(), "failed to read image URL change resource for cleanup: %v", err)
+			}
+		})
+		resource := &migrationv1alpha1.VmwareCloudFoundationMigration{
+			ObjectMeta: metav1.ObjectMeta{Name: name.Name, Namespace: name.Namespace},
+			Spec: migrationv1alpha1.VmwareCloudFoundationMigrationSpec{
+				State:                          migrationv1alpha1.MigrationStateRunning,
+				TargetVCenterCredentialsSecret: migrationv1alpha1.SecretReference{Name: "target-vcenter-creds", Namespace: "default"},
+				FailureDomains: []configv1.VSpherePlatformFailureDomainSpec{{
+					Name: "target-fd-1", Region: "target-region", Zone: "target-zone-1", Server: "vcenter-target.example.com",
+					Topology: configv1.VSpherePlatformTopology{
+						Datacenter: "TargetDC", ComputeCluster: "/TargetDC/host/TargetCluster", Datastore: "/TargetDC/datastore/TargetDatastore",
+						Networks: []string{"VM Network"}, ResourcePool: "/TargetDC/host/TargetCluster/Resources", Folder: "/TargetDC/vm/migration",
+					},
+				}},
+				Image: &migrationv1alpha1.ImageSpec{OVAUrl: "https://example.com/image-a.ova"},
+			},
+		}
+		Expect(k8sClient.Create(ctx, resource)).To(Succeed(), "failed to create image URL change resource")
+		Expect(k8sClient.Get(ctx, name, resource)).To(Succeed(), "failed to read image URL change resource")
+		resource.Status.Image = &migrationv1alpha1.ImageStatus{
+			ResolvedOVAUrl: "https://example.com/image-a.ova",
+			URLSource:      migrationv1alpha1.ImageURLSourceUser,
+		}
+		resource.Status.StartTime = &metav1.Time{Time: time.Now()}
+		now := metav1.Now()
+		for _, conditionType := range conditionOrder {
+			resource.Status.Conditions = append(resource.Status.Conditions, metav1.Condition{
+				Type: conditionType, Status: metav1.ConditionTrue, ObservedGeneration: resource.Generation,
+				LastTransitionTime: now, Reason: migrationv1alpha1.ReasonCompleted, Message: "completed",
+			})
+		}
+		Expect(k8sClient.Status().Update(ctx, resource)).To(Succeed(), "failed to persist completed image import status")
+		Expect(k8sClient.Get(ctx, name, resource)).To(Succeed(), "failed to reread completed image import")
+		Expect(resource.Status.Image).NotTo(BeNil(), "persisted image status must exist before changing the spec")
+		Expect(resource.Status.Image.ResolvedOVAUrl).To(Equal("https://example.com/image-a.ova"), "URL A must be read back from persisted status")
+		Expect(resource.Status.StartTime).NotTo(BeNil(), "migration must be past its first Running reconcile")
+		condition := apimeta.FindStatusCondition(resource.Status.Conditions, migrationv1alpha1.ConditionDestinationImageImported)
+		Expect(condition).NotTo(BeNil(), "persisted image-import condition must exist before changing the spec")
+		Expect(condition.Status).To(Equal(metav1.ConditionTrue), "persisted image-import condition must be complete before changing the spec")
+		Expect(conditionOrder[0]).To(Equal(migrationv1alpha1.ConditionInfrastructurePrepared))
+		Expect(conditionOrder[1]).To(Equal(migrationv1alpha1.ConditionDestinationInitialized))
+		for _, conditionType := range conditionOrder[2:] {
+			completedCondition := apimeta.FindStatusCondition(resource.Status.Conditions, conditionType)
+			Expect(completedCondition).NotTo(BeNil(), "persisted %s condition must exist", conditionType)
+			Expect(completedCondition.Status).To(Equal(metav1.ConditionTrue), "persisted %s condition must be complete", conditionType)
+		}
+		resource.Spec.Image.OVAUrl = "https://example.com/image-b.ova"
+		Expect(k8sClient.Update(ctx, resource)).To(Succeed(), "failed to update OVA URL")
+		Expect(imageImportNeedsReconcile(resource)).To(BeTrue(), "changed OVA URL must invalidate completed image import")
+
+		reconciler := &VmwareCloudFoundationMigrationReconciler{
+			Client: k8sClient,
+			Scheme: k8sClient.Scheme(),
+			ConfigClient: configfake.NewSimpleClientset(&configv1.Infrastructure{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster"},
+				Status:     configv1.InfrastructureStatus{InfrastructureName: "test-infra"},
+			}),
+			Recorder: events.NewFakeRecorder(10),
+		}
+		result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+		Expect(err).NotTo(HaveOccurred(), "reconcile failed after OVA URL change")
+		Expect(result.RequeueAfter).To(BeNumerically(">", 0), "image import should requeue after resolving the replacement OVA")
+
+		final := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, name, final)).To(Succeed(), "failed to read image URL change result")
+		condition = apimeta.FindStatusCondition(final.Status.Conditions, migrationv1alpha1.ConditionDestinationImageImported)
+		Expect(condition).NotTo(BeNil(), "image import condition must be present")
+		Expect(condition.Status).To(Equal(metav1.ConditionFalse), "image import must re-enter Progressing after URL change: %+v", *condition)
+		Expect(condition.Reason).To(Equal(migrationv1alpha1.ReasonProgressing), "image import must report progress while resolving URL B")
+		Expect(final.Status.Image.ResolvedOVAUrl).To(Equal("https://example.com/image-b.ova"), "resolved OVA URL must update to URL B")
+		Expect(final.Status.Image.URLSource).To(Equal(migrationv1alpha1.ImageURLSourceUser), "replacement URL must remain user-provided")
+	})
+})
+
 var _ = Describe("updateStatus", func() {
 	const resourceName = "status-merge-test"
 
@@ -668,6 +754,114 @@ var _ = Describe("updateStatus", func() {
 		Expect(final.Status.Progress.ControlPlane.Replicas).To(Equal(int32(3)))
 		Expect(final.Status.Progress.ControlPlane.UpdatedReplicas).To(Equal(int32(2)))
 		Expect(final.Status.Progress.ControlPlane.ReadyReplicas).To(Equal(int32(2)))
+	})
+
+	It("persists Image status so image import does not re-resolve on every reconcile", func() {
+		resource := newStatusTestResource()
+		resource.Spec.Image = &migrationv1alpha1.ImageSpec{}
+		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+		reconciler := &VmwareCloudFoundationMigrationReconciler{
+			Client: k8sClient,
+			Scheme: k8sClient.Scheme(),
+		}
+
+		migration := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, migration)).To(Succeed())
+		base := *migration.Status.DeepCopy()
+		migration.Status.Image = &migrationv1alpha1.ImageStatus{
+			ResolvedOVAUrl: "https://example.com/rhcos.ova",
+			ResolvedSHA256: "deadbeef",
+			URLSource:      migrationv1alpha1.ImageURLSourceAuto,
+			ImportedTemplates: map[string]string{
+				"target-fd-1": "/TargetDC/vm/rhcos-template",
+			},
+		}
+
+		Expect(reconciler.updateStatus(ctx, migration, base)).To(Succeed())
+
+		final := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, final)).To(Succeed())
+		Expect(final.Status.Image).NotTo(BeNil())
+		Expect(final.Status.Image.ResolvedOVAUrl).To(Equal("https://example.com/rhcos.ova"))
+		Expect(final.Status.Image.ResolvedSHA256).To(Equal("deadbeef"))
+		Expect(final.Status.Image.URLSource).To(Equal(migrationv1alpha1.ImageURLSourceAuto))
+		Expect(final.Status.Image.ImportedTemplates).To(HaveKeyWithValue("target-fd-1", "/TargetDC/vm/rhcos-template"))
+	})
+
+	It("preserves newer Image status when a stale reconcile updates another field", func() {
+		resource := newStatusTestResource()
+		resource.Spec.Image = &migrationv1alpha1.ImageSpec{}
+		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+		reconciler := &VmwareCloudFoundationMigrationReconciler{
+			Client: k8sClient,
+			Scheme: k8sClient.Scheme(),
+		}
+
+		stale := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, stale)).To(Succeed())
+		staleBase := *stale.Status.DeepCopy()
+
+		current := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, current)).To(Succeed())
+		currentBase := *current.Status.DeepCopy()
+		current.Status.Image = &migrationv1alpha1.ImageStatus{
+			ResolvedOVAUrl: "https://example.com/new.ova",
+			ResolvedSHA256: "new-digest",
+			URLSource:      migrationv1alpha1.ImageURLSourceAuto,
+			ImportedTemplates: map[string]string{
+				"target-fd-1": "/TargetDC/vm/new-template",
+			},
+		}
+		Expect(reconciler.updateStatus(ctx, current, currentBase)).To(Succeed())
+
+		stale.Status.Image = &migrationv1alpha1.ImageStatus{
+			ResolvedOVAUrl: "https://example.com/old.ova",
+			ResolvedSHA256: "old-digest",
+			URLSource:      migrationv1alpha1.ImageURLSourceAuto,
+			ImportedTemplates: map[string]string{
+				"target-fd-1": "/TargetDC/vm/old-template",
+			},
+		}
+		reconciler.setCondition(stale, migrationv1alpha1.ConditionDestinationInitialized, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "still initializing")
+		Expect(reconciler.updateStatus(ctx, stale, staleBase)).To(Succeed())
+
+		final := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, final)).To(Succeed())
+		Expect(final.Status.Image.ResolvedOVAUrl).To(Equal("https://example.com/new.ova"))
+		Expect(final.Status.Image.ResolvedSHA256).To(Equal("new-digest"))
+		Expect(final.Status.Image.ImportedTemplates).To(HaveKeyWithValue("target-fd-1", "/TargetDC/vm/new-template"))
+		Expect(apimeta.FindStatusCondition(final.Status.Conditions, migrationv1alpha1.ConditionDestinationInitialized)).NotTo(BeNil())
+	})
+
+	It("clears delayed Image status after image import is removed", func() {
+		resource := newStatusTestResource()
+		resource.Spec.Image = &migrationv1alpha1.ImageSpec{}
+		Expect(k8sClient.Create(ctx, resource)).To(Succeed(), "failed to create image status removal resource")
+
+		stale := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, stale)).To(Succeed(), "failed to read delayed reconcile snapshot")
+		staleBase := *stale.Status.DeepCopy()
+
+		current := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, current)).To(Succeed(), "failed to read current image status resource")
+		currentBase := *current.Status.DeepCopy()
+		current.Status.Image = &migrationv1alpha1.ImageStatus{ResolvedOVAUrl: "https://example.com/rhcos.ova"}
+		reconciler := &VmwareCloudFoundationMigrationReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		Expect(reconciler.updateStatus(ctx, current, currentBase)).To(Succeed(), "failed to persist initial image status")
+
+		updated := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed(), "failed to read resource before image removal")
+		updated.Spec.Image = nil
+		Expect(k8sClient.Update(ctx, updated)).To(Succeed(), "failed to remove image specification")
+
+		stale.Status.Image = &migrationv1alpha1.ImageStatus{ResolvedOVAUrl: "https://example.com/stale.ova"}
+		Expect(reconciler.updateStatus(ctx, stale, staleBase)).To(Succeed(), "failed to persist delayed reconcile status")
+
+		final := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, final)).To(Succeed(), "failed to read final image status")
+		Expect(final.Status.Image).To(BeNil(), "image status must be cleared after image specification removal")
 	})
 
 	It("persists CompletionTime when migration is finished", func() {
