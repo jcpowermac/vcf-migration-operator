@@ -14,6 +14,9 @@ The operator reconciles the `VmwareCloudFoundationMigration` custom resource thr
   - [API Reference](docs/dev/api.md) — CR spec, status, condition types
   - [Architecture](docs/dev/architecture.md) — package layout, reconciliation flow, requeue strategy
   - [Development](docs/dev/development.md) — build, test, deploy, code generation, CI
+- **Proposed Implementation Designs**
+  - [UPI cross-vCenter Hot and Cold migration](docs/plans/upi-cross-vcenter-vmotion-design.md): narrow relocation-only design, not yet implemented
+  - [UPI node migration background](docs/plans/upi-node-migration-design.md): broader vMotion and future VM recreation design
 
 ## Quick Start
 
