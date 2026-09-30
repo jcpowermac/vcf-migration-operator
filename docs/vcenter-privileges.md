@@ -21,7 +21,7 @@ page (or, for property access, the per-property privilege on the object page).
 | `internal/vsphere/folder.go:31`, `internal/controller/preflight.go` — `dc.Folders()` reads `Datacenter.configInfo` | `RetrievePropertiesEx` property access | **`System.View`** |
 | `internal/vsphere/folder.go:99` — `task.Wait` reads task `info` | `RetrievePropertiesEx` property access | **`System.View`** |
 | `internal/controller/preflight.go` — `UserSession` reads `SessionManager.currentSession` | property access | `System.Anonymous` (none; `vim.SessionManager.html` property table) |
-| `internal/controller/preflight.go` — privilege preflight | `AuthorizationManager.HasUserPrivilegeOnEntities` | method: `None`; `entities` param: **`System.View`** on root folder, vm folder, datacenter, cluster, resource pool, and datastore |
+| `internal/controller/preflight.go` — privilege preflight | `AuthorizationManager.HasUserPrivilegeOnEntities` | method: `None`; `entities` param: **`System.View`** on the root folder, VM folder, datacenter, and cluster |
 | `internal/vsphere/folder.go:47` — `CreateVMFolder` | `Folder.CreateFolder` | **`Folder.Create`** on the parent folder |
 | `internal/vsphere/folder.go:94` — `DeleteVMFolder` | `ManagedEntity.Destroy_Task` | **`Folder.Delete`** when the object is a Folder |
 
