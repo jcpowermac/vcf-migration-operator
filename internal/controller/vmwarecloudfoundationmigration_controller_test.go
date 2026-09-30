@@ -24,16 +24,16 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	configv1 "github.com/openshift/api/config/v1"
+	configfake "github.com/openshift/client-go/config/clientset/versioned/fake"
 	"k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	fakekube "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
 )
@@ -417,10 +417,11 @@ var _ = Describe("VmwareCloudFoundationMigration Controller", func() {
 		It("should set the Ready condition to False with reason Paused and transition to Progressing on resume", func() {
 			fakeRecorder := events.NewFakeRecorder(10)
 			controllerReconciler := &VmwareCloudFoundationMigrationReconciler{
-				Client:     k8sClient,
-				Scheme:     k8sClient.Scheme(),
-				KubeClient: fakekube.NewClientset(),
-				Recorder:   fakeRecorder,
+				Client:       k8sClient,
+				Scheme:       k8sClient.Scheme(),
+				KubeClient:   fakekube.NewClientset(),
+				ConfigClient: configfake.NewClientset(&configv1.Infrastructure{ObjectMeta: metav1.ObjectMeta{Name: "cluster"}}),
+				Recorder:     fakeRecorder,
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
