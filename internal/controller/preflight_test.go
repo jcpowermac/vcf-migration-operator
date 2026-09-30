@@ -605,13 +605,23 @@ func TestRunPreflightChecks(t *testing.T) {
 			wantTargetSecretReadCount: 2,
 		},
 		{
-			name:        "image not set with empty topology.template is rejected before vCenter work",
+			name:        "empty topology.template is rejected before vCenter work",
 			version:     "5.0.0",
 			gateEnabled: true,
 			mutateMigration: func(m *migrationv1alpha1.VmwareCloudFoundationMigration) {
 				m.Spec.FailureDomains[0].Topology.Template = ""
 			},
 			wantErrContains:           "topology.template is required",
+			wantTargetSecretReadCount: 0,
+		},
+		{
+			name:        "later failure domain missing template is rejected before vCenter work",
+			version:     "5.0.0",
+			gateEnabled: true,
+			mutateMigration: func(m *migrationv1alpha1.VmwareCloudFoundationMigration) {
+				m.Spec.FailureDomains[1].Topology.Template = ""
+			},
+			wantErrContains:           `spec.failureDomains[1].topology.template is required (failure domain "fd-b")`,
 			wantTargetSecretReadCount: 0,
 		},
 	}
@@ -1056,12 +1066,19 @@ func TestFDFailureDomainTemplateMissing(t *testing.T) {
 	if err := fdTemplateMissing([]configv1.VSpherePlatformFailureDomainSpec{setFD("a", "/DC0/vm/t"), setFD("b", "/DC0/vm/u")}); err != nil {
 		t.Fatalf("expected nil when every template is set, got: %v", err)
 	}
-	err := fdTemplateMissing([]configv1.VSpherePlatformFailureDomainSpec{setFD("a", "/DC0/vm/t"), setFD("b", "")})
-	if err == nil {
-		t.Fatal("expected an error for an empty template, got nil")
-	}
-	if !strings.Contains(err.Error(), "spec.failureDomains[1].topology.template is required") || !strings.Contains(err.Error(), `failure domain "b"`) {
-		t.Fatalf("error should name the first empty template (failure domain b), got: %v", err)
+	for _, tt := range []struct {
+		name string
+		fds  []configv1.VSpherePlatformFailureDomainSpec
+		want string
+	}{
+		{"first missing", []configv1.VSpherePlatformFailureDomainSpec{setFD("a", ""), setFD("b", "/DC0/vm/u")}, `spec.failureDomains[0].topology.template is required (failure domain "a")`},
+		{"second missing", []configv1.VSpherePlatformFailureDomainSpec{setFD("a", "/DC0/vm/t"), setFD("b", "")}, `spec.failureDomains[1].topology.template is required (failure domain "b")`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := fdTemplateMissing(tt.fds); err == nil || err.Error() != tt.want {
+				t.Fatalf("fdTemplateMissing() = %v, want %q", err, tt.want)
+			}
+		})
 	}
 }
 

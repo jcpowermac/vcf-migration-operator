@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -25,6 +26,8 @@ import (
 	configv1 "github.com/openshift/api/config/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	fakekube "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/events"
@@ -34,6 +37,77 @@ import (
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
 )
+
+func TestConditionOrderSkipsImageImport(t *testing.T) {
+	for i, condition := range conditionOrder {
+		if condition == migrationv1alpha1.ConditionDestinationInitialized {
+			if i+1 >= len(conditionOrder) || conditionOrder[i+1] != migrationv1alpha1.ConditionMultiSiteConfigured {
+				t.Fatalf("condition after DestinationInitialized = %q, want MultiSiteConfigured", conditionOrder[i+1])
+			}
+			return
+		}
+	}
+	t.Fatal("DestinationInitialized missing from condition order")
+}
+
+var _ = Describe("required failure-domain template admission", func() {
+	It("rejects absent and empty templates in every failure domain", func() {
+		for _, tt := range []struct {
+			index int
+			empty bool
+		}{
+			{index: 0}, {index: 1}, {index: 0, empty: true}, {index: 1, empty: true},
+		} {
+			By(fmt.Sprintf("checking index %d, explicitly empty %t", tt.index, tt.empty))
+			resource := &migrationv1alpha1.VmwareCloudFoundationMigration{
+				ObjectMeta: metav1.ObjectMeta{GenerateName: "required-template-", Namespace: "default"},
+				Spec: migrationv1alpha1.VmwareCloudFoundationMigrationSpec{
+					State:                          migrationv1alpha1.MigrationStatePending,
+					TargetVCenterCredentialsSecret: migrationv1alpha1.SecretReference{Name: "target-vcenter-creds"},
+					FailureDomains: []configv1.VSpherePlatformFailureDomainSpec{
+						{
+							Name: "fd-a", Region: "region-a", Zone: "zone-a", Server: "vcenter.example.com",
+							Topology: configv1.VSpherePlatformTopology{Datacenter: "DC1", ComputeCluster: "/DC1/host/Cluster1", Datastore: "/DC1/datastore/DS1", Networks: []string{"VM Network"}, Template: "/DC1/vm/template-a"},
+						},
+						{
+							Name: "fd-b", Region: "region-b", Zone: "zone-b", Server: "vcenter.example.com",
+							Topology: configv1.VSpherePlatformTopology{Datacenter: "DC1", ComputeCluster: "/DC1/host/Cluster1", Datastore: "/DC1/datastore/DS1", Networks: []string{"VM Network"}, Template: "/DC1/vm/template-b"},
+						},
+					},
+				},
+			}
+			resource.Spec.FailureDomains[tt.index].Topology.Template = ""
+			if tt.empty {
+				// Go's encoder omits empty fields; an unstructured create exercises explicit empty JSON.
+				obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(resource)
+				Expect(err).NotTo(HaveOccurred())
+				fd := obj["spec"].(map[string]interface{})["failureDomains"].([]interface{})[tt.index].(map[string]interface{})
+				fd["topology"].(map[string]interface{})["template"] = ""
+				unstructuredResource := &unstructured.Unstructured{Object: obj}
+				unstructuredResource.SetAPIVersion("migration.openshift.io/v1alpha1")
+				unstructuredResource.SetKind("VmwareCloudFoundationMigration")
+				Expect(k8sClient.Create(ctx, unstructuredResource)).To(MatchError(ContainSubstring("topology.template is required")))
+			} else {
+				Expect(k8sClient.Create(ctx, resource)).To(MatchError(ContainSubstring("topology.template is required")))
+			}
+		}
+	})
+
+	It("accepts explicit templates for every failure domain", func() {
+		resource := &migrationv1alpha1.VmwareCloudFoundationMigration{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: "provided-template-", Namespace: "default"},
+			Spec: migrationv1alpha1.VmwareCloudFoundationMigrationSpec{
+				TargetVCenterCredentialsSecret: migrationv1alpha1.SecretReference{Name: "target-vcenter-creds"},
+				FailureDomains: []configv1.VSpherePlatformFailureDomainSpec{{
+					Name: "fd-a", Region: "region-a", Zone: "zone-a", Server: "vcenter.example.com",
+					Topology: configv1.VSpherePlatformTopology{Datacenter: "DC1", ComputeCluster: "/DC1/host/Cluster1", Datastore: "/DC1/datastore/DS1", Networks: []string{"VM Network"}, Template: "/DC1/vm/template-a"},
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, resource)).To(Succeed()) })
+	})
+})
 
 func TestSanitizeRFC1123(t *testing.T) {
 	tests := []struct {
