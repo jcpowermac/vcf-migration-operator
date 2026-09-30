@@ -117,48 +117,9 @@ type VmwareCloudFoundationMigrationSpec struct {
 	// dependency bumps.
 	// +required
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:XValidation:rule="self.all(fd, has(fd.topology.template) && fd.topology.template != '')",message="topology.template is required for every failure domain"
 	// +listType=atomic
 	FailureDomains []configv1.VSpherePlatformFailureDomainSpec `json:"failureDomains"`
-
-	// image controls RHCOS OVA resolution and import into destination vCenter.
-	// When set, the operator downloads and imports the OVA as a VM template
-	// for each failure domain and populates topology.template automatically.
-	// When omitted, topology.template must be set manually in each failure domain.
-	// +optional
-	Image *ImageSpec `json:"image,omitempty"`
-}
-
-// DiskProvisioningMode defines the disk provisioning type for imported VM templates.
-type DiskProvisioningMode string
-
-const (
-	// DiskProvisioningModeThin allocates storage on demand as blocks are written.
-	DiskProvisioningModeThin DiskProvisioningMode = "thin"
-	// DiskProvisioningModeThick pre-allocates all storage at creation time.
-	DiskProvisioningModeThick DiskProvisioningMode = "thick"
-	// DiskProvisioningModeEagerZeroedThick pre-allocates all storage and zeroes blocks at creation time.
-	DiskProvisioningModeEagerZeroedThick DiskProvisioningMode = "eagerZeroedThick"
-)
-
-// ImageSpec controls RHCOS OVA import behavior.
-type ImageSpec struct {
-	// ovaUrl is a direct URL to the RHCOS OVA file. The URL must use https:// and
-	// end in .ova (an optional query string is allowed for proxy tokens or
-	// integrity digests appended by stream metadata tooling). When set, the operator
-	// downloads from this URL instead of resolving via the coreos-bootimages
-	// ConfigMap delivered by CVO.
-	// Required for air-gapped environments: point to an internal HTTPS mirror.
-	// +optional
-	// +kubebuilder:validation:Pattern=`^https://.*\.ova(\?.*)?$`
-	OVAUrl string `json:"ovaUrl,omitempty"`
-
-	// diskProvisioning controls the VMDK disk provisioning type when importing
-	// the OVA (thin, thick, eagerZeroedThick). Matches the installer's behavior.
-	// When omitted, vSphere defaults to the provisioning type specified in the
-	// OVF descriptor.
-	// +optional
-	// +kubebuilder:validation:Enum=thin;thick;eagerZeroedThick
-	DiskProvisioning DiskProvisioningMode `json:"diskProvisioning,omitempty"`
 }
 
 // VmwareCloudFoundationMigrationStatus defines the observed state of VmwareCloudFoundationMigration.
@@ -173,7 +134,6 @@ type VmwareCloudFoundationMigrationStatus struct {
 	//   while False indicates an unsupported object name.
 	// - InfrastructurePrepared: preflight validation and migration path selection.
 	// - DestinationInitialized: destination vCenter folders and tags created.
-	// - DestinationImageImported: RHCOS OVA imported as a VM template on destination vCenter.
 	// - MultiSiteConfigured: cluster configured for both source and target vCenters.
 	// - WorkloadMigrated: workloads migrated to destination vCenter machine sets.
 	// - SourceCleaned: source vCenter references removed and cleaned up.
@@ -196,54 +156,6 @@ type VmwareCloudFoundationMigrationStatus struct {
 	// completionTime is when the migration completed.
 	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
-
-	// image reports the RHCOS OVA import state.
-	// +optional
-	Image *ImageStatus `json:"image,omitempty"`
-}
-
-// ImageURLSource describes how the resolved OVA URL was obtained.
-type ImageURLSource string
-
-const (
-	// ImageURLSourceUser indicates the OVA URL was user-specified in spec.image.ovaUrl.
-	ImageURLSourceUser ImageURLSource = "user"
-	// ImageURLSourceAuto indicates the OVA URL was auto-resolved from stream metadata.
-	ImageURLSourceAuto ImageURLSource = "auto"
-)
-
-// ImageStatus reports the RHCOS OVA import progress and results.
-type ImageStatus struct {
-	// resolvedOVAUrl is the URL from which the OVA was (or will be) downloaded.
-	// +optional
-	ResolvedOVAUrl string `json:"resolvedOVAUrl,omitempty"`
-
-	// resolvedSHA256 is the expected sha256 digest of the OVA file, when
-	// resolved from stream metadata. Empty for user-provided URLs.
-	// +optional
-	ResolvedSHA256 string `json:"resolvedSHA256,omitempty"`
-
-	// importedTemplates maps failure domain names to the inventory paths
-	// of imported VM templates.
-	// +optional
-	ImportedTemplates map[string]string `json:"importedTemplates,omitempty"`
-
-	// operatorImportedTemplates records the OVA URL each failure domain's
-	// template was imported from by the operator. It is populated only for
-	// operator imports; user-pre-configured templates are not recorded here.
-	// Used to detect a changed OVA URL and re-import only operator-managed
-	// templates without touching user-provided ones.
-	// +optional
-	OperatorImportedTemplates map[string]string `json:"operatorImportedTemplates,omitempty"`
-
-	// urlSource records how resolvedOVAUrl was populated: "" (unresolved / no opinion),
-	// "user" (user-specified), or "auto" (auto-resolved). The zero value ("")
-	// indicates no opinion or unresolved. Used to tell a deliberate user-clear
-	// of spec.image.ovaUrl apart from an empty auto-resolution when deciding
-	// whether to clear resolvedOVAUrl.
-	// +optional
-	// +kubebuilder:validation:Enum="";user;auto
-	URLSource ImageURLSource `json:"urlSource,omitempty"`
 }
 
 // Condition type constants for the migration workflow.
@@ -257,11 +169,6 @@ const (
 	// ConditionDestinationInitialized indicates the target vCenter has all required assets
 	// (VM folders, region/zone tags).
 	ConditionDestinationInitialized = "DestinationInitialized"
-
-	// ConditionDestinationImageImported indicates the RHCOS OVA has been
-	// downloaded and imported as a VM template on all target vCenters.
-	// When spec.image is nil, this condition is immediately set to True.
-	ConditionDestinationImageImported = "DestinationImageImported"
 
 	// ConditionMultiSiteConfigured indicates the cluster recognizes both vCenters
 	// (secrets, Infrastructure CRD, cloud-provider-config updated, pods restarted).

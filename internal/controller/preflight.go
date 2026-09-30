@@ -35,7 +35,6 @@ const (
 	managementStateUnmanaged = "Unmanaged"
 )
 const preflightVSphereTimeout = 2 * time.Minute
-const rhcosArchAMD64 = "x86_64"
 
 var (
 	machineHealthCheckGVR = schema.GroupVersionResource{Group: "machine.openshift.io", Version: "v1beta1", Resource: "machinehealthchecks"}
@@ -72,13 +71,11 @@ type credentials struct {
 }
 
 // fdTemplateMissing returns an error naming the first failure domain whose
-// topology.template is empty. Called from runPreflightChecks only when spec.image
-// is not set, because in that mode the operator does not import a template and
-// each failure domain must reference an existing one.
+// topology.template is empty.
 func fdTemplateMissing(fds []configv1.VSpherePlatformFailureDomainSpec) error {
 	for i := range fds {
 		if fds[i].Topology.Template == "" {
-			return fmt.Errorf("spec.failureDomains[%d].topology.template is required when spec.image is not set (failure domain %q)", i, fds[i].Name)
+			return fmt.Errorf("spec.failureDomains[%d].topology.template is required (failure domain %q)", i, fds[i].Name)
 		}
 	}
 	return nil
@@ -94,10 +91,8 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 	if err := validateUniqueFailureDomainNames(migration.Spec.FailureDomains); err != nil {
 		return "", err
 	}
-	if migration.Spec.Image == nil {
-		if err := fdTemplateMissing(migration.Spec.FailureDomains); err != nil {
-			return "", err
-		}
+	if err := fdTemplateMissing(migration.Spec.FailureDomains); err != nil {
+		return "", err
 	}
 
 	secretRef := migration.Spec.TargetVCenterCredentialsSecret
@@ -164,8 +159,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 
 // validatePreflightVSphere connects to the source and target vCenters and
 // verifies that the failure domain topology (datacenter, cluster, datastore,
-// networks, template) is reachable on each target. When spec.image is set,
-// it also performs a best-effort reachability check against the OVA URL.
+// networks, template) is reachable on each target.
 func (r *VmwareCloudFoundationMigrationReconciler) validatePreflightVSphere(ctx context.Context, vsphereCtx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) error {
 	log := klog.FromContext(ctx)
 	condType := migrationv1alpha1.ConditionInfrastructurePrepared
@@ -214,7 +208,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) validatePreflightVSphere(ctx 
 			targetCredentialsByServer[fd.Server] = creds
 		}
 
-		if err := validateFailureDomain(vsphereCtx, migration, fd, creds); err != nil {
+		if err := validateFailureDomain(vsphereCtx, fd, creds); err != nil {
 			return err
 		}
 		log.V(1).Info("target failure domain validated", "name", fd.Name, "server", fd.Server)
@@ -223,7 +217,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) validatePreflightVSphere(ctx 
 	return nil
 }
 
-func validateFailureDomain(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, fd *configv1.VSpherePlatformFailureDomainSpec, creds credentials) error {
+func validateFailureDomain(ctx context.Context, fd *configv1.VSpherePlatformFailureDomainSpec, creds credentials) error {
 	session, err := getVSphereSession(ctx, fd.Server, fd.Topology.Datacenter, creds.username, creds.password)
 	if err != nil {
 		return fmt.Errorf("connecting to target vCenter %s: %w", fd.Server, err)
@@ -255,122 +249,15 @@ func validateFailureDomain(ctx context.Context, migration *migrationv1alpha1.Vmw
 			return fmt.Errorf("target folder %q on %s not found: %w", fd.Topology.Folder, fd.Server, err)
 		}
 	}
-	// Template check: skip when spec.image is set and topology.template is
-	// empty — the template will be created by ensureDestinationImageImported. A
-	// missing template with spec.image unset is rejected earlier in
-	// runPreflightChecks.
-	if fd.Topology.Template != "" {
-		if _, err := session.Finder.VirtualMachine(ctx, fd.Topology.Template); err != nil {
-			return fmt.Errorf("target template %q on %s not found: %w", fd.Topology.Template, fd.Server, err)
-		}
+	// The required template must exist on the destination vCenter.
+	if _, err := session.Finder.VirtualMachine(ctx, fd.Topology.Template); err != nil {
+		return fmt.Errorf("target template %q on %s not found: %w", fd.Topology.Template, fd.Server, err)
 	}
 
 	if err := validateTargetPrivileges(ctx, session, datacenter, cluster); err != nil {
 		return fmt.Errorf("validating target privileges for failure domain %q: %w", fd.Name, err)
 	}
 
-	if migration.Spec.Image != nil && fd.Topology.Template == "" {
-		if err := validateImageImportPrivileges(ctx, session, datacenter, cluster, fd.Topology.ResourcePool, fd.Topology.Datastore, fd.Topology.Folder); err != nil {
-			return fmt.Errorf("validating image import privileges for failure domain %q: %w", fd.Name, err)
-		}
-	}
-
-	return nil
-}
-
-// imageImportPrivileges are the vCenter privileges required for OVA import.
-var imageImportPrivileges = []string{
-	"VApp.Import",
-	"VirtualMachine.Config.AddNewDisk",
-	"VirtualMachine.Inventory.CreateFromExisting",
-}
-
-// validateImageImportPrivileges checks that the authenticated user has the
-// privileges required for OVA import: the resource pool set on the effective
-// resource pool (the failure domain's pool when resourcePoolPath is non-empty,
-// otherwise the cluster's default pool), Datastore.AllocateSpace on the target
-// datastore (required by OvfManager.CreateImportSpec's datastore parameter),
-// and VirtualMachine.Provisioning.MarkAsTemplate on the VM folder the imported
-// template lands in (vmFolder, or the datacenter VM folder when empty). When
-// vmFolder is empty the effective target is /<datacenter>/vm/<infraID>, which
-// is created after preflight (ensureDestinationInitialized) and inherits its
-// privileges from the datacenter VM folder, so validating the parent here is
-// the equivalent check.
-func validateImageImportPrivileges(ctx context.Context, session *vsphere.Session, datacenter *object.Datacenter, cluster *object.ClusterComputeResource, resourcePoolPath, datastore, vmFolder string) error {
-	if session == nil || session.Client == nil || session.Client.Client == nil {
-		return fmt.Errorf("session client must not be nil")
-	}
-
-	userSession, err := session.Client.SessionManager.UserSession(ctx)
-	if err != nil {
-		return fmt.Errorf("getting current vSphere user session: %w", err)
-	}
-	if userSession == nil {
-		return fmt.Errorf("current vSphere user session not found")
-	}
-
-	authMgr := object.NewAuthorizationManager(session.Client.Client)
-
-	var rp *object.ResourcePool
-	if resourcePoolPath != "" {
-		rp, err = session.Finder.ResourcePool(ctx, resourcePoolPath)
-		if err != nil {
-			return fmt.Errorf("finding resource pool %q: %w", resourcePoolPath, err)
-		}
-	} else {
-		rp, err = cluster.ResourcePool(ctx)
-		if err != nil {
-			return fmt.Errorf("getting cluster resource pool: %w", err)
-		}
-	}
-
-	if err := checkPrivilegesOnEntity(ctx, authMgr, userSession.UserName, rp.Reference(), imageImportPrivileges, "resource pool"); err != nil {
-		return fmt.Errorf("missing required image import privileges: %w", err)
-	}
-
-	ds, err := session.Finder.Datastore(ctx, datastore)
-	if err != nil {
-		return fmt.Errorf("finding datastore %q: %w", datastore, err)
-	}
-	if err := checkPrivilegesOnEntity(ctx, authMgr, userSession.UserName, ds.Reference(),
-		[]string{"Datastore.AllocateSpace"}, fmt.Sprintf("datastore %q", datastore)); err != nil {
-		return err
-	}
-
-	var folder *object.Folder
-	if vmFolder != "" {
-		folder, err = session.Finder.Folder(ctx, vmFolder)
-		if err != nil {
-			return fmt.Errorf("finding folder %q: %w", vmFolder, err)
-		}
-	} else {
-		folder, err = dcVMFolder(ctx, datacenter)
-		if err != nil {
-			return err
-		}
-	}
-	if err := checkPrivilegesOnEntity(ctx, authMgr, userSession.UserName, folder.Reference(),
-		[]string{"VirtualMachine.Provisioning.MarkAsTemplate"}, fmt.Sprintf("VM folder %q", folder.InventoryPath)); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// checkPrivilegesOnEntity verifies the user has all the given privileges on a
-// single entity, returning an error naming the missing ones.
-func checkPrivilegesOnEntity(ctx context.Context, authMgr *object.AuthorizationManager, user string, ref types.ManagedObjectReference, privileges []string, label string) error {
-	results, err := authMgr.HasUserPrivilegeOnEntities(ctx, []types.ManagedObjectReference{ref}, user, privileges)
-	if err != nil {
-		return fmt.Errorf("checking privileges on %s: %w", label, err)
-	}
-	if len(results) == 0 {
-		return fmt.Errorf("no privilege check results returned for %s", label)
-	}
-	missing := missingPrivileges(results[0], privileges)
-	if len(missing) > 0 {
-		return fmt.Errorf("user %q is missing %s on %s", user, strings.Join(missing, ", "), label)
-	}
 	return nil
 }
 

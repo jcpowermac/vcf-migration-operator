@@ -102,7 +102,6 @@ var (
 	phaseOrder = []string{
 		migrationv1alpha1.ConditionInfrastructurePrepared,
 		migrationv1alpha1.ConditionDestinationInitialized,
-		migrationv1alpha1.ConditionDestinationImageImported,
 		migrationv1alpha1.ConditionMultiSiteConfigured,
 		migrationv1alpha1.ConditionWorkloadMigrated,
 		migrationv1alpha1.ConditionSourceCleaned,
@@ -110,7 +109,7 @@ var (
 
 	allPhases = []string{
 		"Pending", "InfrastructurePrepared", "DestinationInitialized",
-		"DestinationImageImported", "MultiSiteConfigured", "WorkloadMigrated",
+		"MultiSiteConfigured", "WorkloadMigrated",
 		"SourceCleaned", "Completed", "Failed", "Paused",
 	}
 

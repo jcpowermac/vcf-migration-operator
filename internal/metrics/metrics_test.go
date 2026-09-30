@@ -36,12 +36,11 @@ func TestPhaseFromConditions(t *testing.T) {
 			want: "DestinationInitialized",
 		},
 		{
-			name: "image import stage in progress",
+			name: "multi-site stage after destination initialized",
 			conditions: []metav1.Condition{
 				cond(migrationv1alpha1.ConditionDestinationInitialized, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted),
-				cond(migrationv1alpha1.ConditionDestinationImageImported, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing),
 			},
-			want: "DestinationImageImported",
+			want: "MultiSiteConfigured",
 		},
 		{
 			name: "active stage failed",
