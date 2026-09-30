@@ -3,7 +3,6 @@ module github.com/openshift/vcf-migration-operator
 go 1.26.7
 
 require (
-	github.com/coreos/stream-metadata-go v0.4.11
 	github.com/go-logr/stdr v1.2.2
 	github.com/onsi/ginkgo/v2 v2.32.2
 	github.com/onsi/gomega v1.43.0
