@@ -3,7 +3,7 @@
 The `VmwareCloudFoundationMigration` spec requires:
 
 - `targetVCenterCredentialsSecret` — references a secret with keys `<vcenter-fqdn>.username` and `<vcenter-fqdn>.password`.
-- `failureDomains` — one or more target failure domains (uses the OpenShift `configv1` `VSpherePlatformFailureDomainSpec` type). Each must specify an existing `topology.template` inventory path.
+- `failureDomains`: one or more target failure domains (uses the OpenShift `configv1` `VSpherePlatformFailureDomainSpec` type). Each must specify an existing `topology.template` inventory path. The planned Hot/Cold VMotion path retains this requirement for the temporary network probe, not to recreate cluster nodes; see its design-only example below.
 
 `state` is optional (defaults to `Pending`; set to `Running` to start the migration).
 See the full field reference in the [API reference](../dev/api.md).
@@ -83,11 +83,20 @@ Multiple failure domains can share the same `region` while using different `zone
 
 Tag reuse on previously-used hardware: if the target datacenter already has any tag in the `openshift-region` category (or the cluster in `openshift-zone`), the operator reuses it and skips tag creation. The spec values still drive the target-side OpenShift failure-domain config and node topology labels, so set them to match the existing tags (check with `govc tags.attached.ls -r /<datacenter>` and `... -r /<datacenter>/host/<cluster>`).
 
-## UPI Cluster Cross-vCenter VMotion Migration
+## Cross-vCenter VMotion Migration (not yet implemented)
 
-UPI clusters have no MachineSets or ControlPlaneMachineSet, so nodes must be
-moved via cross-vCenter vMotion. Set `type: VMotion` on each role and choose
-the relocation mode.
+> **Status: Design only.** The VMotion engine is not yet implemented in the
+> controller. Submitting this CR today will not invoke cross-vCenter Relocate.
+> See the [Hot and Cold relocation design](../plans/upi-cross-vcenter-vmotion-design.md)
+> for the narrow first delivery and the [broader node migration design](../plans/upi-node-migration-design.md)
+> for background and future proposals. The example below targets the first delivery.
+
+The proposed path requires verified evidence that every planned node VM is
+unmanaged by the Machine API. Absent/zero-replica MachineSets or no Running
+Machines do not establish that by themselves. Positive-replica sets with no
+Running Machines and incomplete/conflicting ownership evidence block dispatch.
+Once eligibility is verified, explicitly select `type: VMotion` on both roles
+as illustrated below. The current controller does not implement this path.
 
 ```yaml
 apiVersion: migration.openshift.io/v1alpha1
@@ -104,8 +113,8 @@ spec:
     workers:
       type: VMotion
       vmotion:
-        mode: Cold
-      maxUnavailable: 25%
+        mode: Hot
+      maxUnavailable: 1
     controlPlane:
       type: VMotion
       vmotion:
@@ -123,21 +132,23 @@ spec:
         networks:
           - "VM Network"
         resourcePool: /TargetDC/host/TargetCluster/Resources
+        template: /TargetDC/vm/rhcos-template # Existing network-probe template
         folder: /TargetDC/vm/my-cluster-infra-id
 ```
 
 - Both `workers` and `controlPlane` are required when `nodeMigration` is set.
-- `type` is per-role: `Recreate` (default) or `VMotion`.
-- `vmotion` is required when `type` is `VMotion` and forbidden when `type` is `Recreate`.
-- `vmotion.mode` controls relocation: `Auto` (try Hot, fall back to Cold), `Hot`, or `Cold`.
-- `maxUnavailable` controls the rolling window (count or percent). Defaults to `1` (sequential). Control plane is validated to 1.
-- `topology.template` is not needed when using VMotion — existing VMs are relocated, not rebuilt from a template.
+- For the proposed first delivery, both roles explicitly select `type: VMotion` with a `vmotion` block. API admission/default details are a prerequisite to implementation; the current branch does not expose these fields.
+- The first implementation accepts explicit `vmotion.mode: Hot` or `Cold`, with the same mode for both roles. This example selects Hot; change both modes to Cold for powered-off relocation. Auto and automatic mode fallback are unsupported. Cold explicitly authorizes the shutdown/relocation/power-on sequence; a Hot failure never authorizes power-off.
+- `maxUnavailable` is an integer node count, never a percentage. The first implementation accepts only `1` for both roles and processes one node at a time across the cluster.
+- Neither Hot nor Cold relocation rebuilds cluster-node VMs from a template. The first implementation retains the existing network-probe VM check, so `topology.template` must reference an existing target template for that temporary probe. Cluster nodes are relocated, not recreated.
 
 ## IPI Cluster (Recreate)
 
-IPI clusters have MachineSets and a ControlPlaneMachineSet. The default
-migration path (`nodeMigration` omitted or `type: Recreate`) creates new
-VMs on the target vCenter from MachineSets/CPMS and scales down the source.
+IPI clusters have MachineSets and a ControlPlaneMachineSet. The current
+migration path creates new VMs on the target vCenter from MachineSets/CPMS
+and scales down the source. The example below uses the current API and
+omits `nodeMigration`, which is not exposed by this branch's API. Explicit
+per-role `type: Recreate` selection is proposed design only.
 
 ```yaml
 apiVersion: migration.openshift.io/v1alpha1
@@ -150,11 +161,6 @@ spec:
   targetVCenterCredentialsSecret:
     name: target-vcenter-creds
     namespace: openshift-vcf-migration
-  nodeMigration:
-    workers:
-      type: Recreate
-    controlPlane:
-      type: Recreate
   failureDomains:
     - name: target-fd-1
       region: target-region
@@ -171,4 +177,4 @@ spec:
         folder: /TargetDC/vm/my-cluster-infra-id
 ```
 
-`topology.template` is required when using Recreate — new VMs are cloned from this template. Omitting `nodeMigration` entirely produces the same Recreate behavior.
+`topology.template` is required for the current MachineSet/CPMS replacement path because new VMs are cloned from this template. No `nodeMigration` field is needed to select this existing behavior.
