@@ -272,35 +272,10 @@ spec:
                 minItems: 1
                 type: array
                 x-kubernetes-list-type: atomic
-              image:
-                description: |-
-                  image controls RHCOS OVA resolution and import into destination vCenter.
-                  When set, the operator downloads and imports the OVA as a VM template
-                  for each failure domain and populates topology.template automatically.
-                  When omitted, topology.template must be set manually in each failure domain.
-                properties:
-                  diskProvisioning:
-                    description: |-
-                      diskProvisioning controls the VMDK disk provisioning type when importing
-                      the OVA (thin, thick, eagerZeroedThick). Matches the installer's behavior.
-                      When omitted, vSphere defaults to the provisioning type specified in the
-                      OVF descriptor.
-                    enum:
-                    - thin
-                    - thick
-                    - eagerZeroedThick
-                    type: string
-                  ovaUrl:
-                    description: |-
-                      ovaUrl is a direct URL to the RHCOS OVA file. The URL must use https:// and
-                      end in .ova (an optional query string is allowed for proxy tokens or
-                      integrity digests appended by stream metadata tooling). When set, the operator
-                      downloads from this URL instead of resolving via the coreos-bootimages
-                      ConfigMap delivered by CVO.
-                      Required for air-gapped environments: point to an internal HTTPS mirror.
-                    pattern: ^https://.*\.ova(\?.*)?$
-                    type: string
-                type: object
+                x-kubernetes-validations:
+                - message: topology.template is required for every failure domain
+                  rule: self.all(fd, has(fd.topology.template) && fd.topology.template
+                    != '')
               state:
                 default: Pending
                 description: |-
@@ -349,7 +324,6 @@ spec:
                     while False indicates an unsupported object name.
                   - InfrastructurePrepared: preflight validation and migration path selection.
                   - DestinationInitialized: destination vCenter folders and tags created.
-                  - DestinationImageImported: RHCOS OVA imported as a VM template on destination vCenter.
                   - MultiSiteConfigured: cluster configured for both source and target vCenters.
                   - WorkloadMigrated: workloads migrated to destination vCenter machine sets.
                   - SourceCleaned: source vCenter references removed and cleaned up.
@@ -414,48 +388,6 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
-              image:
-                description: image reports the RHCOS OVA import state.
-                properties:
-                  importedTemplates:
-                    additionalProperties:
-                      type: string
-                    description: |-
-                      importedTemplates maps failure domain names to the inventory paths
-                      of imported VM templates.
-                    type: object
-                  operatorImportedTemplates:
-                    additionalProperties:
-                      type: string
-                    description: |-
-                      operatorImportedTemplates records the OVA URL each failure domain's
-                      template was imported from by the operator. It is populated only for
-                      operator imports; user-pre-configured templates are not recorded here.
-                      Used to detect a changed OVA URL and re-import only operator-managed
-                      templates without touching user-provided ones.
-                    type: object
-                  resolvedOVAUrl:
-                    description: resolvedOVAUrl is the URL from which the OVA was
-                      (or will be) downloaded.
-                    type: string
-                  resolvedSHA256:
-                    description: |-
-                      resolvedSHA256 is the expected sha256 digest of the OVA file, when
-                      resolved from stream metadata. Empty for user-provided URLs.
-                    type: string
-                  urlSource:
-                    description: |-
-                      urlSource records how resolvedOVAUrl was populated: "" (unresolved / no opinion),
-                      "user" (user-specified), or "auto" (auto-resolved). The zero value ("")
-                      indicates no opinion or unresolved. Used to tell a deliberate user-clear
-                      of spec.image.ovaUrl apart from an empty auto-resolution when deciding
-                      whether to clear resolvedOVAUrl.
-                    enum:
-                    - ""
-                    - user
-                    - auto
-                    type: string
-                type: object
               lastUpdateTime:
                 description: lastUpdateTime is when the migration status was last
                   updated.

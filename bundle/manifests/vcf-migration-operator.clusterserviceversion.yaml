@@ -287,19 +287,12 @@ spec:
                   capabilities:
                     drop:
                     - ALL
-                volumeMounts:
-                - mountPath: /tmp/ova-scratch
-                  name: scratch
               securityContext:
                 runAsNonRoot: true
                 seccompProfile:
                   type: RuntimeDefault
               serviceAccountName: vcf-migration-operator-controller-manager
               terminationGracePeriodSeconds: 10
-              volumes:
-              - emptyDir:
-                  sizeLimit: 2Gi
-                name: scratch
       permissions:
       - rules:
         - apiGroups:

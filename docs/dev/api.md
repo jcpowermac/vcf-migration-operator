@@ -13,7 +13,6 @@
 | `state` | `MigrationState` | No | `Pending` | `Pending`, `Running`, or `Paused`. Reconciler only acts when `Running`. |
 | `targetVCenterCredentialsSecret` | `SecretReference` | Yes | | Secret with target vCenter credentials. |
 | `failureDomains` | `[]VSpherePlatformFailureDomainSpec` | Yes (min 1) | | Target failure domains. Uses the OpenShift `configv1` type. |
-| `image` | `ImageSpec` | No | | RHCOS OVA resolution and import controls. |
 
 ### MigrationState Enum
 
@@ -32,15 +31,6 @@
 
 The secret must contain keys in the format `<vcenter-fqdn>.username` and `<vcenter-fqdn>.password`.
 
-### ImageSpec
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `ovaUrl` | `string` | No | Direct `https://` URL to the RHCOS OVA (must end in `.ova`; optional query string allowed). Overrides auto-resolution from the `coreos-bootimages` ConfigMap. Required for air-gapped environments. |
-| `diskProvisioning` | `DiskProvisioningMode` | No | VMDK provisioning type for imported templates: `thin`, `thick`, or `eagerZeroedThick`. Defaults to the OVF descriptor's type. |
-
-When `image` is set, the operator imports the OVA during the `DestinationImageImported` phase and populates `topology.template` for each failure domain. When omitted, `topology.template` must be set manually.
-
 ### VSpherePlatformFailureDomainSpec (from openshift/api configv1)
 
 | Field | Type | Required | Description |
@@ -55,7 +45,7 @@ When `image` is set, the operator imports the OVA during the `DestinationImageIm
 | `topology.networks` | `[]string` | Yes (min 1) | Port group network names |
 | `topology.resourcePool` | `string` | No | Path: `/<dc>/host/<cluster>/Resources/<pool>` |
 | `topology.folder` | `string` | No | Path: `/<dc>/vm/<folder>` |
-| `topology.template` | `string` | Conditional | Template path. **Required when `spec.image` is unset** (rejected otherwise); when `spec.image` is set, the operator imports the OVA and populates it per failure domain |
+| `topology.template` | `string` | Yes | Existing VM/template inventory path on the target vCenter; required for every failure domain at admission and verified during preflight |
 
 ## Status
 
@@ -64,19 +54,6 @@ When `image` is set, the operator imports the OVA during the `DestinationImageIm
 | `conditions` | `[]metav1.Condition` | Ordered migration phase conditions |
 | `startTime` | `*metav1.Time` | When migration entered `Running` |
 | `completionTime` | `*metav1.Time` | When migration reached `Ready` |
-| `image` | `ImageStatus` | RHCOS OVA import state |
-
-### ImageStatus
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `resolvedOVAUrl` | `string` | URL the OVA was (or will be) downloaded from |
-| `resolvedSHA256` | `string` | Expected sha256 digest (empty for user-provided URLs) |
-| `importedTemplates` | `map[string]string` | Failure domain name → imported VM template inventory path |
-| `operatorImportedTemplates` | `map[string]string` | Failure domain name → OVA URL used by the operator for its imports |
-| `urlSource` | `ImageURLSource` | How `resolvedOVAUrl` was populated: `user`, `auto`, or empty (unresolved) |
-
-If the OVA URL changes after import, the operator deletes and re-imports only the templates it imported itself (`operatorImportedTemplates`); user-pre-configured templates are never touched.
 
 ### Condition Types (in order)
 
@@ -85,7 +62,6 @@ If the OVA URL changes after import, the operator deletes and re-imports only th
 | `Accepted` | Admission gate: `True` for the singleton instance (`cluster`), `False` for unsupported object names |
 | `InfrastructurePrepared` | Preflight checks passed, migration path validated |
 | `DestinationInitialized` | Target vCenter folders and topology tags created |
-| `DestinationImageImported` | RHCOS OVA imported as a VM template on the destination vCenter (immediately `True` when `spec.image` is nil) |
 | `MultiSiteConfigured` | Cluster recognizes both vCenters |
 | `WorkloadMigrated` | Workers created on target, control plane rolled out, source scaled to 0 |
 | `SourceCleaned` | Source vCenter fully detached |
