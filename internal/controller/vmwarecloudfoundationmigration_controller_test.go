@@ -41,7 +41,10 @@ import (
 func TestConditionOrderSkipsImageImport(t *testing.T) {
 	for i, condition := range conditionOrder {
 		if condition == migrationv1alpha1.ConditionDestinationInitialized {
-			if i+1 >= len(conditionOrder) || conditionOrder[i+1] != migrationv1alpha1.ConditionMultiSiteConfigured {
+			if i+1 >= len(conditionOrder) {
+				t.Fatal("DestinationInitialized has no successor in condition order")
+			}
+			if conditionOrder[i+1] != migrationv1alpha1.ConditionMultiSiteConfigured {
 				t.Fatalf("condition after DestinationInitialized = %q, want MultiSiteConfigured", conditionOrder[i+1])
 			}
 			return
