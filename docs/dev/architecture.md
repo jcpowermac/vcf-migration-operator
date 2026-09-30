@@ -35,9 +35,6 @@ InfrastructurePrepared? ──no──→ runPreflightChecks()
   │ yes
 DestinationInitialized? ─no──→ create folders, ensure tags, attach to objects
   │ yes
-DestinationImageImported? ─no→ resolve OVA URL (auto or spec.image.ovaUrl),
-  │                             download, import VM template per failure domain
-  │ yes (immediately True when spec.image is nil)
 MultiSiteConfigured? ────no──→ update vsphere-creds, Infrastructure CR,
   │                             cloud-provider-config; restart pods; poll readiness
   │ yes
@@ -103,6 +100,5 @@ Each `Session` holds a govmomi SOAP client, an inventory `Finder` scoped to a da
 | openshift/client-go | v0.0.0-20260512113608-deb4dc54551a | OpenShift API clients |
 | govmomi | v0.52.0 | vSphere SOAP/REST client |
 | cloud-provider-vsphere | v1.35.0 | Cloud provider config types |
-| stream-metadata-go | v0.4.11 | RHCOS OVA stream metadata resolution (auto image import) |
 | k8s.io/api | v0.36.0-alpha.0 | Kubernetes API types |
 | ginkgo/v2 | v2.27.2 | Test framework |
