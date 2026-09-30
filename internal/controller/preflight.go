@@ -81,6 +81,19 @@ func fdTemplateMissing(fds []configv1.VSpherePlatformFailureDomainSpec) error {
 	return nil
 }
 
+// checkUserManagedLoadBalancer rejects clusters using an external load balancer.
+func (r *VmwareCloudFoundationMigrationReconciler) checkUserManagedLoadBalancer(ctx context.Context) error {
+	infra, err := openshift.NewInfrastructureManager(r.ConfigClient).Get(ctx)
+	if err != nil {
+		return fmt.Errorf("getting infrastructure: %w", err)
+	}
+	if platform := infra.Status.PlatformStatus; platform != nil && platform.VSphere != nil &&
+		platform.VSphere.LoadBalancer != nil && platform.VSphere.LoadBalancer.Type == configv1.LoadBalancerTypeUserManaged {
+		return fmt.Errorf("migration is not supported with a UserManaged load balancer")
+	}
+	return nil
+}
+
 func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) (string, error) {
 	log := klog.FromContext(ctx)
 	condType := migrationv1alpha1.ConditionInfrastructurePrepared
@@ -92,6 +105,10 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 		return "", err
 	}
 	if err := fdTemplateMissing(migration.Spec.FailureDomains); err != nil {
+		return "", err
+	}
+
+	if err := r.checkUserManagedLoadBalancer(ctx); err != nil {
 		return "", err
 	}
 

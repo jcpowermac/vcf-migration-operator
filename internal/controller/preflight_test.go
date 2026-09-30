@@ -478,6 +478,7 @@ func TestRunPreflightChecks(t *testing.T) {
 		dynamicObjects            []runtime.Object
 		omitDefaultStorageOps     bool
 		extraConfigObjects        []runtime.Object
+		mutateInfrastructure      func(*configv1.Infrastructure)
 		mutateMigration           func(*migrationv1alpha1.VmwareCloudFoundationMigration)
 		wantMessageContains       string
 		wantErrContains           string
@@ -545,6 +546,18 @@ func TestRunPreflightChecks(t *testing.T) {
 			},
 			wantErrContains:           "MachineHealthCheck resources: openshift-machine-api/worker-mhc",
 			wantTargetSecretReadCount: 1,
+		},
+		{
+			name:        "user-managed load balancer blocks before target validation",
+			version:     "5.0.0",
+			gateEnabled: true,
+			mutateInfrastructure: func(infra *configv1.Infrastructure) {
+				infra.Status.PlatformStatus = &configv1.PlatformStatus{VSphere: &configv1.VSpherePlatformStatus{
+					LoadBalancer: &configv1.VSpherePlatformLoadBalancer{Type: configv1.LoadBalancerTypeUserManaged},
+				}}
+			},
+			wantErrContains:           "UserManaged",
+			wantTargetSecretReadCount: 0,
 		},
 		{
 			name:                      "cluster upgrade in progress blocks migration",
@@ -654,8 +667,12 @@ func TestRunPreflightChecks(t *testing.T) {
 			if tt.gateVersion != "" {
 				gateVersion = tt.gateVersion
 			}
+			infra := newInfrastructureForPreflight(server.URL.Host, inventory.datacenterName)
+			if tt.mutateInfrastructure != nil {
+				tt.mutateInfrastructure(infra)
+			}
 			configObjects := []runtime.Object{
-				newInfrastructureForPreflight(server.URL.Host, inventory.datacenterName),
+				infra,
 				newClusterVersionForPreflight(tt.version, tt.progressing),
 				newFeatureGateForPreflight(gateVersion, tt.gateEnabled),
 			}
