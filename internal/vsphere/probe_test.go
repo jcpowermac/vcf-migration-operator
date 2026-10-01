@@ -192,6 +192,60 @@ func (e *probeTestEnv) baseSpec(name string) ProbeSpec {
 	}
 }
 
+func TestSingleNICDeviceChangePreservesVMXNET3Subtype(t *testing.T) {
+	e := newProbeTestEnv(t)
+	template, err := e.session.Finder.VirtualMachine(e.ctx, e.template)
+	if err != nil {
+		t.Fatalf("finding template VM: %v", err)
+	}
+	simVM, ok := e.model.Service.Context.Map.Get(template.Reference()).(*simulator.VirtualMachine)
+	if !ok {
+		t.Fatalf("finding simulator VM: got %T", e.model.Service.Context.Map.Get(template.Reference()))
+	}
+	for i, device := range simVM.Config.Hardware.Device {
+		if nic, ok := device.(types.BaseVirtualEthernetCard); ok {
+			simVM.Config.Hardware.Device[i] = &types.VirtualVmxnet3{
+				VirtualVmxnet: types.VirtualVmxnet{
+					VirtualEthernetCard: *nic.GetVirtualEthernetCard(),
+				},
+			}
+			break
+		}
+	}
+	devices, err := template.Device(e.ctx)
+	if err != nil {
+		t.Fatalf("reading template devices: %v", err)
+	}
+	var original types.BaseVirtualDevice
+	for _, device := range devices {
+		if _, ok := device.(types.BaseVirtualEthernetCard); ok {
+			original = device
+			break
+		}
+	}
+	if _, ok := original.(*types.VirtualVmxnet3); !ok {
+		t.Fatalf("template adapter type = %T, want *types.VirtualVmxnet3", original)
+	}
+	network, err := e.session.Finder.Network(e.ctx, e.network)
+	if err != nil {
+		t.Fatalf("finding network: %v", err)
+	}
+	changes, err := singleNICDeviceChange(e.ctx, template, network)
+	if err != nil {
+		t.Fatalf("singleNICDeviceChange: %v", err)
+	}
+	if len(changes) != 1 {
+		t.Fatalf("singleNICDeviceChange returned %d changes, want 1", len(changes))
+	}
+	change, ok := changes[0].(*types.VirtualDeviceConfigSpec)
+	if !ok {
+		t.Fatalf("device change type = %T, want *types.VirtualDeviceConfigSpec", changes[0])
+	}
+	if got, want := fmt.Sprintf("%T", change.Device), fmt.Sprintf("%T", original); got != want {
+		t.Errorf("edited adapter type = %s, want original subtype %s", got, want)
+	}
+}
+
 func TestCreateProbeVM(t *testing.T) {
 	e := newProbeTestEnv(t)
 

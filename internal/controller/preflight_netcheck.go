@@ -103,11 +103,6 @@ func (r *VmwareCloudFoundationMigrationReconciler) checkNetworkingViaProbeVMs(ct
 		return fmt.Errorf("no source node networks could be read from the source vCenter %s; open-vm-tools must be running on source nodes and node names must match VM names", sourceVC.Server)
 	}
 
-	// cleanupCtx is independent of the phase context so probe cleanup can still
-	// run after the phase deadline has expired (e.g. a guest-network timeout).
-	cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancelCleanup()
-
 	probePrefix := probeNamePrefix + infraID + "-"
 	targetCreds := make(map[string]credentials)
 	var mismatches []string
@@ -151,10 +146,17 @@ func (r *VmwareCloudFoundationMigrationReconciler) checkNetworkingViaProbeVMs(ct
 		if err != nil {
 			return fmt.Errorf("creating probe VM %s on failure domain %q: %w", spec.Name, fd.Name, err)
 		}
+		destroyProbe := func() error {
+			// Each attempt gets its own deadline, independent of both the probe
+			// phase and prior cleanup attempts.
+			cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancelCleanup()
+			return vsphere.DestroyProbeVM(cleanupCtx, vm)
+		}
 		probeDestroyed := false
 		defer func() {
 			if !probeDestroyed {
-				if derr := vsphere.DestroyProbeVM(cleanupCtx, vm); derr != nil {
+				if derr := destroyProbe(); derr != nil {
 					log.Error(derr, "destroying probe VM", "name", spec.Name)
 				}
 			}
@@ -174,7 +176,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) checkNetworkingViaProbeVMs(ct
 			mismatches = append(mismatches, describeFDMismatch(fd.Name, bad, sources))
 		}
 
-		if err := vsphere.DestroyProbeVM(cleanupCtx, vm); err != nil {
+		if err := destroyProbe(); err != nil {
 			return fmt.Errorf("destroying probe VM %s: %w", spec.Name, err)
 		}
 		probeDestroyed = true

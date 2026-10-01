@@ -205,7 +205,7 @@ func singleNICDeviceChange(ctx context.Context, template *object.VirtualMachine,
 		ref := network.Reference()
 		std.Network = &ref
 	}
-	var changes []types.BaseVirtualDeviceConfigSpec
+	changes := make([]types.BaseVirtualDeviceConfigSpec, 0, len(devices)+1)
 	found := false
 	for _, base := range devices {
 		nic, ok := base.(types.BaseVirtualEthernetCard)
@@ -214,16 +214,13 @@ func singleNICDeviceChange(ctx context.Context, template *object.VirtualMachine,
 		}
 		card := nic.GetVirtualEthernetCard()
 		if !found {
-			// A partial edit is applied by the server against the existing
-			// device of the same key, preserving the concrete adapter type.
+			// Device was fetched into a local list, so changing its backing does
+			// not mutate the template. Reuse the concrete adapter to preserve its
+			// subtype-specific configuration in the clone spec.
+			card.Backing = backing
 			changes = append(changes, &types.VirtualDeviceConfigSpec{
 				Operation: types.VirtualDeviceConfigSpecOperationEdit,
-				Device: &types.VirtualEthernetCard{
-					VirtualDevice: types.VirtualDevice{
-						Key:     card.Key,
-						Backing: backing,
-					},
-				},
+				Device:    base,
 			})
 			found = true
 			continue
