@@ -142,11 +142,31 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 	vsphereCtx, cancel := context.WithTimeout(ctx, preflightVSphereTimeout)
 	defer cancel()
 	defer func() {
+		// The probe-VM phase can outlive vsphereCtx; log out on a fresh bounded
+		// context so session handles are released even on long runs.
+		logoutCtx, logoutCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer logoutCancel()
 		log.V(2).Info("clearing cached vSphere sessions after preflight")
-		vsphere.ClearSessions(vsphereCtx)
+		vsphere.ClearSessions(logoutCtx)
 	}()
 
 	if err := r.validatePreflightVSphere(ctx, vsphereCtx, migration); err != nil {
+		return "", err
+	}
+
+	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient)
+	sourceVC, err := infraMgr.GetSourceVCenter(ctx)
+	if err != nil {
+		return "", fmt.Errorf("getting source vCenter: %w", err)
+	}
+	netcheckCtx, cancel := context.WithTimeout(ctx, preflightNetcheckTimeout)
+	defer cancel()
+
+	checkNet := r.checkNetworkingViaProbeVMsFunc
+	if checkNet == nil {
+		checkNet = r.checkNetworkingViaProbeVMs
+	}
+	if err := checkNet(netcheckCtx, migration, sourceVC); err != nil {
 		return "", err
 	}
 
