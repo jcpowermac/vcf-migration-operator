@@ -146,6 +146,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) checkNetworkingViaProbeVMs(ct
 		if err != nil {
 			return fmt.Errorf("creating probe VM %s on failure domain %q: %w", spec.Name, fd.Name, err)
 		}
+		log.V(1).Info("created probe VM", "name", spec.Name, "server", fd.Server, "template", spec.Template, "network", spec.Network)
 		destroyProbe := func() error {
 			// Each attempt gets its own deadline, independent of both the probe
 			// phase and prior cleanup attempts.
@@ -158,6 +159,8 @@ func (r *VmwareCloudFoundationMigrationReconciler) checkNetworkingViaProbeVMs(ct
 			if !probeDestroyed {
 				if derr := destroyProbe(); derr != nil {
 					log.Error(derr, "destroying probe VM", "name", spec.Name)
+				} else {
+					log.V(1).Info("destroyed probe VM", "name", spec.Name, "server", fd.Server)
 				}
 			}
 		}()
@@ -166,6 +169,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) checkNetworkingViaProbeVMs(ct
 		if err != nil {
 			return fmt.Errorf("waiting for guest networks on probe VM %s: %w", spec.Name, err)
 		}
+		log.V(1).Info("probe VM guest networks", "name", spec.Name, "networks", formatNetworks(probeNetworks))
 		var bad []vsphere.NetworkInfo
 		for _, n := range probeNetworks {
 			if matched, _ := n.MatchesAny(sources); !matched {
@@ -180,6 +184,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) checkNetworkingViaProbeVMs(ct
 			return fmt.Errorf("destroying probe VM %s: %w", spec.Name, err)
 		}
 		probeDestroyed = true
+		log.V(1).Info("destroyed probe VM", "name", spec.Name, "server", fd.Server)
 		log.V(1).Info("networking check complete for failure domain", "name", fd.Name, "probeNetworks", len(probeNetworks), "mismatches", len(bad))
 	}
 
