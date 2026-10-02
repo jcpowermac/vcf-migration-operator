@@ -81,6 +81,19 @@ func fdTemplateMissing(fds []configv1.VSpherePlatformFailureDomainSpec) error {
 	return nil
 }
 
+func validateFailureDomainTypes(fds []configv1.VSpherePlatformFailureDomainSpec) error {
+	for i := range fds {
+		fd := &fds[i]
+		if fd.RegionAffinity != nil && fd.RegionAffinity.Type == configv1.ComputeClusterFailureDomainRegion {
+			return fmt.Errorf("failure domain %q uses unsupported region type %q", fd.Name, fd.RegionAffinity.Type)
+		}
+		if fd.ZoneAffinity != nil && fd.ZoneAffinity.Type == configv1.HostGroupFailureDomainZone {
+			return fmt.Errorf("failure domain %q uses unsupported zone type %q", fd.Name, fd.ZoneAffinity.Type)
+		}
+	}
+	return nil
+}
+
 func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) (string, error) {
 	log := klog.FromContext(ctx)
 	condType := migrationv1alpha1.ConditionInfrastructurePrepared
@@ -94,6 +107,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 	if err := fdTemplateMissing(migration.Spec.FailureDomains); err != nil {
 		return "", err
 	}
+	if err := validateFailureDomainTypes(migration.Spec.FailureDomains); err != nil {
+		return "", err
+	}
 
 	secretRef := migration.Spec.TargetVCenterCredentialsSecret
 	if secretRef.Name == "" {
@@ -105,6 +121,16 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 	}
 	if _, err := r.KubeClient.CoreV1().Secrets(ns).Get(ctx, secretRef.Name, metav1.GetOptions{}); err != nil {
 		return "", fmt.Errorf("target credentials secret %s/%s not found: %w", ns, secretRef.Name, err)
+	}
+
+	infra, err := openshift.NewInfrastructureManager(r.ConfigClient).Get(ctx)
+	if err != nil {
+		return "", fmt.Errorf("getting infrastructure for failure domain validation: %w", err)
+	}
+	if infra.Spec.PlatformSpec.VSphere != nil {
+		if err := validateFailureDomainTypes(infra.Spec.PlatformSpec.VSphere.FailureDomains); err != nil {
+			return "", fmt.Errorf("validating source failure domains: %w", err)
+		}
 	}
 
 	support, err := openshift.GetVSphereMultiVCenterSupport(ctx, r.ConfigClient)
