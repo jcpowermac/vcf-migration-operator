@@ -478,6 +478,7 @@ func TestRunPreflightChecks(t *testing.T) {
 		dynamicObjects            []runtime.Object
 		omitDefaultStorageOps     bool
 		extraConfigObjects        []runtime.Object
+		mutateInfrastructure      func(*configv1.Infrastructure)
 		mutateMigration           func(*migrationv1alpha1.VmwareCloudFoundationMigration)
 		wantMessageContains       string
 		wantErrContains           string
@@ -490,6 +491,52 @@ func TestRunPreflightChecks(t *testing.T) {
 			gateEnabled:               true,
 			wantMessageContains:       "Preflight validation passed",
 			wantTargetSecretReadCount: 2,
+		},
+		{
+			name:        "rejects source ComputeCluster region affinity",
+			version:     "5.0.0",
+			gateEnabled: true,
+			mutateInfrastructure: func(infra *configv1.Infrastructure) {
+				infra.Spec.PlatformSpec.VSphere.FailureDomains = []configv1.VSpherePlatformFailureDomainSpec{{
+					Name:           "source-fd",
+					RegionAffinity: &configv1.VSphereFailureDomainRegionAffinity{Type: configv1.ComputeClusterFailureDomainRegion},
+				}}
+			},
+			wantErrContains:           `failure domain "source-fd" uses unsupported region type "ComputeCluster"`,
+			wantTargetSecretReadCount: 1,
+		},
+		{
+			name:        "rejects source HostGroup zone affinity",
+			version:     "5.0.0",
+			gateEnabled: true,
+			mutateInfrastructure: func(infra *configv1.Infrastructure) {
+				infra.Spec.PlatformSpec.VSphere.FailureDomains = []configv1.VSpherePlatformFailureDomainSpec{{
+					Name:         "source-fd",
+					ZoneAffinity: &configv1.VSphereFailureDomainZoneAffinity{Type: configv1.HostGroupFailureDomainZone},
+				}}
+			},
+			wantErrContains:           `failure domain "source-fd" uses unsupported zone type "HostGroup"`,
+			wantTargetSecretReadCount: 1,
+		},
+		{
+			name:        "rejects target ComputeCluster region affinity",
+			version:     "5.0.0",
+			gateEnabled: true,
+			mutateMigration: func(migration *migrationv1alpha1.VmwareCloudFoundationMigration) {
+				migration.Spec.FailureDomains[0].RegionAffinity = &configv1.VSphereFailureDomainRegionAffinity{Type: configv1.ComputeClusterFailureDomainRegion}
+			},
+			wantErrContains:           `failure domain "fd-a" uses unsupported region type "ComputeCluster"`,
+			wantTargetSecretReadCount: 0,
+		},
+		{
+			name:        "rejects target HostGroup zone affinity",
+			version:     "5.0.0",
+			gateEnabled: true,
+			mutateMigration: func(migration *migrationv1alpha1.VmwareCloudFoundationMigration) {
+				migration.Spec.FailureDomains[0].ZoneAffinity = &configv1.VSphereFailureDomainZoneAffinity{Type: configv1.HostGroupFailureDomainZone}
+			},
+			wantErrContains:           `failure domain "fd-a" uses unsupported zone type "HostGroup"`,
+			wantTargetSecretReadCount: 0,
 		},
 		{
 			name:                      "blocks when gate disabled",
@@ -654,8 +701,12 @@ func TestRunPreflightChecks(t *testing.T) {
 			if tt.gateVersion != "" {
 				gateVersion = tt.gateVersion
 			}
+			infra := newInfrastructureForPreflight(server.URL.Host, inventory.datacenterName)
+			if tt.mutateInfrastructure != nil {
+				tt.mutateInfrastructure(infra)
+			}
 			configObjects := []runtime.Object{
-				newInfrastructureForPreflight(server.URL.Host, inventory.datacenterName),
+				infra,
 				newClusterVersionForPreflight(tt.version, tt.progressing),
 				newFeatureGateForPreflight(gateVersion, tt.gateEnabled),
 			}
