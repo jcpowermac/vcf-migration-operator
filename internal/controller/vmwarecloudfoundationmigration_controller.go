@@ -155,6 +155,7 @@ const (
 // +kubebuilder:rbac:groups=autoscaling.openshift.io,resources=clusterautoscalers;machineautoscalers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=operator.openshift.io,resources=clustercsidrivers;storages,verbs=get
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=create;delete;update;patch
 
 // serverDC identifies a vCenter server and datacenter pair, the unit at which
 // VM folders are created on the target.
