@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vSphere IPI migration QA/QE test plan</title>
+<style>
+  :root { color-scheme: light; }
+  body { font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+         max-width: 46rem; margin: 2.5rem auto; padding: 0 1.25rem;
+         line-height: 1.55; font-size: 15px; color: #1a1a1a; }
+  h1, h2, h3 { line-height: 1.25; }
+  h1 { font-size: 1.6rem; border-bottom: 2px solid #1a1a1a; padding-bottom: .3rem; }
+  h2 { font-size: 1.25rem; margin-top: 2rem; }
+  code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .88em;
+         background: #f2f2f2; padding: .1em .35em; border-radius: 3px; }
+  pre { background: #f6f6f6; border: 1px solid #e2e2e2; border-radius: 6px;
+        padding: .75rem 1rem; overflow-x: auto; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .92em; }
+  th, td { border: 1px solid #c9c9c9; padding: .45rem .6rem; text-align: left; vertical-align: top; }
+  th { background: #f0f0f0; }
+  tr { break-inside: avoid; }
+  blockquote { border-left: 3px solid #c9c9c9; margin-left: 0; padding-left: 1rem; color: #444; }
+  hr { border: none; border-top: 1px solid #d0d0d0; margin: 2rem 0; }
+  a { color: #0b5cad; text-decoration: none; }
+  @media print {
+    body { max-width: none; margin: 0; font-size: 11.5pt; }
+    a { color: inherit; }
+    a[href^="http"]::after { content: " (" attr(href) ")"; font-size: .8em; color: #555; word-break: break-all; }
+    pre { white-space: pre-wrap; }
+    h2 { break-after: avoid; }
+    table { break-inside: auto; }
+  }
+</style>
+</head>
+<body>
+<h1>vSphere IPI migration QA/QE test plan</h1>
+<p><strong>Scope:</strong> Test <code>vcf-migration-operator</code> against OpenShift clusters installed on vSphere with the installer-provisioned infrastructure (IPI) workflow. The installer research defines realistic cluster shapes and fixtures; this is not a test plan for <code>../installer</code>.</p>
+<p><strong>Research snapshot:</strong> 2026-10-01. Local installer checkout: <code>../installer</code> at <code>6d44cca7d8</code> (2026-09-28). OpenShift installation references below are 4.22 documentation. Re-check release-specific support and feature-gate availability before selecting a CI image.</p>
+<h2>1. What the installer can create</h2>
+<p>The vSphere IPI install configuration describes placement through failure domains. A failure domain includes a vCenter <code>server</code>, region and zone, and topology such as datacenter, compute cluster, datastore, network(s), and optional resource pool/folder/template. The checked-out installer schema also models <code>regionType</code>/<code>zoneType</code>; the supported pairings include datacenter → compute-cluster and compute-cluster → host-group. <code>VCenters</code> has a schema maximum of three. A schema field alone does not establish that every combination is a supported release configuration, so CI must use the support and feature-gate rules for its OCP release.</p>
+<p>The installer code creates MachineSets for a machine pool&#39;s selected zones; when no zones are specified it uses the configured failure domains. The installer-provisioned topologies relevant to migration QE are:</p>
+<table>
+<thead>
+<tr>
+<th>Install shape</th>
+<th>IPI characteristics</th>
+<th>Migration value</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Standard HA, one zone</strong></td>
+<td>Conventional baseline: three control-plane nodes plus worker nodes, all in one failure domain. One vCenter/datacenter/compute cluster.</td>
+<td>Lowest-cost live migration smoke test; validates the end-to-end path without placement complexity.</td>
+</tr>
+<tr>
+<td><strong>Three-node compact</strong></td>
+<td>Three control-plane nodes, zero worker replicas; control-plane nodes are schedulable. Documented vSphere installation shape.</td>
+<td>High-value test: exercises a real control-plane-only cluster, where an accidental worker/CPMS assumption can strand the migration.</td>
+</tr>
+<tr>
+<td><strong>Multiple failure domains / zones</strong></td>
+<td>Machine pools can target more than one zone. Failure domains may span compute clusters and datacenters; the vSphere guide documents multi-region/zone configuration.</td>
+<td>Validates source MachineSets in more than one placement domain and destination mapping/tagging.</td>
+</tr>
+<tr>
+<td><strong>Host-group zones</strong></td>
+<td>Installer schema has <code>regionType: ComputeCluster</code>, <code>zoneType: HostGroup</code>, and <code>topology.hostGroup</code>. Verify release support/feature gate before provisioning.</td>
+<td>Candidate only: the operator currently has no host-group-specific validation or tag attachment path (see §2). Do not count as supported migration coverage yet.</td>
+</tr>
+<tr>
+<td><strong>Multiple vCenters at install time</strong></td>
+<td>Installer schema permits up to three vCenter entries and failure domains carry a server. Whether a particular cross-vCenter initial install is supported is release/feature-gate dependent.</td>
+<td>Separate from this operator&#39;s main source shape. Resolve the product support boundary before adding it to the positive source matrix.</td>
+</tr>
+</tbody></table>
+<p>The IPI network and storage configuration can add further dimensions (DHCP/static addressing, one or more networks, load-balancer/DNS setup, CSI). Do not multiply the topology matrix by all of them. Use the ordinary supported IPI network configuration for the baseline; add a focused static/multi-network case only if this operator promises it. The operator currently blocks migration when vSphere CSI-backed PVs exist, and preflight hard-requires <code>ClusterCSIDriver/csi.vsphere.vmware.com</code> managementState to be <code>Removed</code> (while <code>Storage/cluster</code> managementState is advisory only, warning at most), so a successful baseline must not quietly depend on a vSphere CSI volume.</p>
+<h2>2. Compatibility boundary in this repository</h2>
+<p>These are findings from the current code, not assumptions to bake into an idealized test fixture:</p>
+<table>
+<thead>
+<tr>
+<th>Source or destination shape</th>
+<th>Current repo evidence</th>
+<th>QA disposition</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>One source vCenter with exactly one source datacenter</td>
+<td><code>runPreflightChecks</code> / <code>validatePreflightVSphere</code> in <code>internal/controller/preflight.go</code> requires one source datacenter.</td>
+<td><strong>Positive baseline.</strong> Keep the initial source topology inside this boundary.</td>
+</tr>
+<tr>
+<td>Source uses multiple datacenters on its source vCenter</td>
+<td>Preflight returns an error when <code>sourceVC.Datacenters</code> has more than one entry.</td>
+<td><strong>Negative boundary test.</strong> Confirm failure occurs in <code>InfrastructurePrepared</code>, before destination setup or other mutation. Do not describe this as supported migration.</td>
+</tr>
+<tr>
+<td>Source Infrastructure already has multiple vCenters</td>
+<td><code>InfrastructureManager.GetSourceVCenter</code> in <code>internal/openshift/infrastructure.go</code> returns <code>VCenters[0]</code>; preflight checks datacenter count, but does not reject multiple source vCenter entries. Cleanup is keyed to a source server.</td>
+<td><strong>Open compatibility risk.</strong> Add a test that exposes the ambiguity. Until product intent and code agree, the safe expected behavior is fail closed before mutation; a passing happy-path test must not imply all existing source vCenters are migrated.</td>
+</tr>
+<tr>
+<td>One or more target failure domains on one or more target vCenters</td>
+<td>The migration spec accepts a slice of failure domains; preflight checks the <code>VSphereMultiVCenterDay2</code> gate and validates target inventory/privileges per FD.</td>
+<td><strong>Positive coverage.</strong> Test multiple target FDs and, on an eligible OCP release, more than one target vCenter.</td>
+</tr>
+<tr>
+<td>Target host-group zones</td>
+<td><code>internal/vsphere/tags.go</code> defines region/zone tag categories for datacenters and compute clusters; current target validation checks datacenter, compute cluster, datastore, networks, optional resource pool/folder, and template, but not <code>topology.hostGroup</code>.</td>
+<td><strong>Not supported by evidence today.</strong> Keep out of positive migration tests. Add an explicit fail-fast test or first implement host-group-aware validation/tagging.</td>
+</tr>
+<tr>
+<td>Single-node OpenShift (SNO) on vSphere IPI</td>
+<td>The reviewed vSphere IPI guide documents the three-node compact shape; this research did not establish a vSphere IPI SNO support procedure.</td>
+<td><strong>Unconfirmed; not a baseline.</strong> Only add after confirming the exact supported installation method and operator CPMS/etcd behavior.</td>
+</tr>
+<tr>
+<td>Multi-network failure domains (<code>VSphereMultiNetworks</code>)</td>
+<td>The installer/config schema accepts up to 10 networks per FD plus <code>VSpherePlatformNodeNetworking</code> for internal/external addressing; <code>updateMachineSetProviderSpec</code> in <code>internal/openshift/machines.go</code> wires only <code>Networks[0]</code> into target machines and silently drops the rest.</td>
+<td><strong>Silent-truncation risk.</strong> Baseline uses one network per FD. If a multi-network source is in scope, either pin the expected single-network behavior or add a fail-closed preflight test.</td>
+</tr>
+<tr>
+<td>Load-balancer/DNS/VIP configuration (<code>loadBalancer</code>, <code>dnsRecordsType</code>, dual-stack <code>apiVIPs</code>/<code>ingressVIPs</code>)</td>
+<td>The installer supports UserManaged load balancers, external DNS records, and dual-stack VIPs; the operator never reads or reconfigures any of them — migration only re-points the vSphere workspace fields of the machine provider specs.</td>
+<td><strong>Post-migration health, not a migration feature.</strong> Fold into the L1/L2 oracle: VIPs still resolve, ingress is reachable, and the LB object is unchanged.</td>
+</tr>
+<tr>
+<td>Static per-host networking (<code>hosts[]</code>, TechPreview)</td>
+<td>The installer applies per-host network configuration at install time; the operator has no model for it.</td>
+<td><strong>Out of scope.</strong> Do not build baseline runs on TechPreview host networking.</td>
+</tr>
+<tr>
+<td>Per-machine disk settings (<code>diskType</code>, up to 29 <code>dataDisks</code> per machine pool with provisioning mode)</td>
+<td>The operator clones the source MachineSet provider spec, so disks travel verbatim; nothing validates target datastore capacity or provisioning for them.</td>
+<td><strong>Add to the L1 oracle.</strong> If the source worker pool uses data disks, verify they attach and survive the rollout.</td>
+</tr>
+</tbody></table>
+<p>The operator also requires the <code>VSphereMultiVCenterDay2</code> feature gate during preflight. Run live tests only on a release where the gate is supported and enabled. Capture cluster version and <code>FeatureGate/cluster</code> state with every result. Do not silently substitute an older release or TechPreview configuration and call that equivalent coverage.</p>
+<h2>3. Existing test coverage and the main gap</h2>
+<p>Coverage is not starting from zero:</p>
+<ul>
+<li><code>internal/controller/</code> has focused tests for the reconciliation phases, preflight, destination initialization, workload/CPMS rollout, and final readiness. <code>internal/controller/suite_test.go</code> runs the Ginkgo suite against envtest; vCenter is not provisioned by envtest.</li>
+<li><code>internal/openshift/</code> and <code>internal/vsphere/</code> have manager/session/tag/folder tests, including simulator- or fake-backed cases. These establish component behavior, not a real OpenShift/vCenter migration.</li>
+<li><code>test/e2e/e2e_test.go</code> runs on Kind and currently checks that the manager starts and serves metrics. It does <strong>not</strong> create a migration resource or migrate an IPI cluster.</li>
+<li><code>docs/plans/control-plane-migration-coverage-plan.md</code> records control-plane migration acceptance coverage work. Keep its CPMS/quorum assertions as the detailed source of truth when maintaining those tests.</li>
+<li><code>../release/ci-operator/step-registry/vcf-migration/</code> registers an actual Bash-based live migration workflow. It provisions a source vSphere IPI cluster, deploys the CI-built operator, creates a migration CR with target failure domains, and waits for all six migration conditions in order. Its final verifier checks ClusterOperator health, all nodes Ready, Infrastructure references only target vCenters, all non-deleting Machines use the target vCenter, and migration <code>Ready=True</code>. This is substantive positive-path integration coverage; Bash is only its implementation language.</li>
+<li><code>../release/ci-operator/config/openshift/vcf-migration-operator/</code> configures that workflow for OCP 4.20, 4.21, 4.22, 5.0, and 5.1, all with <code>VSphereMultiVCenterDay2=true</code>. These are CI configurations, not proof of customer support or successful qualification on every release. The workflow selects exactly one target vCenter; it does not declare an explicit topology-cardinality matrix.</li>
+<li>Prow evidence checked 2026-10-04: the 5.1 job&#39;s latest three runs all failed during cluster installation, before migration steps; two share a <code>machine-config</code> degraded/cluster-initialization timeout signature, below the automated permafail threshold. The 4.21 job reports one successful run; no public job history was available for 4.20, 4.22, or 5.0. The recent 5.1 failures are not evidence of an operator migration regression, but those runs do not qualify migration behavior.</li>
+</ul>
+<p><strong>Largest QE gap:</strong> not the absence of a live end-to-end workflow. It is the lack of sustained green, version-by-version qualification and negative-path/recovery/topology coverage. The existing workflow exercises a positive-path migration to a distinct target vCenter, but its PR job is optional and the latest 5.1 runs stopped before migration. Keep the working Bash workflow; close the evidence and scenario gaps rather than converting it to another language.</p>
+<h2>4. Prioritized test matrix</h2>
+<h3>Tier 0 — required PR coverage (fast, deterministic)</h3>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Scenario</th>
+<th>Required assertions</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>U1</td>
+<td>Baseline preflight: one source vCenter/datacenter; one valid target FD</td>
+<td>Each prerequisite is checked; target inventory and privileges are validated; no later phase runs before <code>InfrastructurePrepared=True</code>.</td>
+</tr>
+<tr>
+<td>U2</td>
+<td>Target topology validation, table-driven by FD</td>
+<td>Empty/duplicate FD names, missing template, bad datacenter/cluster/datastore/network/resource pool/folder/template, invalid credentials, and missing privileges fail with the FD named in the error. No destination tags, MachineSets, Infrastructure edits, or source deletion occur on failure.</td>
+</tr>
+<tr>
+<td>U3</td>
+<td>Unsupported source topology boundaries</td>
+<td>Multiple source datacenters fails before mutation. Multiple source vCenters are explicitly rejected (or a separately approved multi-source contract is tested); never silently test only the first vCenter.</td>
+</tr>
+<tr>
+<td>U4</td>
+<td>OCP readiness blockers</td>
+<td>Missing/disabled <code>VSphereMultiVCenterDay2</code>, missing feature-gate status, active rollout blockers, and vSphere CSI PVs stop preflight as hard failures; upgrade in progress and unhealthy ClusterOperators are transient (requeue with <code>Progressing</code> until healthy), so QE assertions must distinguish stuck-in-progress from terminal failure. Non-vSphere PVs alone do not trigger the CSI-PV blocker.</td>
+</tr>
+<tr>
+<td>U5</td>
+<td>Destination failure-domain composition</td>
+<td>One FD; two FDs on one target server; two FDs on separate target servers. Verify vCenter entries are deduplicated by server, datacenters and FD names are retained, and unrelated/source FDs are not accidentally removed.</td>
+</tr>
+<tr>
+<td>U6</td>
+<td>Idempotency and resume</td>
+<td>Reconcile the same phase repeatedly and restart from persisted status. Existing tags/configuration are reused; repeated reconciliation creates no duplicate or destructive resources. Pause/resume is covered.</td>
+</tr>
+<tr>
+<td>U7</td>
+<td>Worker migration guardrails</td>
+<td>Replacement capacity becomes ready before source scale-down/deletion; a source MachineSet with positive or nil replicas cannot be deleted; transient errors and stuck deletions preserve safe state and report useful conditions/events.</td>
+</tr>
+<tr>
+<td>U8</td>
+<td>Control-plane migration contract</td>
+<td>CPMS is Active and targets exactly the requested destination FDs; non-RollingUpdate strategy, missing CPMS/template, stale observed generation, and incomplete readiness do not advance/clean up source. Keep quorum-safe replacement-before-removal assertions.</td>
+</tr>
+<tr>
+<td>U9</td>
+<td>Final readiness</td>
+<td><code>Ready=True</code> only after target-only Infrastructure configuration, all expected nodes ready, operators healthy, MCPs converged, and the stability window completes; a health regression resets/blocks completion.</td>
+</tr>
+<tr>
+<td>U10</td>
+<td>Unsupported host-group target</td>
+<td>Until supported, a host-group FD must be rejected before any destination mutation. If host-group support is added, replace this with positive tag-placement and migration assertions.</td>
+</tr>
+</tbody></table>
+<p>Run the existing controller/component suite for these changes; do not require a vCenter in every PR job. Any new coverage should fit the existing package&#39;s test style instead of creating a parallel test framework.</p>
+<h3>Tier 1 — live IPI migration, required before release</h3>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Source IPI shape</th>
+<th>Destination</th>
+<th>Why this earns a live run</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>L1</td>
+<td>Standard HA, one source vCenter + one datacenter + one FD, three control-plane and at least two workers</td>
+<td>One target FD on a distinct target vCenter</td>
+<td>End-to-end happy path for the operator&#39;s primary use.</td>
+</tr>
+<tr>
+<td>L2</td>
+<td>Three-node compact, three control-plane and zero workers</td>
+<td>One target FD on a distinct target vCenter</td>
+<td>Detects hidden assumptions about worker MachineSets and exercises CPMS/etcd replacement under the smallest documented vSphere HA shape.</td>
+</tr>
+<tr>
+<td>L3</td>
+<td>Standard HA with source workers assigned across two failure domains in one datacenter</td>
+<td>One target FD</td>
+<td>Proves source MachineSets are selected and drained/deleted correctly when placement is not represented by one source cluster/zone.</td>
+</tr>
+<tr>
+<td>L4</td>
+<td>Standard HA, one source FD</td>
+<td>Two target FDs on the <strong>same</strong> target vCenter, separate compute clusters/zones</td>
+<td>Proves multi-FD generation, zone tags and target provider specs without also changing credentials/server. Use both an even and an odd worker replica count over scheduled runs; assert the operator&#39;s declared distribution contract rather than assuming equal replicas.</td>
+</tr>
+<tr>
+<td>L5</td>
+<td>Standard HA, one source FD</td>
+<td>Target FDs on two target vCenters (same or different target regions, using supported feature-gate config)</td>
+<td>Proves the product&#39;s multi-vCenter destination behavior: credentials keyed per server, Infrastructure entries, provider specs, tags, and source cleanup.</td>
+</tr>
+</tbody></table>
+<p><strong>Recommended order:</strong> make L1 stable first, add L2 next, then L4/L5. L3 is valuable but lower priority than exercising the target-side multi-FD behavior. Run L1 on every eligible PR or merge queue if capacity permits; run L2/L4/L5 nightly or before release until their cost and flake rate justify a tighter cadence. The registered CI workflow is closest to L1, but its scripts do not pin/assert the source node counts or target-FD count; inspect retained run artifacts before claiming exact L1 equivalence. It selects one target vCenter, so it does not cover L5.</p>
+<h3>Tier 2 — conditional topology / resilience runs</h3>
+<p>Run only when the matching install shape is explicitly supported by both the selected OCP release and this operator:</p>
+<ul>
+<li>Source with multiple datacenters on one source vCenter: currently expected to fail preflight; convert to a positive scenario only after that guard/contract changes.</li>
+<li>Source spanning multiple vCenters: currently unresolved due to first-vCenter selection; gate on a defined source-migration contract.</li>
+<li>Host-group failure domains: positive test only after hostGroup is validated and region/zone tags attach to the correct vSphere objects.</li>
+<li>Static IP or multi-network IPI: one overlay run to verify that replacement Machine provider specs and node readiness preserve required addressing. Keep it out of the base matrix unless the operator owns that configuration.</li>
+<li>Target vCenter unavailable, invalid credentials, privilege revoked, transient Kubernetes API errors, controller restart mid-phase, and stalled worker/control-plane rollout. Verify no unsafe source removal and that retry/resume converges once the dependency recovers.</li>
+</ul>
+<h2>5. Live-test procedure and pass/fail oracle</h2>
+<ol>
+<li>Install a fresh source cluster using the official vSphere IPI workflow and a version with <code>VSphereMultiVCenterDay2</code> supported/enabled. Save the install-config (redacted), cluster version, failure domains, vCenter/datacenter topology, and control-plane/worker counts as run artifacts.</li>
+<li>Verify the starting cluster is healthy and stable. For a successful migration scenario, ensure there are no vSphere CSI-backed PVs and the vSphere CSI management state satisfies preflight. Add a small stateless workload so post-migration API and scheduling checks are meaningful.</li>
+<li>Deploy the operator and create its credentials Secret plus <code>VmwareCloudFoundationMigration</code> resource using the destination FDs. Keep source and target vCenters distinct in the mainline case.</li>
+<li>Wait for the ordered conditions: <code>InfrastructurePrepared</code>, <code>DestinationInitialized</code>, <code>MultiSiteConfigured</code>, <code>WorkloadMigrated</code>, <code>SourceCleaned</code>, then <code>Ready</code>. Record condition transition times, events, controller logs, and resource snapshots. A timeout is a failure with phase-specific diagnostics, not a pass based only on eventual node health.</li>
+<li>Verify all of the following before pass:<ul>
+<li>Migration CR <code>Ready=True</code> and every required phase condition succeeded.</li>
+<li>Every expected control-plane and worker node is Ready; no unexpected node loss; the stateless workload remains available and can schedule.</li>
+<li>ClusterOperators are Available and not Progressing/Degraded; MCPs are Updated and not Degraded.</li>
+<li>From a client outside the cluster network, resolve the API and application-route DNS names to their expected addresses; probe the external API for readiness and the application route for its expected HTTP response. Verify the external load balancer&#39;s VIP/listener/backend configuration targets the intended, healthy API and ingress endpoints.</li>
+<li>Control-plane rollout is complete and the source control-plane machines were not removed before their replacements were ready.</li>
+<li>Destination MachineSets/Machines reference the intended vCenter, datacenter, compute cluster, datastore, network, and failure-domain names in their provider specs; node region/zone labels agree with the destination tags.</li>
+<li>Infrastructure contains the intended destination vCenters/failure domains and no migrated source vCenter/failure domains after <code>SourceCleaned</code>; multi-target scenarios retain <strong>all</strong> targets.</li>
+<li>No source MachineSet remains with desired replicas, and cleanup does not delete a target MachineSet or unrelated infrastructure entry.</li>
+</ul>
+</li>
+<li>On failure, retain the migration object/status, operator and cluster events/logs, all nodes/Machines/MachineSets/CPMS, Infrastructure and cloud-provider configuration, and vCenter task/event records. Preserve enough artifacts to determine whether the failure was install, preflight, operator, control-plane quorum, worker rollout, cleanup, or CI infrastructure.</li>
+</ol>
+<h2>6. CI gates and commands</h2>
+<ul>
+<li><strong>PR gate:</strong> existing <code>make test</code> (unit/controller envtest coverage); add focused deterministic regression tests with each bug fix. Keep vCenter credentials out of PR tests.</li>
+<li><strong>Kind smoke:</strong> <code>make test-e2e</code> validates manager deployment/metrics, but is not the migration release gate.</li>
+<li><strong>Existing live integration job:</strong> <code>../release/ci-operator/step-registry/vcf-migration/e2e/vcf-migration-e2e-workflow.yaml</code> runs the source IPI install, operator deployment, ordered condition waits, and final health/vCenter assertions described above. The 5.1 PR job is <code>optional: true</code> and manually triggerable. Periodic configs cover 4.20–5.1, but the 4.20, 4.21, and 5.0 schedules are annual; 4.22 is weekly; 5.1 is three times daily. Treat configured schedules as intent, not proof a run passed.</li>
+<li><strong>Current qualification evidence (2026-10-04):</strong> Prow reports 3/3 latest 5.1 periodic runs failed before the migration workflow, during IPI cluster initialization; two show the same machine-config degraded timeout. Permafail detection returned false (2/3 matches; 3/3 required). Prow reports one 4.21 success and no matching public history for 4.20, 4.22, or 5.0. Investigate/restore green 5.1 install runs and collect at least one successful full migration per customer-supported OCP release before counting that release as qualified.</li>
+<li><strong>Strict release gate:</strong> require successful L1 migration plus the final cluster/vCenter assertions on every customer-supported OCP version. Require L2 and multi-failure-domain/multi-target scenarios (L4/L5) on every version for which those configurations are claimed supported, or record an explicit approved exception. A skipped, optional, pre-migration install failure, or merely configured periodic is not a pass. Record OCP version, feature gates, installer release, operator image digest, vCenter versions, topology, and job link with each result.</li>
+</ul>
+<p>Repository commands:</p>
+<pre><code class="language-bash">make test
+make test-e2e  # Kind manager smoke only; not a live vSphere migration test
+</code></pre>
+<h2>7. Decisions needed to make the matrix authoritative</h2>
+<ol>
+<li>Which OCP release is the minimum supported live-test version, and is <code>VSphereMultiVCenterDay2</code> stable or gated for that release?</li>
+<li>Are multi-datacenter or multi-vCenter <strong>source</strong> clusters supported inputs, or must preflight reject them? Current code rejects multiple source datacenters but selects only the first source vCenter.</li>
+<li>Is HostGroup topology in scope for migration? The installer schema supports it, but this repo has no host-group-specific validation/tagging evidence.</li>
+<li>Is SNO supported through vSphere IPI and by this operator, or should it remain explicitly out of scope?</li>
+<li>Which of CI-configured OCP versions 4.20, 4.21, 4.22, 5.0, and 5.1 are customer-supported, and what per-version green-run cadence is required for release qualification? The release CI is configured under <code>../release</code>; configured variants alone do not establish the product support matrix.</li>
+</ol>
+<p>Until these are settled, report the supported positive envelope as: <strong>a healthy, feature-gate-eligible source with one source vCenter/datacenter; a documented vSphere IPI HA or three-node compact shape; and explicit target failure domains whose topology is validated by this operator.</strong> Do not infer support for every topology the installer schema can express.</p>
+<h2>8. Operator-stage execution and status oracle</h2>
+<p>Use this as the live QE runbook after installing the operator and preparing the disposable source/target vSphere environment. Start the migration only after reviewing the initial Infrastructure, MachineSets, vSphere credentials, and recovery plan. The CR must be named <code>cluster</code>, set to <code>Running</code>, and reference a target credentials Secret with <code>{server}.username</code> and <code>{server}.password</code> keys for every target vCenter. Source credentials must be available in <code>kube-system/vsphere-creds</code>.</p>
+<table>
+<thead><tr><th>Gate</th><th>Expected status and cluster evidence</th></tr></thead>
+<tbody>
+<tr><td>Start / admission</td><td><code>Pending</code> does not start work. <code>Paused</code> reports <code>Ready=False</code>, reason <code>Paused</code>; a non-<code>cluster</code> object is ignored with <code>Accepted=False</code>, reason <code>UnsupportedName</code>. On first <code>Running</code> reconcile, <code>startTime</code> is set.</td></tr>
+<tr><td><code>InfrastructurePrepared</code></td><td>Preflight requires the multi-vCenter feature gate, healthy/non-upgrading cluster, source vCenter connectivity and exactly one source datacenter, valid target credentials/topology/privileges, no vSphere CSI PVs, CSI driver <code>Removed</code>, and no interfering user autoscaler/MHC resources. A blocker must prevent destination setup; restore transient blockers and verify progress resumes.</td></tr>
+<tr><td><code>DestinationInitialized</code></td><td>Target VM folder has the cluster-ownership tag; datacenter and cluster have the requested region/zone tags. Repeat reconcile/operator restart must not duplicate or damage them.</td></tr>
+<tr><td><code>MultiSiteConfigured</code></td><td>Target entries exist in <code>Infrastructure/cluster</code>, <code>cloud-provider-config</code> (<code>openshift-config</code>), and <code>kube-system/vsphere-creds</code>; MCO and vSphere pods restart. While vSphere pods are unready the condition stays false with a waiting message; it completes after readiness.</td></tr>
+<tr><td><code>WorkloadMigrated</code></td><td>Target MachineSets and their Machines/Nodes become ready before CPMS cutover. CPMS generation must be observed and rollout complete before source MachineSets scale to zero. Source Machines/Nodes must disappear before source MachineSets are deleted. Use status progress and events to check each wait.</td></tr>
+<tr><td><code>SourceCleaned</code></td><td>Source vCenter/failure domains and credentials are removed from Infrastructure/configuration/secrets; vSphere pods restart; <code>&lt;migration-name&gt;-metadata</code> Secret is written in the migration namespace.</td></tr>
+<tr><td><code>Ready</code></td><td>All ClusterOperators are healthy, all MachineConfigPools are converged, and only target vCenters remain. <code>Ready=True</code> requires six stable observations at least 30 seconds apart (about three minutes), not one healthy snapshot.</td></tr>
+</tbody>
+</table>
+<p>Capture the status and non-secret cluster evidence at each gate:</p>
+<pre><code>NS=&lt;migration-namespace&gt;
+oc get vcfm cluster -n "$NS" -o yaml
+oc get infrastructure.config.openshift.io cluster -o yaml
+oc get configmap cloud-provider-config -n openshift-config -o yaml
+oc get machinesets -n openshift-machine-api -o wide
+oc get controlplanemachineset.machine.openshift.io cluster -n openshift-machine-api -o yaml
+oc get clusteroperators
+oc get machineconfigpools
+oc get events -n "$NS" --field-selector involvedObject.name=cluster --sort-by=.lastTimestamp</code></pre>
+<h2>9. QA safety and edge acceptance</h2>
+<ul>
+<li><strong>Replica distribution:</strong> Run an uneven source-worker count over multiple target failure domains and compare actual per-domain replicas with the approved policy. Explicitly test fewer source replicas than target failure domains: the current implementation enforces at least one replica per target domain, which can increase the total target worker count. Resolve whether that is intended before release sign-off.</li>
+<li><strong>Pause is not rollback:</strong> Verify pause/resume only in a disposable cluster. Pausing stops this controller from advancing; it does not undo already-applied changes or guarantee that external cluster operators stop an in-flight rollout. Never use it as a recovery or rollback procedure.</li>
+<li><strong>Sensitive metadata:</strong> The metadata Secret contains vSphere credentials, has no owner reference, and is intentionally retained for teardown after the migration CR is deleted. Verify its name/label/key presence without printing values; restrict access and redact Secret data from logs, screenshots, and bug attachments.</li>
+<li><strong>Recovery evidence:</strong> For each injected blocker, record the failing condition/message, event, external resource state, and requeue/recovery behavior. Confirm the next stage does not become complete before its prerequisites pass. Keep all disruptive fault injection and operator restarts on the isolated test cluster.</li>
+</ul>
+<h2>10. Coverage-profile findings and release-test priorities</h2>
+<p>A local <code>go test ./... -coverprofile=...</code> run passed all packages. The combined profile after the readiness tests below was 64.7%; package coverage was API 30.0%, controller 72.8%, metadata 92.3%, metrics 96.7%, OpenShift managers 76.8%, and vSphere 59.4%. Use these figures to target behavioral tests, not as a standalone release gate: generated API code and the uninstrumented manager process affect aggregate percentages.</p>
+<p>Reproduce and refresh the baseline with:</p>
+<pre><code>go test ./... -coverprofile=/tmp/vcf-qa-cover.out
+go tool cover -func=/tmp/vcf-qa-cover.out</code></pre>
+<p>The following unexecuted code paths are higher priority because they mutate cluster configuration or control destructive cutover. Coverage figures below are from that profile; they are not claims about every possible live/manual test.</p>
+<table>
+<thead><tr><th>Priority</th><th>Code path (profile coverage)</th><th>Required automated coverage before customer rollout</th></tr></thead>
+<tbody>
+<tr><td>P0</td><td><code>ensureMultiSiteConfigured</code> (0%)</td><td>Controller-level tests for target credentials, Infrastructure and cloud-provider ConfigMap updates, MCO/vSphere pod restarts, waiting while pods are unready, retry after partial failure, and idempotent re-reconcile.</td></tr>
+<tr><td>P0</td><td><code>ensureSourceCleaned</code> (0%)</td><td>Tests that remove only source entries, retain target credentials/config, restart vSphere pods, create the metadata Secret, and recover safely from a failure partway through cleanup.</td></tr>
+<tr><td>P0</td><td>Worker creation/scale-down methods in <code>internal/openshift/machines.go</code> (<code>CreateWorkerMachineSet</code>, <code>ScaleMachineSet</code>, <code>updateMachineSetProviderSpec</code>, <code>CheckMachinesDeleted</code>, and <code>CheckNodesDeletedForMachines</code>: 0%)</td><td><code>CheckMachinesReady</code> and <code>CheckNodesReady</code> now have table-driven fake-client coverage (100% function coverage) for complete, partial, empty, missing-resource, and list-error cases. Add corresponding tests for provider-spec/selector mapping, worker creation/scaling, and old-machine/node deletion. Retain an explicit safety oracle: source scale-down must not happen before target workers and control-plane rollout pass their readiness gates.</td></tr>
+<tr><td>P1</td><td>vSphere session lifecycle (<code>NewSession</code>, <code>GetOrCreate</code>, <code>Close</code>, <code>ClearSessions</code>) and <code>ListDatacenters</code> (0%)</td><td>Simulator-backed tests for connection/cache reuse, distinct-server credentials, cleanup after preflight, invalid sessions, and lookup errors.</td></tr>
+<tr><td>P1</td><td><code>cmd/main.go</code> startup functions (0% in this profile)</td><td>Keep executable startup/health/metrics smoke coverage; do not add brittle unit tests for <code>main</code> solely to raise coverage. The current Kind E2E suite is a smoke check, not a migration-flow test.</td></tr>
+</tbody>
+</table>
+<p>Controller phase coverage is uneven: preflight 75.0%, destination initialization 88.1%, worker migration 76.7%, rollout/scale-down 79.8%, final readiness 92.9%; the two P0 configuration/cleanup stages above are not exercised by the Go test profile. The release CI workflow supplies positive-path integration coverage, but the latest 5.1 runs failed before migration and only one 4.21 pass is currently reported. Until the P0 stage tests and reliable green live runs on each customer-supported release are in place, treat the suite as a useful component baseline rather than customer-release qualification.</p>
+<h3>Tool evidence limitations</h3>
+<p>Defect prediction returned no files above its risk threshold; that is not evidence of defect absence. The coverage-gap scan supplied with the Go profile ranked uncovered <code>cmd/main.go</code>, vSphere session, and MachineManager code, consistent with the profile, but its target filter did not isolate the requested controller directory. A separate sublinear scan surfaced <code>.worktrees/</code> paths, so it is excluded from release decisions. Review tool suggestions against the checked-out test suite and measured profile before accepting them.</p>
+<h2>References</h2>
+<h3>OpenShift / installer</h3>
+<ul>
+<li><a href="https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/installing_on_vmware_vsphere/installer-provisioned-infrastructure">OCP 4.22: Installer-provisioned infrastructure on vSphere</a></li>
+<li><a href="https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/installing_on_vmware_vsphere/installation-config-parameters-vsphere">OCP 4.22: vSphere installation configuration parameters</a></li>
+<li><a href="https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/installing_on_vmware_vsphere/post-install-vsphere-zones-regions-configuration">OCP 4.22: multiple regions and zones on vSphere</a></li>
+<li><a href="https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/installing_on_vmware_vsphere/installing-vsphere-three-node">OCP 4.22: three-node vSphere cluster</a></li>
+<li>Installer checkout inspected: <code>../installer</code> commit <code>6d44cca7d8</code>, especially <code>pkg/types/vsphere/platform.go</code>, <code>pkg/types/vsphere/validation/platform.go</code>, and <code>pkg/asset/machines/vsphere/machinesets.go</code>.</li>
+</ul>
+<h3>This repository</h3>
+<ul>
+<li><code>internal/controller/preflight.go</code> — feature gate, source-vCenter boundary, target inventory and CSI checks.</li>
+<li><code>internal/openshift/infrastructure.go</code> — source selection and target/source Infrastructure updates.</li>
+<li><code>internal/vsphere/tags.go</code> — destination topology and cluster-ownership tag behavior.</li>
+<li><code>internal/openshift/machines.go</code> and <code>internal/controller/workload_migration_rollout_test.go</code> — MachineSet and CPMS rollout behavior.</li>
+<li><code>internal/controller/suite_test.go</code>, <code>test/e2e/e2e_test.go</code> — envtest and current Kind E2E boundary.</li>
+<li><code>docs/plans/control-plane-migration-coverage-plan.md</code>, <code>docs/plans/ci-e2e-testing.md</code> — existing coverage and live-CI planning notes.</li>
+<li><code>docs/user/spec-examples.md</code> — current single- and multi-target-FD migration specs.</li>
+</ul>
+<hr>
+<p><strong>QA summary:</strong> Prioritize two real positive paths (standard HA and three-node compact) plus multi-target-failure-domain coverage. Treat installer-expressible but operator-unimplemented source/target shapes as compatibility boundaries, not as assumed coverage.</p>
+<p><strong>Research caveat:</strong> Release-level support for multi-vCenter IPI installation, HostGroup, SNO, and the multi-vCenter feature gate must be checked against the specific OpenShift release selected for a live run; the installer schema alone is not a support statement.</p>
+</body>
+</html>
