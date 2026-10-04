@@ -10,6 +10,7 @@ import (
 	machinev1 "github.com/openshift/api/machine/v1"
 	machinev1beta1 "github.com/openshift/api/machine/v1beta1"
 	fakemachineclient "github.com/openshift/client-go/machine/clientset/versioned/fake"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -746,5 +747,199 @@ func testMachineWithMSLabel(name, labelValue string) *machinev1beta1.Machine {
 				"machine.openshift.io/cluster-api-machineset": labelValue,
 			},
 		},
+	}
+}
+
+func TestCheckMachinesReady(t *testing.T) {
+	running := "Running"
+	pending := "Pending"
+	newMachine := func(name string, phase *string, nodeName string) *machinev1beta1.Machine {
+		machine := testMachineWithMSLabel(name, "workers-a")
+		machine.Status.Phase = phase
+		if nodeName != "" {
+			machine.Status.NodeRef = &corev1.ObjectReference{Name: nodeName}
+		}
+		return machine
+	}
+
+	tests := []struct {
+		name              string
+		machines          []*machinev1beta1.Machine
+		missingMachineSet bool
+		failList          bool
+		wantComplete      bool
+		wantReady         int32
+		wantTotal         int32
+		wantError         bool
+	}{
+		{
+			name: "all running machines with node references are ready",
+			machines: []*machinev1beta1.Machine{
+				newMachine("worker-a", &running, "node-a"),
+				newMachine("worker-b", &running, "node-b"),
+			},
+			wantComplete: true,
+			wantReady:    2,
+			wantTotal:    2,
+		},
+		{
+			name: "pending, missing phase, and missing node reference are not ready",
+			machines: []*machinev1beta1.Machine{
+				newMachine("worker-a", &running, "node-a"),
+				newMachine("worker-b", &pending, "node-b"),
+				newMachine("worker-c", nil, "node-c"),
+				newMachine("worker-d", &running, ""),
+			},
+			wantReady: 1,
+			wantTotal: 4,
+		},
+		{
+			name:      "empty machine set is incomplete",
+			wantTotal: 0,
+		},
+		{
+			name:              "missing machine set returns an error",
+			missingMachineSet: true,
+			wantError:         true,
+		},
+		{
+			name:      "machine list failure returns an error",
+			failList:  true,
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			objects := make([]runtime.Object, 0, len(tt.machines)+1)
+			if !tt.missingMachineSet {
+				objects = append(objects, testSelectorMachineSet("workers-a"))
+			}
+			for _, machine := range tt.machines {
+				objects = append(objects, machine)
+			}
+			machineClient := fakemachineclient.NewClientset(objects...)
+			if tt.failList {
+				machineClient.PrependReactor("list", "machines", func(clienttesting.Action) (bool, runtime.Object, error) {
+					return true, nil, fmt.Errorf("simulated machine list failure")
+				})
+			}
+			manager := NewMachineManager(fakekube.NewClientset(), machineClient, nil)
+
+			complete, ready, total, err := manager.CheckMachinesReady(context.Background(), "workers-a")
+			if (err != nil) != tt.wantError {
+				t.Fatalf("CheckMachinesReady() error = %v, wantError %t", err, tt.wantError)
+			}
+			if complete != tt.wantComplete || ready != tt.wantReady || total != tt.wantTotal {
+				t.Errorf("CheckMachinesReady() = (%t, %d, %d), want (%t, %d, %d)", complete, ready, total, tt.wantComplete, tt.wantReady, tt.wantTotal)
+			}
+		})
+	}
+}
+
+func TestCheckNodesReady(t *testing.T) {
+	newMachine := func(name, nodeName string) *machinev1beta1.Machine {
+		machine := testMachineWithMSLabel(name, "workers-a")
+		if nodeName != "" {
+			machine.Status.NodeRef = &corev1.ObjectReference{Name: nodeName}
+		}
+		return machine
+	}
+	newNode := func(name string, conditions ...corev1.NodeCondition) *corev1.Node {
+		return &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Status:     corev1.NodeStatus{Conditions: conditions},
+		}
+	}
+
+	tests := []struct {
+		name              string
+		machines          []*machinev1beta1.Machine
+		nodes             []*corev1.Node
+		missingMachineSet bool
+		failList          bool
+		wantComplete      bool
+		wantReady         int32
+		wantTotal         int32
+		wantError         bool
+	}{
+		{
+			name: "all referenced nodes reporting Ready are ready",
+			machines: []*machinev1beta1.Machine{
+				newMachine("worker-a", "node-a"),
+				newMachine("worker-b", "node-b"),
+			},
+			nodes: []*corev1.Node{
+				newNode("node-a", corev1.NodeCondition{Type: corev1.NodeReady, Status: corev1.ConditionTrue}),
+				newNode("node-b", corev1.NodeCondition{Type: corev1.NodeReady, Status: corev1.ConditionTrue}),
+			},
+			wantComplete: true,
+			wantReady:    2,
+			wantTotal:    2,
+		},
+		{
+			name: "not-ready, unknown, missing condition, missing node, and missing node reference do not count",
+			machines: []*machinev1beta1.Machine{
+				newMachine("worker-a", "node-ready"),
+				newMachine("worker-b", "node-not-ready"),
+				newMachine("worker-c", "node-unknown"),
+				newMachine("worker-d", "node-no-condition"),
+				newMachine("worker-e", "node-missing"),
+				newMachine("worker-f", ""),
+			},
+			nodes: []*corev1.Node{
+				newNode("node-ready", corev1.NodeCondition{Type: corev1.NodeReady, Status: corev1.ConditionTrue}),
+				newNode("node-not-ready", corev1.NodeCondition{Type: corev1.NodeReady, Status: corev1.ConditionFalse}),
+				newNode("node-unknown", corev1.NodeCondition{Type: corev1.NodeReady, Status: corev1.ConditionUnknown}),
+				newNode("node-no-condition", corev1.NodeCondition{Type: corev1.NodeMemoryPressure, Status: corev1.ConditionFalse}),
+			},
+			wantReady: 1,
+			wantTotal: 6,
+		},
+		{
+			name:      "empty machine set is incomplete",
+			wantTotal: 0,
+		},
+		{
+			name:              "missing machine set returns an error",
+			missingMachineSet: true,
+			wantError:         true,
+		},
+		{
+			name:      "machine list failure returns an error",
+			failList:  true,
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			objects := make([]runtime.Object, 0, len(tt.machines)+1)
+			if !tt.missingMachineSet {
+				objects = append(objects, testSelectorMachineSet("workers-a"))
+			}
+			for _, machine := range tt.machines {
+				objects = append(objects, machine)
+			}
+			machineClient := fakemachineclient.NewClientset(objects...)
+			if tt.failList {
+				machineClient.PrependReactor("list", "machines", func(clienttesting.Action) (bool, runtime.Object, error) {
+					return true, nil, fmt.Errorf("simulated machine list failure")
+				})
+			}
+			nodeObjects := make([]runtime.Object, 0, len(tt.nodes))
+			for _, node := range tt.nodes {
+				nodeObjects = append(nodeObjects, node)
+			}
+			manager := NewMachineManager(fakekube.NewClientset(nodeObjects...), machineClient, nil)
+
+			complete, ready, total, err := manager.CheckNodesReady(context.Background(), "workers-a")
+			if (err != nil) != tt.wantError {
+				t.Fatalf("CheckNodesReady() error = %v, wantError %t", err, tt.wantError)
+			}
+			if complete != tt.wantComplete || ready != tt.wantReady || total != tt.wantTotal {
+				t.Errorf("CheckNodesReady() = (%t, %d, %d), want (%t, %d, %d)", complete, ready, total, tt.wantComplete, tt.wantReady, tt.wantTotal)
+			}
+		})
 	}
 }
