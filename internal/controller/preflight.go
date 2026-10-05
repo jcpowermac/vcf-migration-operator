@@ -70,6 +70,21 @@ type credentials struct {
 	password string
 }
 
+func runPreflightStep(log klog.Logger, check string, fn func() error, fields ...any) error {
+	logFields := append([]any{"check", check}, fields...)
+	started := time.Now()
+	log.Info("preflight check started", logFields...)
+
+	err := fn()
+	resultFields := append(append([]any(nil), logFields...), "duration", time.Since(started).String())
+	if err != nil {
+		log.Error(err, "preflight check failed", resultFields...)
+		return err
+	}
+	log.Info("preflight check completed", resultFields...)
+	return nil
+}
+
 // fdTemplateMissing returns an error naming the first failure domain whose
 // topology.template is empty.
 func fdTemplateMissing(fds []configv1.VSpherePlatformFailureDomainSpec) error {
@@ -95,7 +110,7 @@ func validateFailureDomainTypes(fds []configv1.VSpherePlatformFailureDomainSpec)
 }
 
 func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) (string, error) {
-	log := klog.FromContext(ctx)
+	log := klog.FromContext(ctx).V(1)
 	condType := migrationv1alpha1.ConditionInfrastructurePrepared
 
 	if len(migration.Spec.FailureDomains) == 0 {
@@ -110,11 +125,11 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 	if err := validateFailureDomainTypes(migration.Spec.FailureDomains); err != nil {
 		return "", err
 	}
-
-	secretRef := migration.Spec.TargetVCenterCredentialsSecret
-	if secretRef.Name == "" {
+	if migration.Spec.TargetVCenterCredentialsSecret.Name == "" {
 		return "", fmt.Errorf("spec.targetVCenterCredentialsSecret.name must not be empty")
 	}
+
+	secretRef := migration.Spec.TargetVCenterCredentialsSecret
 	ns := secretRef.Namespace
 	if ns == "" {
 		ns = migration.Namespace
@@ -133,35 +148,53 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 		}
 	}
 
-	support, err := openshift.GetVSphereMultiVCenterSupport(ctx, r.ConfigClient)
-	if err != nil {
-		return "", fmt.Errorf("checking cluster readiness: %w", err)
-	}
-	if !support.FeatureGateEnabled {
-		return "", fmt.Errorf("feature gate VSphereMultiVCenterDay2 is not enabled for OpenShift %s; enable the feature gate before starting migration", support.ClusterVersion)
-	}
-	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Validating cluster readiness")
-	if support.UpgradeInProgress {
-		return "", newTransientError(fmt.Errorf("cluster upgrade is in progress; wait for ClusterVersion/version Progressing=False before starting migration"))
-	}
-
-	opMgr := openshift.NewOperatorManager(r.ConfigClient)
-	healthy, unhealthyOperators, err := opMgr.CheckAllOperatorsHealthy(ctx)
-	if err != nil {
-		return "", fmt.Errorf("checking cluster operator health: %w", err)
-	}
-	if !healthy {
-		return "", newTransientError(fmt.Errorf("cluster operators are not healthy; wait for operators to recover before starting migration: %s", strings.Join(unhealthyOperators, ", ")))
-	}
-
-	if err := checkNoVSphereCSIPersistentVolumes(ctx, r.KubeClient); err != nil {
+	if err := runPreflightStep(log, "cluster readiness", func() error {
+		support, err := openshift.GetVSphereMultiVCenterSupport(ctx, r.ConfigClient)
+		if err != nil {
+			return fmt.Errorf("checking cluster readiness: %w", err)
+		}
+		if !support.FeatureGateEnabled {
+			return fmt.Errorf("feature gate VSphereMultiVCenterDay2 is not enabled for OpenShift %s; enable the feature gate before starting migration", support.ClusterVersion)
+		}
+		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Validating cluster readiness")
+		if support.UpgradeInProgress {
+			return newTransientError(fmt.Errorf("cluster upgrade is in progress; wait for ClusterVersion/version Progressing=False before starting migration"))
+		}
+		return nil
+	}); err != nil {
 		return "", err
 	}
-	storageWarning, err := checkVSphereStorageManagement(ctx, r.DynamicClient)
-	if err != nil {
+
+	if err := runPreflightStep(log, "cluster operator health", func() error {
+		opMgr := openshift.NewOperatorManager(r.ConfigClient)
+		healthy, unhealthyOperators, err := opMgr.CheckAllOperatorsHealthy(ctx)
+		if err != nil {
+			return fmt.Errorf("checking cluster operator health: %w", err)
+		}
+		if !healthy {
+			return newTransientError(fmt.Errorf("cluster operators are not healthy; wait for operators to recover before starting migration: %s", strings.Join(unhealthyOperators, ", ")))
+		}
+		return nil
+	}); err != nil {
 		return "", err
 	}
-	if err := checkInterferingRolloutResources(ctx, r.DynamicClient); err != nil {
+
+	if err := runPreflightStep(log, "vSphere CSI persistent volumes", func() error {
+		return checkNoVSphereCSIPersistentVolumes(ctx, r.KubeClient)
+	}); err != nil {
+		return "", err
+	}
+	var storageWarning string
+	if err := runPreflightStep(log, "storage management state", func() error {
+		var err error
+		storageWarning, err = checkVSphereStorageManagement(ctx, r.DynamicClient)
+		return err
+	}); err != nil {
+		return "", err
+	}
+	if err := runPreflightStep(log, "interfering rollout resources", func() error {
+		return checkInterferingRolloutResources(ctx, r.DynamicClient)
+	}); err != nil {
 		return "", err
 	}
 
@@ -172,27 +205,31 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 		// context so session handles are released even on long runs.
 		logoutCtx, logoutCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer logoutCancel()
-		log.V(2).Info("clearing cached vSphere sessions after preflight")
-		vsphere.ClearSessions(logoutCtx)
+		_ = runPreflightStep(log, "clear cached vSphere sessions", func() error {
+			vsphere.ClearSessions(logoutCtx)
+			return nil
+		})
 	}()
 
-	if err := r.validatePreflightVSphere(ctx, vsphereCtx, migration); err != nil {
+	if err := runPreflightStep(log, "vSphere topology", func() error {
+		return r.validatePreflightVSphere(ctx, vsphereCtx, migration)
+	}, "failureDomainCount", len(migration.Spec.FailureDomains)); err != nil {
 		return "", err
 	}
-
-	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient)
-	sourceVC, err := infraMgr.GetSourceVCenter(ctx)
-	if err != nil {
-		return "", fmt.Errorf("getting source vCenter: %w", err)
-	}
-	netcheckCtx, cancel := context.WithTimeout(ctx, preflightNetcheckTimeout)
-	defer cancel()
 
 	checkNet := r.checkNetworkingViaProbeVMsFunc
 	if checkNet == nil {
 		checkNet = r.checkNetworkingViaProbeVMs
 	}
-	if err := checkNet(netcheckCtx, migration, sourceVC); err != nil {
+	if err := runPreflightStep(log, "probe VM network compatibility", func() error {
+		sourceVC, err := openshift.NewInfrastructureManager(r.ConfigClient).GetSourceVCenter(ctx)
+		if err != nil {
+			return fmt.Errorf("getting source vCenter: %w", err)
+		}
+		netcheckCtx, cancel := context.WithTimeout(ctx, preflightNetcheckTimeout)
+		defer cancel()
+		return checkNet(netcheckCtx, migration, sourceVC)
+	}, "failureDomainCount", len(migration.Spec.FailureDomains)); err != nil {
 		return "", err
 	}
 
@@ -207,36 +244,37 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 // verifies that the failure domain topology (datacenter, cluster, datastore,
 // networks, template) is reachable on each target.
 func (r *VmwareCloudFoundationMigrationReconciler) validatePreflightVSphere(ctx context.Context, vsphereCtx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) error {
-	log := klog.FromContext(ctx)
+	log := klog.FromContext(ctx).V(1)
 	condType := migrationv1alpha1.ConditionInfrastructurePrepared
 
-	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient)
-	sourceVC, err := infraMgr.GetSourceVCenter(ctx)
+	sourceVC, err := openshift.NewInfrastructureManager(r.ConfigClient).GetSourceVCenter(ctx)
 	if err != nil {
 		return fmt.Errorf("getting source vCenter: %w", err)
 	}
 
-	sm := openshift.NewSecretManager(r.KubeClient)
-	srcUser, srcPass, err := sm.GetCredentials(ctx, sourceVC.Server)
-	if err != nil {
-		return fmt.Errorf("getting source vCenter credentials: %w", err)
+	if err := runPreflightStep(log, "source vCenter connectivity", func() error {
+		sm := openshift.NewSecretManager(r.KubeClient)
+		srcUser, srcPass, err := sm.GetCredentials(ctx, sourceVC.Server)
+		if err != nil {
+			return fmt.Errorf("getting source vCenter credentials: %w", err)
+		}
+		if len(sourceVC.Datacenters) == 0 {
+			return fmt.Errorf("source vCenter has no datacenters configured")
+		}
+		if len(sourceVC.Datacenters) > 1 {
+			return fmt.Errorf("source vCenter must have exactly one datacenter configured, found %d", len(sourceVC.Datacenters))
+		}
+		srcSession, err := getVSphereSession(vsphereCtx, sourceVC.Server, sourceVC.Datacenters[0], srcUser, srcPass)
+		if err != nil {
+			return fmt.Errorf("connecting to source vCenter %s: %w", sourceVC.Server, err)
+		}
+		if _, err := srcSession.Finder.Datacenter(vsphereCtx, sourceVC.Datacenters[0]); err != nil {
+			return fmt.Errorf("source datacenter %q not accessible: %w", sourceVC.Datacenters[0], err)
+		}
+		return nil
+	}, "server", sourceVC.Server, "datacenters", sourceVC.Datacenters); err != nil {
+		return err
 	}
-
-	if len(sourceVC.Datacenters) == 0 {
-		return fmt.Errorf("source vCenter has no datacenters configured")
-	}
-	if len(sourceVC.Datacenters) > 1 {
-		return fmt.Errorf("source vCenter must have exactly one datacenter configured, found %d", len(sourceVC.Datacenters))
-	}
-	srcDC := sourceVC.Datacenters[0]
-	srcSession, err := getVSphereSession(vsphereCtx, sourceVC.Server, srcDC, srcUser, srcPass)
-	if err != nil {
-		return fmt.Errorf("connecting to source vCenter %s: %w", sourceVC.Server, err)
-	}
-	if _, err := srcSession.Finder.Datacenter(vsphereCtx, srcDC); err != nil {
-		return fmt.Errorf("source datacenter %q not accessible: %w", srcDC, err)
-	}
-	log.V(1).Info("source vCenter connectivity validated", "server", sourceVC.Server)
 
 	targetCredentialsByServer := make(map[string]credentials, len(migration.Spec.FailureDomains))
 
@@ -244,20 +282,20 @@ func (r *VmwareCloudFoundationMigrationReconciler) validatePreflightVSphere(ctx 
 		fd := &migration.Spec.FailureDomains[i]
 		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, fmt.Sprintf("Validating target failure domain %q", fd.Name))
 
-		creds, ok := targetCredentialsByServer[fd.Server]
-		if !ok {
-			username, password, err := getTargetCredentials(ctx, r.KubeClient, migration, fd.Server)
-			if err != nil {
-				return fmt.Errorf("getting credentials for target %s: %w", fd.Server, err)
+		if err := runPreflightStep(log, "target failure domain topology", func() error {
+			creds, ok := targetCredentialsByServer[fd.Server]
+			if !ok {
+				username, password, err := getTargetCredentials(ctx, r.KubeClient, migration, fd.Server)
+				if err != nil {
+					return fmt.Errorf("getting credentials for target %s: %w", fd.Server, err)
+				}
+				creds = credentials{username: username, password: password}
+				targetCredentialsByServer[fd.Server] = creds
 			}
-			creds = credentials{username: username, password: password}
-			targetCredentialsByServer[fd.Server] = creds
-		}
-
-		if err := validateFailureDomain(vsphereCtx, fd, creds); err != nil {
+			return validateFailureDomain(vsphereCtx, fd, creds)
+		}, "failureDomain", fd.Name, "server", fd.Server); err != nil {
 			return err
 		}
-		log.V(1).Info("target failure domain validated", "name", fd.Name, "server", fd.Server)
 	}
 
 	return nil
