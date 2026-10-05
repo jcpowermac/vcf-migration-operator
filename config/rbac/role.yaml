@@ -147,8 +147,11 @@ rules:
   verbs:
   - create
   - delete
+  - get
+  - list
   - patch
   - update
+  - watch
 - apiGroups:
   - operator.openshift.io
   resources:
