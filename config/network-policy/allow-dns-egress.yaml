@@ -1,0 +1,26 @@
+# The operator resolves vCenter hostnames and other configured endpoints.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: vcf-migration-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: allow-dns-egress
+  namespace: system
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: vcf-migration-operator
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-dns
+      ports:
+        - protocol: TCP
+          port: 5353
+        - protocol: UDP
+          port: 5353
+  policyTypes:
+    - Egress
