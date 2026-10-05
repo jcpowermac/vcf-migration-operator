@@ -67,6 +67,10 @@ type VmwareCloudFoundationMigrationReconciler struct {
 	DynamicClient       dynamic.Interface
 	Recorder            events.EventRecorder
 
+	// checkNetworkingViaProbeVMsFunc overrides the probe-VM networking check in
+	// tests; nil selects the real implementation.
+	checkNetworkingViaProbeVMsFunc func(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, sourceVC *configv1.VSpherePlatformVCenterSpec) error
+
 	// lastStallEventKey identifies the set of old worker machines described by the
 	// most recent OldWorkersStalled Warning event; lastStallEventTime is when that
 	// event was recorded. Together they debounce the event to at most one per
