@@ -43,7 +43,7 @@ metadata:
         }
       ]
     capabilities: Basic Install
-    createdAt: "2026-10-02T20:16:58Z"
+    createdAt: "2026-10-05T12:09:17Z"
     features.operators.openshift.io/disconnected: "true"
     features.operators.openshift.io/fips-compliant: "false"
     features.operators.openshift.io/proxy-aware: "false"
@@ -268,6 +268,7 @@ spec:
                 - --metrics-bind-address=:8443
                 - --leader-elect
                 - --health-probe-bind-address=:8081
+                - --zap-log-level=1
                 command:
                 - /manager
                 image: registry.ci.openshift.org/origin/vcf-migration-operator:latest
