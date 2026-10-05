@@ -1,0 +1,21 @@
+# vCenter and user-provided OVA URLs are configured at runtime. NetworkPolicy
+# cannot select DNS names, so permit HTTPS without restricting the destination.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: vcf-migration-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: allow-https-egress
+  namespace: system
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: vcf-migration-operator
+  egress:
+    - ports:
+        - protocol: TCP
+          port: 443
+  policyTypes:
+    - Egress

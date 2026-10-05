@@ -1,0 +1,16 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: vcf-migration-operator
+  name: vcf-migration-operator-allow-api-server-egress
+spec:
+  egress:
+  - {}
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: vcf-migration-operator
+      control-plane: controller-manager
+  policyTypes:
+  - Egress
