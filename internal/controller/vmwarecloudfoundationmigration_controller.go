@@ -144,6 +144,7 @@ const (
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=config.openshift.io,resources=infrastructures;clusteroperators,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=config.openshift.io,resources=clusterversions,verbs=get;list;watch
@@ -155,7 +156,6 @@ const (
 // +kubebuilder:rbac:groups=autoscaling.openshift.io,resources=clusterautoscalers;machineautoscalers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=operator.openshift.io,resources=clustercsidrivers;storages,verbs=get
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=create;delete;update;patch
 
 // serverDC identifies a vCenter server and datacenter pair, the unit at which
 // VM folders are created on the target.
