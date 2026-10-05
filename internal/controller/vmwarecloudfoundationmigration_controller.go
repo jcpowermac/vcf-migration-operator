@@ -281,6 +281,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 		log.V(1).Info("processing condition", "condition", condType)
 		result, err := handler(ctx, migration)
 		if err != nil {
+			log.Error(err, "condition processing failed", "condition", condType)
 			r.setCondition(migration, condType, metav1.ConditionFalse, reasonForError(err), err.Error())
 			r.Recorder.Eventf(migration, nil, "Warning", "ConditionFailed", "ConditionFailed", "Condition %s failed: %v", condType, err)
 		}

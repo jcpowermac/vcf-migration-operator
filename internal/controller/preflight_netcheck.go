@@ -9,6 +9,7 @@ import (
 	"time"
 
 	configv1 "github.com/openshift/api/config/v1"
+	"github.com/vmware/govmomi/object"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 
@@ -76,31 +77,52 @@ func formatNetworks(nets []vsphere.NetworkInfo) string {
 // networks observed on the source node VMs. Any mismatch is a hard,
 // non-transient preflight failure.
 func (r *VmwareCloudFoundationMigrationReconciler) checkNetworkingViaProbeVMs(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, sourceVC *configv1.VSpherePlatformVCenterSpec) error {
-	log := klog.FromContext(ctx)
+	log := klog.FromContext(ctx).V(1)
 	condType := migrationv1alpha1.ConditionInfrastructurePrepared
 
 	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient)
-	infraID, err := infraMgr.GetInfrastructureID(ctx)
-	if err != nil {
-		return fmt.Errorf("getting infrastructure ID: %w", err)
-	}
-
-	sm := openshift.NewSecretManager(r.KubeClient)
-	sourceUser, sourcePass, err := sm.GetCredentials(ctx, sourceVC.Server)
-	if err != nil {
-		return fmt.Errorf("getting source vCenter credentials for %s: %w", sourceVC.Server, err)
-	}
-	sourceSession, err := getVSphereSession(ctx, sourceVC.Server, sourceVC.Datacenters[0], sourceUser, sourcePass)
-	if err != nil {
-		return fmt.Errorf("connecting to source vCenter %s: %w", sourceVC.Server, err)
-	}
-
-	sources, err := r.collectSourceNetworks(ctx, sourceSession)
-	if err != nil {
+	var infraID string
+	if err := runPreflightStep(log, "get infrastructure ID", func() error {
+		var err error
+		infraID, err = infraMgr.GetInfrastructureID(ctx)
+		if err != nil {
+			return fmt.Errorf("getting infrastructure ID: %w", err)
+		}
+		return nil
+	}); err != nil {
 		return err
 	}
-	if len(sources) == 0 {
-		return fmt.Errorf("no source node networks could be read from the source vCenter %s; open-vm-tools must be running on source nodes and node names must match VM names", sourceVC.Server)
+
+	var sourceSession *vsphere.Session
+	if err := runPreflightStep(log, "source vCenter network session", func() error {
+		sm := openshift.NewSecretManager(r.KubeClient)
+		sourceUser, sourcePass, err := sm.GetCredentials(ctx, sourceVC.Server)
+		if err != nil {
+			return fmt.Errorf("getting source vCenter credentials for %s: %w", sourceVC.Server, err)
+		}
+		sourceSession, err = getVSphereSession(ctx, sourceVC.Server, sourceVC.Datacenters[0], sourceUser, sourcePass)
+		if err != nil {
+			return fmt.Errorf("connecting to source vCenter %s: %w", sourceVC.Server, err)
+		}
+		return nil
+	}, "server", sourceVC.Server, "datacenter", sourceVC.Datacenters[0]); err != nil {
+		return err
+	}
+
+	var sources []vsphere.NetworkInfo
+	if err := runPreflightStep(log, "collect source node networks", func() error {
+		var err error
+		sources, err = r.collectSourceNetworks(ctx, sourceSession)
+		if err != nil {
+			return err
+		}
+		if len(sources) == 0 {
+			return fmt.Errorf("no source node networks could be read from the source vCenter %s; open-vm-tools must be running on source nodes and node names must match VM names", sourceVC.Server)
+		}
+		log.Info("source node networks collected", "server", sourceVC.Server, "networkCount", len(sources), "networks", formatNetworks(sources))
+		return nil
+	}, "server", sourceVC.Server); err != nil {
+		return err
 	}
 
 	probePrefix := probeNamePrefix + infraID + "-"
@@ -110,26 +132,40 @@ func (r *VmwareCloudFoundationMigrationReconciler) checkNetworkingViaProbeVMs(ct
 		fd := &migration.Spec.FailureDomains[i]
 		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, fmt.Sprintf("Checking networking for failure domain %q", fd.Name))
 
-		creds, ok := targetCreds[fd.Server]
-		if !ok {
-			username, password, err := getTargetCredentials(ctx, r.KubeClient, migration, fd.Server)
-			if err != nil {
-				return fmt.Errorf("getting credentials for target %s: %w", fd.Server, err)
+		var session *vsphere.Session
+		if err := runPreflightStep(log, "target vCenter probe session", func() error {
+			creds, ok := targetCreds[fd.Server]
+			if !ok {
+				username, password, err := getTargetCredentials(ctx, r.KubeClient, migration, fd.Server)
+				if err != nil {
+					return fmt.Errorf("getting credentials for target %s: %w", fd.Server, err)
+				}
+				creds = credentials{username: username, password: password}
+				targetCreds[fd.Server] = creds
 			}
-			creds = credentials{username: username, password: password}
-			targetCreds[fd.Server] = creds
-		}
-		session, err := getVSphereSession(ctx, fd.Server, fd.Topology.Datacenter, creds.username, creds.password)
-		if err != nil {
-			return fmt.Errorf("connecting to target vCenter %s: %w", fd.Server, err)
+			var err error
+			session, err = getVSphereSession(ctx, fd.Server, fd.Topology.Datacenter, creds.username, creds.password)
+			if err != nil {
+				return fmt.Errorf("connecting to target vCenter %s: %w", fd.Server, err)
+			}
+			return nil
+		}, "failureDomain", fd.Name, "server", fd.Server); err != nil {
+			return err
 		}
 
-		destroyedNames, err := session.ReapProbeVMs(ctx, probePrefix)
-		if err != nil {
-			return fmt.Errorf("reaping stale probe VMs on %s: %w", fd.Server, err)
+		var destroyedNames []string
+		if err := runPreflightStep(log, "reap stale probe VMs", func() error {
+			var err error
+			destroyedNames, err = session.ReapProbeVMs(ctx, probePrefix)
+			if err != nil {
+				return fmt.Errorf("reaping stale probe VMs on %s: %w", fd.Server, err)
+			}
+			return nil
+		}, "failureDomain", fd.Name, "server", fd.Server, "namePrefix", probePrefix); err != nil {
+			return err
 		}
 		if len(destroyedNames) > 0 {
-			log.V(1).Info("reaped stale probe VMs", "server", fd.Server, "names", destroyedNames)
+			log.Info("reaped stale probe VMs", "server", fd.Server, "names", destroyedNames)
 		}
 
 		spec := vsphere.ProbeSpec{
@@ -142,11 +178,17 @@ func (r *VmwareCloudFoundationMigrationReconciler) checkNetworkingViaProbeVMs(ct
 			Template:     fd.Topology.Template,
 			Network:      fd.Topology.Networks[0],
 		}
-		vm, err := session.CreateProbeVM(ctx, spec)
-		if err != nil {
-			return fmt.Errorf("creating probe VM %s on failure domain %q: %w", spec.Name, fd.Name, err)
+		var vm *object.VirtualMachine
+		if err := runPreflightStep(log, "create probe VM", func() error {
+			var err error
+			vm, err = session.CreateProbeVM(ctx, spec)
+			if err != nil {
+				return fmt.Errorf("creating probe VM %s on failure domain %q: %w", spec.Name, fd.Name, err)
+			}
+			return nil
+		}, "failureDomain", fd.Name, "server", fd.Server, "name", spec.Name, "template", spec.Template, "network", spec.Network); err != nil {
+			return err
 		}
-		log.V(1).Info("created probe VM", "name", spec.Name, "server", fd.Server, "template", spec.Template, "network", spec.Network)
 		destroyProbe := func() error {
 			// Each attempt gets its own deadline, independent of both the probe
 			// phase and prior cleanup attempts.
@@ -157,19 +199,23 @@ func (r *VmwareCloudFoundationMigrationReconciler) checkNetworkingViaProbeVMs(ct
 		probeDestroyed := false
 		defer func() {
 			if !probeDestroyed {
-				if derr := destroyProbe(); derr != nil {
-					log.Error(derr, "destroying probe VM", "name", spec.Name)
-				} else {
-					log.V(1).Info("destroyed probe VM", "name", spec.Name, "server", fd.Server)
-				}
+				_ = runPreflightStep(log, "destroy probe VM", destroyProbe, "failureDomain", fd.Name, "server", fd.Server, "name", spec.Name, "deferred", true)
 			}
 		}()
 
-		probeNetworks, err := vsphere.WaitForGuestNetworks(ctx, vm)
-		if err != nil {
-			return fmt.Errorf("waiting for guest networks on probe VM %s: %w", spec.Name, err)
+		var probeNetworks []vsphere.NetworkInfo
+		if err := runPreflightStep(log, "wait for probe guest networks", func() error {
+			var err error
+			probeNetworks, err = vsphere.WaitForGuestNetworks(ctx, vm)
+			if err != nil {
+				return fmt.Errorf("waiting for guest networks on probe VM %s: %w", spec.Name, err)
+			}
+			return nil
+		}, "failureDomain", fd.Name, "server", fd.Server, "name", spec.Name); err != nil {
+			return err
 		}
-		log.V(1).Info("probe VM guest networks", "name", spec.Name, "networks", formatNetworks(probeNetworks))
+		log.Info("probe VM guest networks", "name", spec.Name, "networks", formatNetworks(probeNetworks))
+
 		var bad []vsphere.NetworkInfo
 		for _, n := range probeNetworks {
 			if matched, _ := n.MatchesAny(sources); !matched {
@@ -177,15 +223,15 @@ func (r *VmwareCloudFoundationMigrationReconciler) checkNetworkingViaProbeVMs(ct
 			}
 		}
 		if len(bad) > 0 {
-			mismatches = append(mismatches, describeFDMismatch(fd.Name, bad, sources))
+			mismatch := describeFDMismatch(fd.Name, bad, sources)
+			mismatches = append(mismatches, mismatch)
+			log.Error(nil, "probe network does not match source node networks", "failureDomain", fd.Name, "detail", mismatch)
 		}
 
-		if err := destroyProbe(); err != nil {
+		if err := runPreflightStep(log, "destroy probe VM", destroyProbe, "failureDomain", fd.Name, "server", fd.Server, "name", spec.Name); err != nil {
 			return fmt.Errorf("destroying probe VM %s: %w", spec.Name, err)
 		}
 		probeDestroyed = true
-		log.V(1).Info("destroyed probe VM", "name", spec.Name, "server", fd.Server)
-		log.V(1).Info("networking check complete for failure domain", "name", fd.Name, "probeNetworks", len(probeNetworks), "mismatches", len(bad))
 	}
 
 	if len(mismatches) > 0 {
