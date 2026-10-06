@@ -80,6 +80,10 @@ func (r *VmwareCloudFoundationMigrationReconciler) checkNetworkingViaProbeVMs(ct
 	log := klog.FromContext(ctx).V(1)
 	condType := migrationv1alpha1.ConditionInfrastructurePrepared
 
+	if len(sourceVC.Datacenters) != 1 {
+		return fmt.Errorf("source vCenter %s has %d datacenters configured; exactly one is required for the networking preflight", sourceVC.Server, len(sourceVC.Datacenters))
+	}
+
 	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient)
 	var infraID string
 	if err := runPreflightStep(log, "get infrastructure ID", func() error {
@@ -243,9 +247,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) checkNetworkingViaProbeVMs(ct
 }
 
 // collectSourceNetworks reads the observed networks of every node VM on the
-// source vCenter. Per-node read failures are logged and skipped.
+// source vCenter. A read failure for any node is a hard error: silently
+// skipping a node could let a network mismatch go undetected.
 func (r *VmwareCloudFoundationMigrationReconciler) collectSourceNetworks(ctx context.Context, sourceSession *vsphere.Session) ([]vsphere.NetworkInfo, error) {
-	log := klog.FromContext(ctx)
 	nodes, err := r.KubeClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("listing nodes: %w", err)
@@ -255,8 +259,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) collectSourceNetworks(ctx con
 		nodeName := nodes.Items[i].Name
 		nets, err := sourceSession.GetVMNetworks(ctx, nodeName)
 		if err != nil {
-			log.V(1).Info("skipping node for source network check", "node", nodeName, "err", err)
-			continue
+			return nil, fmt.Errorf("reading networks for source node %s: %w", nodeName, err)
 		}
 		networks = append(networks, nets...)
 	}
