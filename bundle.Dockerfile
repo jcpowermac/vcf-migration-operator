@@ -23,7 +23,7 @@ COPY bundle/tests/scorecard /tests/scorecard/
 # Labels from hack/patch-bundle-dockerfile.sh
 LABEL com.redhat.component="VCF Migration Operator"
 LABEL distribution-scope="public"
-LABEL name="vcf-migration/vcf-migration-operator-bundle"
+LABEL name="vcf-migration-operator-tech-preview/vcf-migration-operator-bundle"
 LABEL release="0.1.0"
 LABEL version="0.1.0"
 LABEL cpe="cpe:/a:redhat:vcf_migration_operator:0.1::el9"
