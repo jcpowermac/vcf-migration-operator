@@ -188,18 +188,29 @@ from cluster state, so the walk is idempotent, restart-safe, and self-selecting 
 a migration that died at forward Step 2 (workers never ready, CPMS never
 re-pointed) finds R1/R2 already satisfied and moves straight to teardown.
 
-- **R0 — recreate source worker MachineSets** (only when forward steps 6–8 already
-  deleted them, i.e. `WorkloadMigrated=True` at failure): the mirror of forward
-  Step 1 with the roles swapped. List surviving target worker MachineSets
-  (`GetMachineSetsByVCenter` on the target server), take one as template, and
-  `CreateWorkerMachineSet` re-pointed at the source failure domains
-  (`updateMachineSetProviderSpec` accepts any FD spec). Replica splitting mirrors
-  the forward math. Recreated sets get operator-style names
-  (`workerMachineSetName`); the original installer names are gone with the deleted
-  MachineSets — harmless, the Machines carry the identity that matters. Wait for
-  machines and nodes Ready (`CheckMachinesReady`/`CheckNodesReady`) before
-  touching masters: capacity first, for the same reason forward Step 2 gates
-  Step 3.
+- **R0 — restore source worker capacity** (whenever the forward walk removed it,
+  regardless of `WorkloadMigrated` at failure — forward Step 6 scales the source
+  sets to 0 while the condition is still `Progressing`, so a stall there needs
+  R0 just as much as a failure after deletion did): two cases, both before R1
+  touches masters; a mid-deletion state hits both.
+  - *Surviving scaled-down source MachineSets* (Step 6 done, Step 8 not, or
+    Step 8 partially complete): list them (`GetMachineSetsByVCenter` on the
+    source server) and scale each back up (`ScaleMachineSet`) — recreate
+    nothing alongside them, that would duplicate the pool. The scale-to-0
+    overwrote the original per-set counts, so split the target worker pool's
+    total across the survivors as in the forward replica math.
+  - *Deleted source MachineSets* (Steps 6–8 completed): the mirror of forward
+    Step 1 with the roles swapped. List surviving target worker MachineSets
+    (`GetMachineSetsByVCenter` on the target server), take one as template, and
+    `CreateWorkerMachineSet` re-pointed at the source failure domains
+    (`updateMachineSetProviderSpec` accepts any FD spec). Replica splitting
+    mirrors the forward math. Recreated sets get operator-style names
+    (`workerMachineSetName`); the original installer names are gone with the
+    deleted MachineSets — harmless, the Machines carry the identity that
+    matters.
+  Either way, wait for machines and nodes Ready
+  (`CheckMachinesReady`/`CheckNodesReady`) before touching masters: capacity
+  first, for the same reason forward Step 2 gates Step 3.
 - **R1 — re-point CPMS to source**: `UpdateCPMSFailureDomain` with the source FD
   names — the failure domains in Infrastructure that reference the source server
   (the code assumes a single source FD; `GetSourceFailureDomain` returns index 0).
@@ -226,9 +237,10 @@ re-pointed) finds R1/R2 already satisfied and moves straight to teardown.
 - **R5 — completion**: `Ready=True`, reason `RolledBack`, event `MigrationRolledBack`.
 
 Ordering rationale: masters roll back while both worker pools exist (R0 restores
-source workers first when needed); target workers are deleted only after the
-control plane is back on source; platform config is stripped only after the
-workload is back. Each resource is undone only while it is the redundant copy.
+source worker capacity first whenever the forward walk removed it, scaled down
+or deleted); target workers are deleted only after the control plane is back on
+source; platform config is stripped only after the workload is back. Each
+resource is undone only while it is the redundant copy.
 
 ### Status model
 
@@ -268,6 +280,87 @@ it ships with detection rather than the bug:
 - A webhook should validate state transitions (reject `Rollback` when
   `SourceCleaned=True`); the entry guard above is the belt, the webhook the
   suspenders (gap 5).
+
+## Adversarial review (pi agent, 2026-10-06)
+
+Record of the adversarial review of this design. The first pass reviewed an
+earlier draft (heuristic triggers, "restore the source" semantics); the current
+draft reworked rollback into a user-driven `state: Rollback` walk that unwinds
+the *target*. Point-by-point status:
+
+### Resolved in the current draft
+
+- **Window ending at forward Step 8** (source MachineSets deleted, source
+  topology gone from operator data): addressed by the entry guard
+  (rejected with `RollbackUnsupported` when `SourceCleaned=True`) plus R0,
+  which recreates the source worker MachineSets. The earlier claim that
+  restore "needs no new vSphere logic" is gone.
+- **Rollback scope**: the current design correctly frames rollback as undoing
+  the *target* (R4), not restoring the source. Pre-`SourceCleaned` the source
+  is still fully configured, so the four-way source restore (Infrastructure,
+  cloud-provider-config, vsphere-creds, pod restart) is no longer needed.
+- **Self-trigger** (operator's own `ensureSourceCleaned` vCenter removal
+  satisfying a "source vCenter removed" heuristic): eliminated by moving from
+  heuristics to an explicit `spec.state: Rollback` request.
+- **Stale code references** (`internal/controller/conditions.go`,
+  `GetMachines(ctx, ms)` — neither exists): the current key-code references
+  match the repo.
+
+### Points still standing
+
+1. **R0 template fidelity.** R0 takes a surviving *target* worker MachineSet as
+   the template and re-points it at the source failure domain via
+   `updateMachineSetProviderSpec`. The recreated source machines therefore get
+   whatever topology the Infrastructure source FD carries (or the default
+   `/​<datacenter>/vm/<infraID>` folder) — not necessarily the original
+   installer provider spec (datastore, folder, network, zone settings). Source
+   workers may reappear in a different folder/datastore than before migration.
+   Decide: accept the drift, or snapshot `GetMachineSetsByVCenter(source)` into
+   a Secret before forward Step 6 scales the source sets to 0, and have R0
+   restore from the verbatim snapshot.
+2. **The `Reconcile` state gate short-circuits Rollback.** Today the early
+   return fires on *any* state that is not `Running` — so `state: Rollback`
+   would early-return too. The entry-guards text ("the existing early-return
+   precedes both walks") implies no change is needed; in fact the gate itself
+   must be modified (e.g. admit `Running` and `Rollback`, still freeze
+   `Paused`/`Pending`), and the precedence of `Paused` vs a pending rollback
+   request must be stated explicitly.
+3. **R2 can wedge on a stuck target machine, and the fix is manual even in
+   rollback mode.** Per this document's own caveat (b): if a target master's
+   node goes NotReady *after* its old source machine was already deleted, the
+   CPMS operator treats the replacement as "pending" and never recreates it —
+   neither forward nor backward. A backward roll (R2) can wedge exactly there.
+   Stall handling detects the wedge (`RollbackStalled`), but the document should
+   state the remedy for this state explicitly: a human deletes the stuck target
+   `Machine`; the operator never auto-deletes control-plane machines.
+4. **R5 declares `Ready=True/RolledBack` without the forward ready checks.**
+   `ensureReady` gates on operator stability, MachineConfigPool convergence, and
+   a stability window. Right after a backward CPMS roll, MCO pools may still be
+   converging. Either have R5 delegate to the same checks, or document why a
+   plain `Ready=True` is acceptable here.
+5. **"Cluster health acceptable" in the entry gates is undefined.** Give it a
+   concrete predicate (operators Available, MCO pools converged, no NotReady
+   nodes on source) or drop the clause.
+6. **Mid-walk abandonment is unexamined.** The status model covers
+   resume-after-completed-rollback (full re-migration, by design). It does not
+   cover a user flipping `state: Running` *between* R-steps: after R1/R2 the
+   cluster is mid-backward-roll with `WorkloadMigrated=False`; after R3 target
+   workers are gone but the target vCenter still configured; after R4 the
+   target is fully stripped. Verify the forward walk resumes idempotently from
+   each of these partial states — particularly after R4, where it must
+   re-add the target via the `MultiSiteConfigured=False` path with no target
+   objects left to inspect.
+
+### Minor
+
+- Do the `RemoveSourceVCenter*` → `...ByServer` renames in the same change as
+  the rollback wiring, so the names reflect behavior from day one.
+- The current draft has no test section (the earlier one was dropped). Add:
+  state-machine unit tests including the `RollbackUnsupported` guard; R0
+  recreation tests (simulated source-MS-deleted state); mid-walk-abandonment
+  tests for each partial state (point 6); an R2-wedge test where the stuck
+  target machine must be deleted manually (point 3); and an e2e of the full
+  backward walk.
 
 ## Open questions / caveats
 

@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rollback feasibility when the new MachineSet / CPMS fails on a single master</title>
+<meta name="description" content="Research document: rollback feasibility for the vcf-migration-operator when the target MachineSet or CPMS rollout fails.">
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --card: #ffffff;
+    --text: #1f2430;
+    --muted: #5b6472;
+    --line: #e2e5ea;
+    --accent: #2f54eb;
+    --accent-soft: #eef2fe;
+    --ok: #0e7a3d;      --ok-bg: #e7f6ec;
+    --warn: #9a6700;    --warn-bg: #fff3d6;
+    --bad: #b3261e;     --bad-bg: #fdeceb;
+    --info: #1c5fae;    --info-bg: #e8f1fb;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .page {
+    display: grid;
+    grid-template-columns: 250px minmax(0, 1fr);
+    gap: 44px;
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 36px 32px 64px;
+  }
+
+  /* ---------- Table of contents ---------- */
+  .toc {
+    position: sticky; top: 24px; align-self: start;
+    font-size: 13.5px; line-height: 1.4;
+  }
+  .toc-title {
+    font-weight: 700; text-transform: uppercase; letter-spacing: .08em;
+    font-size: 11.5px; color: var(--muted); margin-bottom: 10px;
+  }
+  .toc nav { display: flex; flex-direction: column; gap: 2px; }
+  .toc a {
+    color: var(--muted); text-decoration: none; padding: 5px 10px;
+    border-left: 2px solid transparent; border-radius: 0 6px 6px 0;
+  }
+  .toc a:hover { color: var(--accent); background: var(--accent-soft); }
+  .toc a.lvl2 { padding-left: 24px; font-size: 12.5px; }
+
+  /* ---------- Main column ---------- */
+  main { min-width: 0; }
+  header.doc { margin-bottom: 28px; }
+  h1 {
+    font-size: 30px; line-height: 1.25; margin: 0 0 14px;
+    letter-spacing: -0.01em;
+  }
+  .badges { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .badge {
+    display: inline-block; padding: 3px 10px; border-radius: 999px;
+    font-size: 12px; font-weight: 600; letter-spacing: .02em;
+  }
+  .badge.neutral { background: #e9ecef; color: #40474f; }
+  .badge.blue    { background: var(--info-bg); color: var(--info); }
+  .badge.green   { background: var(--ok-bg); color: var(--ok); }
+  .badge.amber   { background: var(--warn-bg); color: var(--warn); }
+  .badge.red     { background: var(--bad-bg); color: var(--bad); }
+
+  section { margin: 34px 0; }
+  h2 {
+    font-size: 21px; margin: 0 0 6px; padding-top: 10px; letter-spacing: -0.01em;
+    border-top: 1px solid var(--line);
+  }
+  h3 { font-size: 16.5px; margin: 26px 0 8px; color: #2a3140; }
+  p { margin: 10px 0; }
+  ul, ol { margin: 10px 0; padding-left: 26px; }
+  li { margin: 5px 0; }
+  li::marker { color: var(--muted); font-weight: 600; }
+  strong { font-weight: 650; }
+  em { font-style: italic; }
+  a { color: var(--accent); }
+
+  code {
+    font-family: var(--mono); font-size: 86%;
+    background: #eef0f3; border: 1px solid #e3e6eb; border-radius: 4px;
+    padding: 1px 5px; white-space: nowrap;
+  }
+  pre {
+    background: #21252b; color: #d7dde6; border-radius: 10px;
+    padding: 14px 18px; overflow-x: auto; font-size: 13.5px; line-height: 1.55;
+    font-family: var(--mono);
+  }
+  pre code { background: none; border: none; padding: 0; color: inherit; white-space: pre; }
+
+  /* ---------- Callouts ---------- */
+  .callout {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px 20px; margin: 16px 0;
+  }
+  .callout .co-label {
+    display: block; font-size: 11.5px; font-weight: 700; letter-spacing: .08em;
+    text-transform: uppercase; margin-bottom: 4px;
+  }
+  .callout.question { border-left: 4px solid var(--accent); }
+  .callout.question .co-label { color: var(--accent); }
+  .callout.note { border-left: 4px solid #8892a4; background: #fbfcfd; }
+  .callout.note .co-label { color: #66707e; }
+  .callout.answer {
+    border-left: 4px solid var(--ok); background: linear-gradient(0deg, #fff, #f4faf6);
+  }
+  .callout.answer .co-label { color: var(--ok); }
+  .callout.caveat { border-left: 4px solid var(--warn); }
+  .callout.caveat .co-label { color: var(--warn); }
+
+  /* ---------- Condition flow ---------- */
+  .flow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 14px 0; }
+  .flow .chip {
+    background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+    padding: 5px 12px; font-family: var(--mono); font-size: 13px; font-weight: 600;
+    box-shadow: 0 1px 2px rgba(20, 30, 50, .05);
+  }
+  .flow .chip.hl { border-color: #b9c6f5; background: var(--accent-soft); color: var(--accent); }
+  .flow .arrow { color: #98a1ad; font-weight: 700; }
+
+  /* ---------- Cards ---------- */
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 18px 22px; margin: 14px 0;
+  }
+  .state-card { border-left: 4px solid var(--info); }
+  .state-card ul { margin: 8px 0 4px; }
+
+  /* ---------- Reversibility table ---------- */
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14.5px; }
+  th, td { text-align: left; vertical-align: top; padding: 10px 12px; border: 1px solid var(--line); }
+  thead th {
+    background: #eceff3; font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+    color: #40474f;
+  }
+  tbody tr:nth-child(even) { background: #fafbfc; }
+  .verdict { display: inline-block; font-size: 12px; font-weight: 700; padding: 2px 9px; border-radius: 999px; white-space: nowrap; }
+  .verdict.yes    { background: var(--ok-bg); color: var(--ok); }
+  .verdict.no     { background: var(--bad-bg); color: var(--bad); }
+  .verdict.partial{ background: var(--warn-bg); color: var(--warn); }
+
+  /* ---------- Recovery options ---------- */
+  .option-card { border-left: 4px solid var(--accent); }
+  .option-card.recommended { border-left-color: var(--ok); }
+  .option-card.manual { border-left-color: var(--warn); }
+  .option-card.risky { border-left-color: var(--bad); }
+  .option-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+  .option-letter {
+    width: 28px; height: 28px; border-radius: 50%; flex: 0 0 auto;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--accent); color: #fff; font-weight: 700; font-size: 14px;
+  }
+  .option-card.recommended .option-letter { background: var(--ok); }
+  .option-card.manual .option-letter { background: var(--warn); }
+  .option-card.risky .option-letter { background: var(--bad); }
+  .option-title { font-weight: 700; font-size: 15.5px; }
+
+  /* ---------- Rollback walk (R0..R5) ---------- */
+  .step-card { border-left: 4px solid var(--accent); }
+  .step-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .step-num {
+    font-family: var(--mono); font-weight: 700; color: var(--accent);
+    background: var(--accent-soft); border-radius: 6px; padding: 1px 8px; font-size: 13px;
+  }
+  .step-title { font-weight: 700; }
+  .case-card {
+    background: #f8f9fb; border: 1px dashed #d4d9e0; border-radius: 10px;
+    padding: 12px 16px; margin: 10px 0;
+  }
+  .case-card .case-label { font-weight: 700; font-size: 13.5px; color: #39414e; }
+  .rationale {
+    background: var(--info-bg); border: 1px solid #cfe0f3; border-radius: 10px;
+    padding: 12px 18px; font-size: 14.5px; margin: 16px 0;
+  }
+  .rationale .co-label { color: var(--info); }
+
+  /* ---------- Adversarial review ---------- */
+  .adv-item { border-left: 4px solid var(--line); }
+  .adv-item.resolved { border-left-color: var(--ok); }
+  .adv-item.standing { border-left-color: var(--warn); }
+  .adv-item .adv-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; font-weight: 650; }
+  .adv-item .num {
+    font-family: var(--mono); font-size: 12.5px; color: #fff; border-radius: 6px; padding: 1px 7px;
+  }
+  .adv-item.resolved .num { background: var(--ok); }
+  .adv-item.standing .num { background: var(--warn); }
+  .adv-item.minor-item { border-left-color: #98a1ad; }
+
+  /* ---------- Key code references ---------- */
+  .refs .file { margin: 14px 0; }
+  .refs .path {
+    font-family: var(--mono); font-size: 13px; font-weight: 600;
+    background: #21252b; color: #9ecbff; border-radius: 6px; padding: 4px 10px;
+    display: inline-block; margin-bottom: 6px;
+  }
+  .refs ul { margin: 4px 0; }
+
+  footer.doc {
+    margin-top: 44px; padding-top: 16px; border-top: 1px solid var(--line);
+    color: var(--muted); font-size: 13px;
+  }
+
+  /* ---------- Responsive ---------- */
+  @media (max-width: 960px) {
+    .page { grid-template-columns: 1fr; gap: 8px; padding: 20px 16px 48px; }
+    .toc { position: static; order: 2; margin-top: 24px; }
+    .toc nav { flex-direction: row; flex-wrap: wrap; gap: 6px; }
+    .toc a { border: 1px solid var(--line); border-radius: 999px; background: var(--card); }
+    .toc a.lvl2 { padding-left: 10px; }
+    h1 { font-size: 24px; }
+  }
+  @media print {
+    body { background: #fff; }
+    .toc { display: none; }
+    .page { display: block; max-width: none; padding: 0; }
+    .card, .callout, .step-card, .adv-item { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <aside class="toc">
+    <div class="toc-title">Contents</div>
+    <nav>
+      <a href="#question">Question</a>
+      <a href="#answer">Answer</a>
+      <a href="#failure">Where the failure lands</a>
+      <a href="#failure-state">Single-master failure state</a>
+      <a href="#reversible">What is reversible</a>
+      <a href="#recovery">Recovery options</a>
+      <a href="#gaps">Gaps for operator-native rollback</a>
+      <a href="#design">Proposed design</a>
+      <a href="#entry-guards" class="lvl2">Entry guards</a>
+      <a href="#rollback-walk" class="lvl2">Rollback walk (R0–R5)</a>
+      <a href="#status-model" class="lvl2">Status model</a>
+      <a href="#stall-handling" class="lvl2">Stall handling</a>
+      <a href="#scope" class="lvl2">Scope boundaries</a>
+      <a href="#adversarial">Adversarial review</a>
+      <a href="#resolved" class="lvl2">Resolved in current draft</a>
+      <a href="#standing" class="lvl2">Points still standing</a>
+      <a href="#minor" class="lvl2">Minor</a>
+      <a href="#open-questions">Open questions / caveats</a>
+      <a href="#code-refs">Key code references</a>
+    </nav>
+  </aside>
+
+  <main>
+    <header class="doc">
+      <h1>Rollback feasibility when the new MachineSet&nbsp;/ CPMS fails on a single master</h1>
+      <div class="badges">
+        <span class="badge neutral">Research only — no implementation</span>
+        <span class="badge blue">Open for review</span>
+        <span class="badge neutral">No code changes proposed</span>
+      </div>
+    </header>
+
+    <!-- ============ Question ============ -->
+    <section id="question">
+      <div class="callout question">
+        <span class="co-label">Question</span>
+        <p style="margin:4px 0">If the target (new) MachineSet or the ControlPlaneMachineSet (CPMS) rollout fails
+        on a single master, can the migration be rolled back, and how?</p>
+      </div>
+      <div class="callout note">
+        <span class="co-label">Terminology note</span>
+        <p style="margin:4px 0">There are no single-master clusters; “single master” means one master in an
+        N-master (3/5) control plane. “CPMS” in this repo = ControlPlaneMachineSet
+        (<code>machine.openshift.io/v1</code>, <code>cluster</code> in <code>openshift-machine-api</code>).
+        Worker Machines and MachineSets are <code>machine.openshift.io/v1beta1</code> — the CPMS embeds a
+        v1beta1 machine template, which is easy to conflate with the CPMS's own version.</p>
+      </div>
+    </section>
+
+    <!-- ============ Answer ============ -->
+    <section id="answer">
+      <h2>Answer</h2>
+      <div class="callout answer">
+        <span class="co-label">Yes — within limits</span>
+        <p>Rollback is feasible — but only while the migration is still in the <code>WorkloadMigrated</code>
+        phase, and today it is a <strong>manual process, not an operator feature</strong>.
+        <code>SourceCleaned</code> (source vCenter removed from cluster config) ends the pre-cleanup,
+        operator-supported rollback path. Recovery afterwards is manual, high-risk, and unsupported
+        (Section C) — not a true point of no return, but the end of anything the operator can help with.
+        A sketch of an operator-native <code>Rollback</code> state — what it would take to make rollback an
+        operator feature — follows the gaps list.</p>
+      </div>
+    </section>
+
+    <!-- ============ Where the failure lands ============ -->
+    <section id="failure">
+      <h2>Where the failure lands</h2>
+      <p>Condition flow (<code>vmwarecloudfoundationmigration_controller.go</code>):</p>
+      <div class="flow" role="img" aria-label="Condition flow: InfrastructurePrepared to DestinationInitialized to MultiSiteConfigured to WorkloadMigrated to SourceCleaned to Ready">
+        <span class="chip">InfrastructurePrepared</span><span class="arrow">→</span>
+        <span class="chip">DestinationInitialized</span><span class="arrow">→</span>
+        <span class="chip">MultiSiteConfigured</span><span class="arrow">→</span>
+        <span class="chip hl">WorkloadMigrated</span><span class="arrow">→</span>
+        <span class="chip">SourceCleaned</span><span class="arrow">→</span>
+        <span class="chip">Ready</span>
+      </div>
+      <p>Within <code>ensureWorkloadMigrated</code> / <code>ensureWorkloadMigratedRolloutAndScaleDown</code>:</p>
+      <ol>
+        <li>Target worker MachineSets created (<code>CreateWorkerMachineSet</code>), workers awaited.</li>
+        <li>CPMS spec re-pointed to target failure domains, state set to Active
+            (<code>UpdateCPMSFailureDomain</code>, <code>internal/openshift/machines.go:235</code>).
+            In-place update — the CPMS operator resolves topology (vCenter, datacenter, datastore, …)
+            from the Infrastructure resource.</li>
+        <li>Rollout awaited (<code>CheckControlPlaneRolloutStatus</code>, <code>machines.go:281</code>):
+            complete only when <code>replicas &gt; 0 &amp;&amp; updatedReplicas == replicas &amp;&amp;
+            readyReplicas == replicas</code>.</li>
+        <li>Source worker MachineSets scaled to 0, machines/nodes awaited deleted, empty source
+            MachineSets deleted (steps 6–8).</li>
+      </ol>
+      <p>A failure of the target worker MachineSets themselves (steps 1–2) is the <strong>easy case</strong>:
+      it stalls the migration before anything control-plane-related has changed. Resume by fixing the root
+      cause and deleting the stuck <code>Machine</code> (the MachineSet controller recreates it to meet
+      replica count), or roll back by deleting the target worker MachineSets — nothing else has been changed
+      at that point. Neither is analyzed further here; the rest of this document is about the CPMS rollout
+      failure, which is the case where rollback becomes an actual question.</p>
+
+      <div id="failure-state" class="card state-card">
+        <h3 style="margin-top:0">Single-master failure state</h3>
+        <p>The CPMS operator uses quorum-safe rolling replacement: create replacement machine, wait for its
+        node Ready, then delete the old machine. <code>UpdateCPMSFailureDomain</code> enforces only the
+        <code>RollingUpdate</code> strategy type (<code>machines.go:254</code> — other strategies would never
+        roll the control plane); the replacement ordering, the node-Ready gate, and the old-machine deletion
+        all come from the CPMS operator's implementation, not from this operator (evidence and version
+        caveats in <a href="#open-questions">Open questions / caveats</a>).</p>
+        <p><strong>Consequence:</strong> if one new master fails to become Ready, the old source master for
+        that machine is <strong>not</strong> deleted. If the failure hits the k-th of the N replacements,
+        the resulting cluster state is:</p>
+        <ul>
+          <li>(k−1) masters on target failure domains (completed replacements)</li>
+          <li>(N−k+1) old masters still on source, including the stuck replacement's old machine</li>
+          <li>1 stuck new machine on target (provisioning failed / node NotReady / CPMS rollout stuck)</li>
+          <li>etcd quorum intact</li>
+        </ul>
+        <p style="margin-bottom:4px"><em>Worst case:</em> a failure on the final replacement (k=N) leaves
+        N−1 masters on target and 1 old master on source.</p>
+      </div>
+
+      <p><strong>Operator behavior on a stuck rollout:</strong> <code>CheckControlPlaneRolloutStatus</code>
+      returns incomplete → <code>RequeueAfter(30s)</code> forever with condition
+      <code>WorkloadMigrated=Progressing, "Control plane rolling out (updated/replicas, ready/replicas)"</code>.
+      No timeout, no failure reason, no auto-rollback. (The only stall detection in the operator is for
+      old-worker deletion: <code>oldWorkerStallDetail</code> Warning events, rate-limited.)</p>
+    </section>
+
+    <!-- ============ Reversibility ============ -->
+    <section id="reversible">
+      <h2>What is reversible at the failure moment</h2>
+      <table>
+        <thead>
+          <tr><th scope="col" style="width:42%">Change made by migration</th><th scope="col">Reversible?</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Target vCenter added to Infrastructure spec, cloud-provider-config, vsphere-creds
+                (<code>ensureMultiSiteConfigured</code>)</td>
+            <td><span class="verdict yes">Yes</span> — additive. Source failure domains (index 0,
+                <code>GetSourceFailureDomain</code>) remain present, so CPMS can still resolve source topology.</td>
+          </tr>
+          <tr>
+            <td>Target worker MachineSets + machines + VMs in target vCenter</td>
+            <td><span class="verdict yes">Yes</span> — scale to 0, delete; machine deletion removes VMs.
+                Source worker MachineSets untouched until steps 6–8.</td>
+          </tr>
+          <tr>
+            <td>CPMS spec re-pointed to target FDs</td>
+            <td><span class="verdict yes">Yes</span> — spec-only change; can be re-pointed back to source FD names.</td>
+          </tr>
+          <tr>
+            <td>Already-replaced masters (old source machines deleted by CPMS operator)</td>
+            <td><span class="verdict yes">Yes</span> — old VMs gone, but source vCenter is still fully
+                configured → new source masters provision fine.</td>
+          </tr>
+          <tr>
+            <td>After steps 6–8 (source workers scaled down + source MachineSets deleted)</td>
+            <td><span class="verdict partial">Window closes</span> — source worker MachineSets must be
+                recreated manually (source vCenter still configured until <code>SourceCleaned</code>).
+                The proposed R0 step closes this gap operator-side.</td>
+          </tr>
+          <tr>
+            <td>After <code>SourceCleaned</code> (<code>RemoveSourceVCenter</code> + config + creds removal)</td>
+            <td><span class="verdict no">Not via supported path</span> — source vCenter and its failure domains
+                are removed from Infrastructure/cloud-provider-config/creds, so CPMS can no longer resolve
+                source FD topology. End of the pre-cleanup rollback window; manual restoration (Section C)
+                remains possible but is unsupported and high-risk.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ============ Recovery options ============ -->
+    <section id="recovery">
+      <h2>Recovery options</h2>
+
+      <div class="card option-card recommended">
+        <div class="option-head">
+          <span class="option-letter">A</span>
+          <span class="option-title">Resume <em>(recommended; works today)</em></span>
+          <span class="badge green">recommended</span>
+        </div>
+        <p>Fix the target vCenter root cause (template, storage, network, resource pool, quota), then delete
+        the stuck <code>Machine</code>. The CPMS operator recreates it to meet replica count. The operator is
+        idempotent — it re-derives phase progress from cluster state every reconcile
+        (<code>IsCPMSUpdatedForFailureDomains</code>, <code>CheckControlPlaneRolloutStatus</code>) and
+        continues. No CR change, no rollback. This is the designed path for transient target-side failures.</p>
+      </div>
+
+      <div class="card option-card manual">
+        <div class="option-head">
+          <span class="option-letter">B</span>
+          <span class="option-title">True rollback to source <em>(manual; feasible before <code>SourceCleaned</code>)</em></span>
+          <span class="badge amber">manual</span>
+        </div>
+        <ol>
+          <li>Set <code>spec.state: Paused</code> <strong>first</strong>. While <code>Running</code>, step 3
+              (<code>UpdateCPMSFailureDomain</code>) re-applies target FDs to the CPMS on any reconcile where
+              <code>IsCPMSUpdatedForFailureDomains</code> no longer matches, so a manual re-point would be
+              reverted. <code>Paused</code> makes the reconciler early-return. <em>(Note: pausing the migration
+              operator does NOT pause the CPMS rollout itself — the CPMS operator keeps working.)</em></li>
+          <li>Re-point CPMS <code>spec.template...failureDomains.vSphere</code> back to the source FD names
+              (state stays <code>Active</code>). CPMS operator rolls the target masters back to source,
+              quorum-safe, one at a time.</li>
+          <li>Scale down + delete target worker MachineSets (or leave them for forensics). Source worker
+              MachineSets are still at full replicas.</li>
+          <li>Optionally strip the target vCenter from Infrastructure spec, cloud-provider-config, and
+              vsphere-creds. No target-removal code path exists — manual today (the source-removal methods are
+              server-parameterized and could be reused for the target server, but nothing wires them for it).</li>
+          <li>Delete the migration CR (or leave it Paused).</li>
+        </ol>
+        <p><strong>Caveats:</strong></p>
+        <ul>
+          <li>Slow: a full second control-plane roll (one master replacement at a time).</li>
+          <li>If the failure cause also breaks source-side provisioning, the rollback stalls the same way —
+              but never worse than forward, because old machines persist until their replacements are Ready
+              (caveat: an old machine whose own node has gone NotReady may be deleted to make room for a
+              further replacement — see <a href="#open-questions">open questions</a>).</li>
+          <li>Edge case: if the failed machine's node was briefly Ready (so the old source machine was
+              deleted) and then became unhealthy, the master is missing from source; quorum still holds
+              (2/3 or 4/5). CPMS re-pointing to source still replaces it.</li>
+        </ul>
+      </div>
+
+      <div class="card option-card risky">
+        <div class="option-head">
+          <span class="option-letter">C</span>
+          <span class="option-title">After <code>SourceCleaned</code> <em>(manual only, unsupported)</em></span>
+          <span class="badge red">high risk</span>
+        </div>
+        <p>Restore the source vCenter entries <strong>and</strong> the original source failure-domain entries
+        in the Infrastructure spec (both are removed by <code>RemoveSourceVCenter</code>), re-add the source
+        vCenter entry to cloud-provider-config and the source credentials to vsphere-creds, restart MCO/vSphere
+        pods, then re-point CPMS to the source FD names and recreate source worker MachineSets. High-risk
+        manual surgery; not an operator feature.</p>
+      </div>
+    </section>
+
+    <!-- ============ Gaps ============ -->
+    <section id="gaps">
+      <h2>Gaps if an operator-native rollback is ever wanted</h2>
+      <ol>
+        <li>No failure/timeout detection for a stalled CPMS rollout — infinite <code>Progressing</code>.</li>
+        <li>No rollback state in the CRD (only <code>Pending</code>/<code>Running</code>/<code>Paused</code>);
+            the condition walk is forward-only and conditions are never un-set.</li>
+        <li>No rollback wiring for removing the target vCenter. The remove methods that exist
+            (<code>RemoveSourceVCenter</code>, <code>RemoveSourceVCenterCreds</code>,
+            <code>RemoveSourceVCenterFromConfig</code>) are parameterized by server and would mechanically
+            work for the target — the gap is orchestration, not primitives.</li>
+        <li>No rollback handler; <code>Paused</code> is the only freeze point (pause/resume already covered
+            by the QA test plan).</li>
+        <li>No webhooks guard the spec — helps manual rollback, but nothing prevents deleting a
+            mid-migration CR.</li>
+      </ol>
+    </section>
+
+    <!-- ============ Proposed design ============ -->
+    <section id="design">
+      <h2>Proposed design: operator-native <code>Rollback</code> state</h2>
+      <div class="badges" style="margin-bottom:10px">
+        <span class="badge amber">Research-level proposal — nothing below is implemented</span>
+      </div>
+      <p>It adds a <code>Rollback</code> value to <code>MigrationState</code>
+      (<code>Pending</code>/<code>Running</code>/<code>Paused</code> today) so that
+      <code>spec.state: Rollback</code> means “walk the migration backward”. Every step reuses manager
+      primitives that already exist; the new work is orchestration, status handling, and guards. It closes
+      gaps 2–4 fully, gap 5 partially (webhook), and gap 1 for the backward walk only.</p>
+
+      <h3 id="entry-guards">Entry guards</h3>
+      <ul>
+        <li>Admitted only while <code>SourceCleaned=False</code> — the pre-cleanup window defined by the
+            reversibility table. With <code>SourceCleaned=True</code> the reconciler sets
+            <code>Ready=False</code>/reason <code>RollbackUnsupported</code>, emits a Warning event, and
+            no-ops; post-cleanup recovery stays the manual Section C path.</li>
+        <li>Pre-rollback gate before any mutation: source vCenter and failure domains still resolvable in
+            Infrastructure, source credentials still in vsphere-creds (both hold by definition
+            pre-<code>SourceCleaned</code>), CPMS strategy still <code>RollingUpdate</code>, cluster health
+            acceptable. A failed gate blocks with a condition instead of a partial rewind.</li>
+        <li>While <code>state=Rollback</code> the reconciler takes the rollback walk instead of the forward
+            condition walk, so nothing re-applies target FDs — the Paused-first workaround from Section B
+            step 1 becomes unnecessary. <code>Paused</code> still freezes both directions; the existing
+            early-return in <code>Reconcile</code> precedes both walks.</li>
+      </ul>
+
+      <h3 id="rollback-walk">Rollback walk</h3>
+      <p>Same philosophy as the forward <code>ensure*</code> functions: every step re-derives progress from
+      cluster state, so the walk is idempotent, restart-safe, and self-selecting — a migration that died at
+      forward Step 2 (workers never ready, CPMS never re-pointed) finds R1/R2 already satisfied and moves
+      straight to teardown.</p>
+
+      <div class="card step-card">
+        <div class="step-head"><span class="step-num">R0</span><span class="step-title">Restore source worker capacity</span></div>
+        <p><em>Runs whenever the forward walk removed source worker capacity, regardless of
+        <code>WorkloadMigrated</code> at failure</em> — forward Step 6 scales the source sets to 0 while the
+        condition is still <code>Progressing</code>, so a stall there needs R0 just as much as a failure
+        after deletion did. Two cases, both before R1 touches masters; a mid-deletion state hits both.</p>
+        <div class="case-card">
+          <span class="case-label">Case 1 — Surviving scaled-down source MachineSets</span>
+          <span style="color:var(--muted);font-size:13px"> (Step 6 done, Step 8 not, or Step 8 partially complete)</span>
+          <p style="margin:8px 0 2px">List them (<code>GetMachineSetsByVCenter</code> on the source server) and
+          scale each back up (<code>ScaleMachineSet</code>) — <strong>recreate nothing alongside them</strong>,
+          that would duplicate the pool. The scale-to-0 overwrote the original per-set counts, so split the
+          target worker pool's total across the survivors as in the forward replica math.</p>
+        </div>
+        <div class="case-card">
+          <span class="case-label">Case 2 — Deleted source MachineSets</span>
+          <span style="color:var(--muted);font-size:13px"> (Steps 6–8 completed)</span>
+          <p style="margin:8px 0 2px">The mirror of forward Step 1 with the roles swapped. List surviving
+          target worker MachineSets (<code>GetMachineSetsByVCenter</code> on the target server), take one as
+          template, and <code>CreateWorkerMachineSet</code> re-pointed at the source failure domains
+          (<code>updateMachineSetProviderSpec</code> accepts any FD spec). Replica splitting mirrors the
+          forward math. Recreated sets get operator-style names (<code>workerMachineSetName</code>); the
+          original installer names are gone with the deleted MachineSets — harmless, the Machines carry the
+          identity that matters.</p>
+        </div>
+        <p style="margin-bottom:2px"><strong>Either way</strong>, wait for machines and nodes Ready
+        (<code>CheckMachinesReady</code>/<code>CheckNodesReady</code>) before touching masters:
+        <strong>capacity first</strong>, for the same reason forward Step 2 gates Step 3.</p>
+      </div>
+
+      <div class="card step-card">
+        <div class="step-head"><span class="step-num">R1</span><span class="step-title">Re-point CPMS to source</span></div>
+        <p style="margin:8px 0 2px"><code>UpdateCPMSFailureDomain</code> with the source FD names — the failure
+        domains in Infrastructure that reference the source server (the code assumes a single source FD;
+        <code>GetSourceFailureDomain</code> returns index 0). Idempotence via
+        <code>IsCPMSUpdatedForFailureDomains(sourceFDNames)</code>. The CPMS operator then rolls the masters
+        back with the quorum-safe semantics verified in “Open questions”: replacement created first, old
+        machine deleted only once the replacement is Ready, and an outdated NotReady machine deleted to make
+        room — so a stuck target replacement does not block the backward roll.</p>
+      </div>
+
+      <div class="card step-card">
+        <div class="step-head"><span class="step-num">R2</span><span class="step-title">Wait for the backward control-plane rollout</span></div>
+        <p style="margin:8px 0 2px">The same completion predicate as forward Step 5
+        (<code>CheckControlPlaneRolloutStatus</code>: replicas &gt; 0, updated == replicas,
+        ready == replicas), 30s requeues.</p>
+      </div>
+
+      <div class="card step-card">
+        <div class="step-head"><span class="step-num">R3</span><span class="step-title">Tear down target workers</span></div>
+        <p style="margin:8px 0 2px">Scale target worker MachineSets to 0, await machine and node deletion
+        (<code>CheckMachinesDeleted</code>, <code>CheckNodesDeletedForMachines</code>), then delete the
+        MachineSets (<code>DeleteMachineSetsByVCenter</code> on the target server) — the mirror of forward
+        steps 6–8.</p>
+      </div>
+
+      <div class="card step-card">
+        <div class="step-head"><span class="step-num">R4</span><span class="step-title">“TargetCleaned” (full rewind)</span></div>
+        <p style="margin:8px 0 2px">Strip the target vCenter entries and failure domains from Infrastructure,
+        the vCenter entry from cloud-provider-config, and the target credentials from vsphere-creds. The
+        existing remove methods are server-parameterized and work as-is for the target server
+        (<code>RemoveSourceVCenter</code>/<code>RemoveSourceVCenterFromConfig</code>/<code>RemoveSourceVCenterCreds</code>;
+        rename to <code>...ByServer</code> for clarity while wiring). Restart MCO + vSphere pods and wait for
+        vSphere pod readiness — the mirror of the <code>ensureMultiSiteConfigured</code> tail.</p>
+      </div>
+
+      <div class="card step-card">
+        <div class="step-head"><span class="step-num">R5</span><span class="step-title">Completion</span></div>
+        <p style="margin:8px 0 2px"><code>Ready=True</code>, reason <code>RolledBack</code>, event
+        <code>MigrationRolledBack</code>.</p>
+      </div>
+
+      <div class="rationale">
+        <span class="co-label">Ordering rationale</span>
+        Masters roll back while both worker pools exist (R0 restores source worker capacity first whenever
+        the forward walk removed it, scaled down or deleted); target workers are deleted only after the
+        control plane is back on source; platform config is stripped only after the workload is back.
+        <strong>Each resource is undone only while it is the redundant copy.</strong>
+      </div>
+
+      <h3 id="status-model">Status model</h3>
+      <p>The forward walk is monotonic and conditions are never un-set today; rollback becomes the first
+      writer of False-after-True. <code>WorkloadMigrated</code> flips to <code>False</code>/reason
+      <code>RollingBack</code> when the walk starts undoing it; <code>MultiSiteConfigured</code> flips when
+      R4 begins. <code>DestinationInitialized</code> and <code>InfrastructurePrepared</code> stay
+      <code>True</code> — the destination vCenter objects they describe still exist (see scope boundaries).
+      Completion is reported through the <code>Ready</code> condition; <code>spec.state</code> stays
+      user-owned intent — <code>Rollback</code> is the ask, <code>RolledBack</code> the answer. Setting
+      <code>state: Running</code> after a completed rollback restarts the forward walk from whatever
+      conditions remain — a full re-migration, by design.</p>
+
+      <h3 id="stall-handling">Stall handling</h3>
+      <p>The backward walk would inherit the forward walk's wait-forever risk (gap 1), so it ships with
+      detection rather than the bug:</p>
+      <ul>
+        <li>Rate-limited Warning events with stall detail for a non-converging backward CPMS rollout or
+            worker teardown, mirroring <code>oldWorkerStallDetail</code>.</li>
+        <li>A <code>RollbackStalled</code> reason on <code>Ready=False</code> when nothing observable changes
+            (CPMS status counters, machine phases) for a configurable deadline (default e.g. 30m). On stall
+            the operator stops issuing changes and parks in the safest reached state; a human decides to
+            fix-and-resume, extend the deadline, or take over manually. It never auto-resumes and never flips
+            to forward.</li>
+      </ul>
+
+      <h3 id="scope">Scope boundaries</h3>
+      <ul>
+        <li>Post-<code>SourceCleaned</code> stays unsupported (Section C remains the manual path).</li>
+        <li>vCenter-side objects from the forward migration (VM folders, region/zone tags, cluster-ownership
+            tags on the target) are not removed — they are inert without machines; a later
+            destination-cleanup step could reuse the <code>internal/vsphere</code> primitives if wanted.</li>
+        <li>The metadata secret that <code>ensureSourceCleaned</code> generates never exists on this path
+            (<code>SourceCleaned</code> never ran).</li>
+        <li>A webhook should validate state transitions (reject <code>Rollback</code> when
+            <code>SourceCleaned=True</code>); the entry guard above is the belt, the webhook the suspenders
+            (gap 5).</li>
+      </ul>
+    </section>
+
+    <!-- ============ Adversarial review ============ -->
+    <section id="adversarial">
+      <h2>Adversarial review <span style="font-weight:400;color:var(--muted);font-size:15px">(pi agent, 2026-10-06)</span></h2>
+      <p>Record of the adversarial review of this design. The first pass reviewed an earlier draft (heuristic
+      triggers, “restore the source” semantics); the current draft reworked rollback into a user-driven
+      <code>state: Rollback</code> walk that unwinds the <em>target</em>. Point-by-point status:</p>
+
+      <h3 id="resolved">Resolved in the current draft</h3>
+      <div class="card adv-item resolved">
+        <div class="adv-head"><span class="num">✓</span>Window ending at forward Step 8</div>
+        <p style="margin:4px 0 2px">(Source MachineSets deleted, source topology gone from operator data):
+        addressed by the entry guard (rejected with <code>RollbackUnsupported</code> when
+        <code>SourceCleaned=True</code>) plus R0, which recreates the source worker MachineSets. The earlier
+        claim that restore “needs no new vSphere logic” is gone.</p>
+      </div>
+      <div class="card adv-item resolved">
+        <div class="adv-head"><span class="num">✓</span>Rollback scope</div>
+        <p style="margin:4px 0 2px">The current design correctly frames rollback as undoing the
+        <em>target</em> (R4), not restoring the source. Pre-<code>SourceCleaned</code> the source is still
+        fully configured, so the four-way source restore (Infrastructure, cloud-provider-config,
+        vsphere-creds, pod restart) is no longer needed.</p>
+      </div>
+      <div class="card adv-item resolved">
+        <div class="adv-head"><span class="num">✓</span>Self-trigger</div>
+        <p style="margin:4px 0 2px">(Operator's own <code>ensureSourceCleaned</code> vCenter removal
+        satisfying a “source vCenter removed” heuristic): eliminated by moving from heuristics to an explicit
+        <code>spec.state: Rollback</code> request.</p>
+      </div>
+      <div class="card adv-item resolved">
+        <div class="adv-head"><span class="num">✓</span>Stale code references</div>
+        <p style="margin:4px 0 2px">(<code>internal/controller/conditions.go</code>,
+        <code>GetMachines(ctx, ms)</code> — neither exists): the current key-code references match the repo.</p>
+      </div>
+
+      <h3 id="standing">Points still standing</h3>
+      <div class="card adv-item standing">
+        <div class="adv-head"><span class="num">1</span>R0 template fidelity</div>
+        <p style="margin:4px 0 2px">R0 takes a surviving <em>target</em> worker MachineSet as the template and
+        re-points it at the source failure domain via <code>updateMachineSetProviderSpec</code>. The recreated
+        source machines therefore get whatever topology the Infrastructure source FD carries (or the default
+        <code>/&lt;datacenter&gt;/vm/&lt;infraID&gt;</code> folder) — not necessarily the original installer
+        provider spec (datastore, folder, network, zone settings). Source workers may reappear in a different
+        folder/datastore than before migration. <strong>Decide:</strong> accept the drift, or snapshot
+        <code>GetMachineSetsByVCenter(source)</code> into a Secret before forward Step 6 scales the source
+        sets to 0, and have R0 restore from the verbatim snapshot.</p>
+      </div>
+      <div class="card adv-item standing">
+        <div class="adv-head"><span class="num">2</span>The <code>Reconcile</code> state gate short-circuits Rollback</div>
+        <p style="margin:4px 0 2px">Today the early return fires on <em>any</em> state that is not
+        <code>Running</code> — so <code>state: Rollback</code> would early-return too. The entry-guards text
+        (“the existing early-return precedes both walks”) implies no change is needed; in fact the gate itself
+        must be modified (e.g. admit <code>Running</code> and <code>Rollback</code>, still freeze
+        <code>Paused</code>/<code>Pending</code>), and the precedence of <code>Paused</code> vs a pending
+        rollback request must be stated explicitly.</p>
+      </div>
+      <div class="card adv-item standing">
+        <div class="adv-head"><span class="num">3</span>R2 can wedge on a stuck target machine, and the fix is manual even in rollback mode</div>
+        <p style="margin:4px 0 2px">Per this document's own caveat (b): if a target master's node goes
+        NotReady <em>after</em> its old source machine was already deleted, the CPMS operator treats the
+        replacement as “pending” and never recreates it — neither forward nor backward. A backward roll (R2)
+        can wedge exactly there. Stall handling detects the wedge (<code>RollbackStalled</code>), but the
+        document should state the remedy for this state explicitly: a human deletes the stuck target
+        <code>Machine</code>; the operator never auto-deletes control-plane machines.</p>
+      </div>
+      <div class="card adv-item standing">
+        <div class="adv-head"><span class="num">4</span>R5 declares <code>Ready=True/RolledBack</code> without the forward ready checks</div>
+        <p style="margin:4px 0 2px"><code>ensureReady</code> gates on operator stability, MachineConfigPool
+        convergence, and a stability window. Right after a backward CPMS roll, MCO pools may still be
+        converging. Either have R5 delegate to the same checks, or document why a plain
+        <code>Ready=True</code> is acceptable here.</p>
+      </div>
+      <div class="card adv-item standing">
+        <div class="adv-head"><span class="num">5</span>“Cluster health acceptable” in the entry gates is undefined</div>
+        <p style="margin:4px 0 2px">Give it a concrete predicate (operators Available, MCO pools converged, no
+        NotReady nodes on source) or drop the clause.</p>
+      </div>
+      <div class="card adv-item standing">
+        <div class="adv-head"><span class="num">6</span>Mid-walk abandonment is unexamined</div>
+        <p style="margin:4px 0 2px">The status model covers resume-after-completed-rollback (full
+        re-migration, by design). It does not cover a user flipping <code>state: Running</code>
+        <em>between</em> R-steps: after R1/R2 the cluster is mid-backward-roll with
+        <code>WorkloadMigrated=False</code>; after R3 target workers are gone but the target vCenter still
+        configured; after R4 the target is fully stripped. Verify the forward walk resumes idempotently from
+        each of these partial states — particularly after R4, where it must re-add the target via the
+        <code>MultiSiteConfigured=False</code> path with no target objects left to inspect.</p>
+      </div>
+
+      <h3 id="minor">Minor</h3>
+      <div class="card adv-item minor-item">
+        <ul style="margin:4px 0 2px">
+          <li>Do the <code>RemoveSourceVCenter*</code> → <code>...ByServer</code> renames in the same change
+              as the rollback wiring, so the names reflect behavior from day one.</li>
+          <li>The current draft has no test section (the earlier one was dropped). Add: state-machine unit
+              tests including the <code>RollbackUnsupported</code> guard; R0 recreation tests (simulated
+              source-MS-deleted state); mid-walk-abandonment tests for each partial state (point 6); an
+              R2-wedge test where the stuck target machine must be deleted manually (point 3); and an e2e of
+              the full backward walk.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ============ Open questions ============ -->
+    <section id="open-questions">
+      <h2>Open questions / caveats</h2>
+      <div class="callout caveat">
+        <span class="co-label">Caveat — upstream CPMS semantics</span>
+        <p>CPMS replacement semantics come from the upstream cluster-control-plane-machine-set-operator, not
+        this repo. Verified against its <code>main</code> at commit <code>b438274f</code> (2026-09-23),
+        <code>pkg/controllers/controlplanemachineset/updates.go</code>:
+        <code>reconcileMachineRollingUpdate</code> processes one machine index at a time with the surge
+        capped at one machine; <code>createRollingUpdateReplacementMachines</code> creates the replacement
+        first, observing the surge budget; <code>deleteReplacedMachines</code> deletes the outdated machine
+        only once an updated (Ready, spec-matching) replacement exists for that index;
+        <code>waitForReadyMachine</code> gates on node-level readiness (<code>MachineInfo.Ready</code>).
+        Two edge-case caveats from the same code: <strong>(a)</strong> an <strong>outdated</strong> machine
+        whose node has gone NotReady is deleted to make room for a further replacement even before its own
+        replacement is Ready, so old machines persist only while they themselves stay Ready; and
+        <strong>(b)</strong> a replacement whose node goes NotReady <em>after</em> its old machine was
+        deleted is merely “pending” to the rollout logic and is not itself replaced (deleting it, as in
+        option A, triggers a replacement). This evidence comes from <code>main</code>, not from OCP 4.18–4.21
+        release builds — validate against the specific target release before relying on option B.</p>
+      </div>
+      <div class="callout caveat">
+        <span class="co-label">Caveat — feature gate</span>
+        <p>Multi-vCenter day-2 support requires the <code>VSphereMultiVCenterDay2</code> feature gate
+        (preflight hard-fails without it); rollback to source assumes the multi-vCenter platform state
+        remains valid.</p>
+      </div>
+    </section>
+
+    <!-- ============ Key code references ============ -->
+    <section id="code-refs" class="refs">
+      <h2>Key code references</h2>
+      <div class="file">
+        <span class="path">internal/controller/vmwarecloudfoundationmigration_controller.go</span>
+        <ul>
+          <li><code>Reconcile</code> (:175) — state checks, Paused early-return, condition walk</li>
+          <li><code>ensureMultiSiteConfigured</code> (:543) — add target vCenter/FDs</li>
+          <li><code>ensureWorkloadMigrated</code> (:649) — worker MS creation, CPMS update</li>
+          <li><code>ensureWorkloadMigratedRolloutAndScaleDown</code> (:780) — rollout wait, source scale-down</li>
+          <li><code>ensureSourceCleaned</code> (:917) — source removal (ends the operator-supported rollback window)</li>
+          <li><code>oldWorkerStallDetail</code> (:1500s) — only existing stall detection</li>
+        </ul>
+      </div>
+      <div class="file">
+        <span class="path">internal/openshift/machines.go</span>
+        <ul>
+          <li><code>GetControlPlaneMachineSet</code> (:219)</li>
+          <li><code>UpdateCPMSFailureDomain</code> (:235) — RollingUpdate enforcement, in-place CPMS update</li>
+          <li><code>CheckControlPlaneRolloutStatus</code> (:281)</li>
+          <li><code>IsCPMSUpdatedForFailureDomains</code> (:302)</li>
+        </ul>
+      </div>
+      <div class="file">
+        <span class="path">internal/openshift/infrastructure.go</span>
+        <ul>
+          <li><code>AddTargetVCenter</code> (:71), <code>RemoveSourceVCenter</code> (:140s),
+              <code>GetSourceFailureDomain</code> (:55)</li>
+        </ul>
+      </div>
+      <div class="file">
+        <span class="path">api/v1alpha1/vmwarecloudfoundationmigration_types.go</span>
+        <ul>
+          <li><code>MigrationState</code> (Pending/Running/Paused), <code>FailureDomains</code> spec</li>
+        </ul>
+      </div>
+    </section>
+
+    <footer class="doc">
+      Source of truth: <code>docs/plans/migration-rollback-research.md</code> — regenerate this page when the
+      markdown changes. Includes the R0 rework (restore scaled-down survivors; recreate deleted sets before
+      R1, regardless of <code>WorkloadMigrated</code>).
+    </footer>
+  </main>
+</div>
+</body>
+</html>
