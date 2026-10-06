@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path"
 	"slices"
 	"sort"
+	"strings"
 
 	configv1 "github.com/openshift/api/config/v1"
 	machinev1 "github.com/openshift/api/machine/v1"
@@ -82,7 +84,7 @@ func (m *MachineManager) CreateWorkerMachineSet(ctx context.Context, name string
 	newMS.Spec.Template.Labels["machine.openshift.io/cluster-api-cluster"] = infraID
 
 	// Update the provider spec with the failure domain topology.
-	if err := updateMachineSetProviderSpec(newMS, failureDomain, infraID); err != nil {
+	if err := updateMachineSetProviderSpec(ctx, newMS, failureDomain, infraID); err != nil {
 		return nil, fmt.Errorf("updating provider spec for machineset %q: %w", name, err)
 	}
 
@@ -526,7 +528,7 @@ func (m *MachineManager) ListMachinesForMachineSet(ctx context.Context, machineS
 // MachineSet template with the topology from the given failure domain. When the
 // failure domain does not specify a folder, the default /<datacenter>/vm/<infraID>
 // path is used.
-func updateMachineSetProviderSpec(ms *machinev1beta1.MachineSet, fd *configv1.VSpherePlatformFailureDomainSpec, infraID string) error {
+func updateMachineSetProviderSpec(ctx context.Context, ms *machinev1beta1.MachineSet, fd *configv1.VSpherePlatformFailureDomainSpec, infraID string) error {
 	if ms == nil {
 		return fmt.Errorf("machineset must not be nil")
 	}
@@ -568,9 +570,19 @@ func updateMachineSetProviderSpec(ms *machinev1beta1.MachineSet, fd *configv1.VS
 	}
 
 	if len(fd.Topology.Networks) > 0 {
+		// machine-api-operator only resolves networks by name, so a full
+		// inventory path (e.g. /DC1/network/VM Network) is rejected at provisioning
+		// time. Fall back to the last path element in that case.
+		networkName := fd.Topology.Networks[0]
+		if strings.Contains(networkName, "/") {
+			log := klog.FromContext(ctx)
+			log.Info("topology network is specified as a path, which machine-api-operator does not support; using the last path element",
+				"network", networkName)
+			networkName = path.Base(networkName)
+		}
 		providerSpec.Network = machinev1beta1.NetworkSpec{
 			Devices: []machinev1beta1.NetworkDeviceSpec{
-				{NetworkName: fd.Topology.Networks[0]},
+				{NetworkName: networkName},
 			},
 		}
 	}
