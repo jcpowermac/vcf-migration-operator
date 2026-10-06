@@ -19,7 +19,8 @@ Yes, rollback is feasible — but only while the migration is still in the
 `SourceCleaned` (source vCenter removed from cluster config) ends the pre-cleanup,
 operator-supported rollback path. Recovery afterwards is manual, high-risk, and
 unsupported (Section C) — not a true point of no return, but the end of anything
-the operator can help with.
+the operator can help with. A sketch of an operator-native `Rollback` state —
+what it would take to make rollback an operator feature — follows the gaps list.
 
 ## Where the failure lands
 
@@ -42,6 +43,14 @@ Within `ensureWorkloadMigrated` / `ensureWorkloadMigratedRolloutAndScaleDown`:
    readyReplicas == replicas`.
 4. Source worker MachineSets scaled to 0, machines/nodes awaited deleted, empty
    source MachineSets deleted (steps 6–8).
+
+A failure of the target worker MachineSets themselves (steps 1–2) is the easy
+case: it stalls the migration before anything control-plane-related has changed.
+Resume by fixing the root cause and deleting the stuck `Machine` (the MachineSet
+controller recreates it to meet replica count), or roll back by deleting the
+target worker MachineSets — nothing else has been changed at that point. Neither
+is analyzed further here; the rest of this document is about the CPMS rollout
+failure, which is the case where rollback becomes an actual question.
 
 ### Single-master failure state
 
@@ -146,6 +155,119 @@ operator feature.
    covered by the QA test plan).
 5. No webhooks guard the spec — helps manual rollback, but nothing prevents deleting
    a mid-migration CR.
+
+## Proposed design: operator-native `Rollback` state
+
+Research-level proposal — nothing below is implemented. It adds a `Rollback` value
+to `MigrationState` (`Pending`/`Running`/`Paused` today) so that
+`spec.state: Rollback` means "walk the migration backward". Every step reuses
+manager primitives that already exist; the new work is orchestration, status
+handling, and guards. It closes gaps 2–4 fully, gap 5 partially (webhook), and
+gap 1 for the backward walk only.
+
+### Entry guards
+
+- Admitted only while `SourceCleaned=False` — the pre-cleanup window defined by
+  the reversibility table. With `SourceCleaned=True` the reconciler sets
+  `Ready=False`/reason `RollbackUnsupported`, emits a Warning event, and no-ops;
+  post-cleanup recovery stays the manual Section C path.
+- Pre-rollback gate before any mutation: source vCenter and failure domains still
+  resolvable in Infrastructure, source credentials still in vsphere-creds (both
+  hold by definition pre-`SourceCleaned`), CPMS strategy still `RollingUpdate`,
+  cluster health acceptable. A failed gate blocks with a condition instead of a
+  partial rewind.
+- While `state=Rollback` the reconciler takes the rollback walk instead of the
+  forward condition walk, so nothing re-applies target FDs — the Paused-first
+  workaround from Section B step 1 becomes unnecessary. `Paused` still freezes
+  both directions; the existing early-return in `Reconcile` precedes both walks.
+
+### Rollback walk
+
+Same philosophy as the forward `ensure*` functions: every step re-derives progress
+from cluster state, so the walk is idempotent, restart-safe, and self-selecting —
+a migration that died at forward Step 2 (workers never ready, CPMS never
+re-pointed) finds R1/R2 already satisfied and moves straight to teardown.
+
+- **R0 — recreate source worker MachineSets** (only when forward steps 6–8 already
+  deleted them, i.e. `WorkloadMigrated=True` at failure): the mirror of forward
+  Step 1 with the roles swapped. List surviving target worker MachineSets
+  (`GetMachineSetsByVCenter` on the target server), take one as template, and
+  `CreateWorkerMachineSet` re-pointed at the source failure domains
+  (`updateMachineSetProviderSpec` accepts any FD spec). Replica splitting mirrors
+  the forward math. Recreated sets get operator-style names
+  (`workerMachineSetName`); the original installer names are gone with the deleted
+  MachineSets — harmless, the Machines carry the identity that matters. Wait for
+  machines and nodes Ready (`CheckMachinesReady`/`CheckNodesReady`) before
+  touching masters: capacity first, for the same reason forward Step 2 gates
+  Step 3.
+- **R1 — re-point CPMS to source**: `UpdateCPMSFailureDomain` with the source FD
+  names — the failure domains in Infrastructure that reference the source server
+  (the code assumes a single source FD; `GetSourceFailureDomain` returns index 0).
+  Idempotence via `IsCPMSUpdatedForFailureDomains(sourceFDNames)`. The CPMS
+  operator then rolls the masters back with the quorum-safe semantics verified in
+  "Open questions": replacement created first, old machine deleted only once the
+  replacement is Ready, and an outdated NotReady machine deleted to make room —
+  so a stuck target replacement does not block the backward roll.
+- **R2 — wait for the backward control-plane rollout**: the same completion
+  predicate as forward Step 5 (`CheckControlPlaneRolloutStatus`: replicas > 0,
+  updated == replicas, ready == replicas), 30s requeues.
+- **R3 — tear down target workers**: scale target worker MachineSets to 0, await
+  machine and node deletion (`CheckMachinesDeleted`, `CheckNodesDeletedForMachines`),
+  then delete the MachineSets (`DeleteMachineSetsByVCenter` on the target server) —
+  the mirror of forward steps 6–8.
+- **R4 — "TargetCleaned" (full rewind)**: strip the target vCenter entries and
+  failure domains from Infrastructure, the vCenter entry from cloud-provider-config,
+  and the target credentials from vsphere-creds. The existing remove methods are
+  server-parameterized and work as-is for the target server
+  (`RemoveSourceVCenter`/`RemoveSourceVCenterFromConfig`/`RemoveSourceVCenterCreds`;
+  rename to `...ByServer` for clarity while wiring). Restart MCO + vSphere pods and
+  wait for vSphere pod readiness — the mirror of the `ensureMultiSiteConfigured`
+  tail.
+- **R5 — completion**: `Ready=True`, reason `RolledBack`, event `MigrationRolledBack`.
+
+Ordering rationale: masters roll back while both worker pools exist (R0 restores
+source workers first when needed); target workers are deleted only after the
+control plane is back on source; platform config is stripped only after the
+workload is back. Each resource is undone only while it is the redundant copy.
+
+### Status model
+
+The forward walk is monotonic and conditions are never un-set today; rollback
+becomes the first writer of False-after-True. `WorkloadMigrated` flips to
+`False`/reason `RollingBack` when the walk starts undoing it;
+`MultiSiteConfigured` flips when R4 begins. `DestinationInitialized` and
+`InfrastructurePrepared` stay `True` — the destination vCenter objects they
+describe still exist (see scope boundaries). Completion is reported through the
+`Ready` condition; `spec.state` stays user-owned intent — `Rollback` is the ask,
+`RolledBack` the answer. Setting `state: Running` after a completed rollback
+restarts the forward walk from whatever conditions remain — a full re-migration,
+by design.
+
+### Stall handling
+
+The backward walk would inherit the forward walk's wait-forever risk (gap 1), so
+it ships with detection rather than the bug:
+
+- Rate-limited Warning events with stall detail for a non-converging backward
+  CPMS rollout or worker teardown, mirroring `oldWorkerStallDetail`.
+- A `RollbackStalled` reason on `Ready=False` when nothing observable changes
+  (CPMS status counters, machine phases) for a configurable deadline (default
+  e.g. 30m). On stall the operator stops issuing changes and parks in the safest
+  reached state; a human decides to fix-and-resume, extend the deadline, or take
+  over manually. It never auto-resumes and never flips to forward.
+
+### Scope boundaries
+
+- Post-`SourceCleaned` stays unsupported (Section C remains the manual path).
+- vCenter-side objects from the forward migration (VM folders, region/zone tags,
+  cluster-ownership tags on the target) are not removed — they are inert without
+  machines; a later destination-cleanup step could reuse the `internal/vsphere`
+  primitives if wanted.
+- The metadata secret that `ensureSourceCleaned` generates never exists on this
+  path (`SourceCleaned` never ran).
+- A webhook should validate state transitions (reject `Rollback` when
+  `SourceCleaned=True`); the entry guard above is the belt, the webhook the
+  suspenders (gap 5).
 
 ## Open questions / caveats
 
