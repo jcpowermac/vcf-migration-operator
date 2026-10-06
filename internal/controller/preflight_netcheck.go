@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"regexp"
@@ -216,7 +217,12 @@ func (r *VmwareCloudFoundationMigrationReconciler) checkNetworkingViaProbeVMs(ct
 			}
 			return nil
 		}, "failureDomain", fd.Name, "server", fd.Server, "name", spec.Name); err != nil {
-			return err
+			// Destroy the probe now and join any destruction failure with the
+			// collection error so preflight reports both. probeDestroyed keeps
+			// the deferred cleanup from destroying the VM a second time.
+			probeDestroyed = true
+			cleanupErr := runPreflightStep(log, "destroy probe VM", destroyProbe, "failureDomain", fd.Name, "server", fd.Server, "name", spec.Name, "deferred", true)
+			return errors.Join(err, cleanupErr)
 		}
 		log.Info("probe VM guest networks", "name", spec.Name, "networks", formatNetworks(probeNetworks))
 
@@ -260,6 +266,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) collectSourceNetworks(ctx con
 		nets, err := sourceSession.GetVMNetworks(ctx, nodeName)
 		if err != nil {
 			return nil, fmt.Errorf("reading networks for source node %s: %w", nodeName, err)
+		}
+		if len(nets) == 0 {
+			return nil, fmt.Errorf("reading networks for source node %s: no networks reported", nodeName)
 		}
 		networks = append(networks, nets...)
 	}
