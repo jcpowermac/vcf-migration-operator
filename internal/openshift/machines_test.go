@@ -2,6 +2,7 @@ package openshift
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -939,6 +940,68 @@ func TestCheckNodesReady(t *testing.T) {
 			}
 			if complete != tt.wantComplete || ready != tt.wantReady || total != tt.wantTotal {
 				t.Errorf("CheckNodesReady() = (%t, %d, %d), want (%t, %d, %d)", complete, ready, total, tt.wantComplete, tt.wantReady, tt.wantTotal)
+			}
+		})
+	}
+}
+
+// testProviderSpecMachineSet creates a MachineSet with an unmarshalled raw
+// VSphereMachineProviderSpec, as required by updateMachineSetProviderSpec.
+func testProviderSpecMachineSet(t *testing.T) *machinev1beta1.MachineSet {
+	t.Helper()
+	ms := newTestMachineSet("worker", 3)
+	raw, err := json.Marshal(&machinev1beta1.VSphereMachineProviderSpec{})
+	if err != nil {
+		t.Fatalf("marshalling provider spec: %v", err)
+	}
+	ms.Spec.Template.Spec.ProviderSpec.Value = &runtime.RawExtension{Raw: raw}
+	return ms
+}
+
+func TestUpdateMachineSetProviderSpecNetworks(t *testing.T) {
+	tests := []struct {
+		name        string
+		network     string
+		wantNetwork string
+	}{
+		{
+			name:        "plain network name is used as-is",
+			network:     "VM Network",
+			wantNetwork: "VM Network",
+		},
+		{
+			name:        "inventory path is split to last element",
+			network:     "/DC1/network/VM Network",
+			wantNetwork: "VM Network",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ms := testProviderSpecMachineSet(t)
+			fd := &configv1.VSpherePlatformFailureDomainSpec{
+				Name:   "fd1",
+				Server: "target.example.com",
+				Topology: configv1.VSpherePlatformTopology{
+					Datacenter: "DC1",
+					Datastore:  "/DC1/datastore/DS1",
+					Networks:   []string{tt.network},
+				},
+			}
+
+			ctx := context.Background()
+			if err := updateMachineSetProviderSpec(ctx, ms, fd, "test-infra"); err != nil {
+				t.Fatalf("updateMachineSetProviderSpec: %v", err)
+			}
+
+			providerSpec, err := extractVSphereProviderSpec(ms)
+			if err != nil {
+				t.Fatalf("extractVSphereProviderSpec: %v", err)
+			}
+			if len(providerSpec.Network.Devices) != 1 {
+				t.Fatalf("network devices = %d, want 1", len(providerSpec.Network.Devices))
+			}
+			if got := providerSpec.Network.Devices[0].NetworkName; got != tt.wantNetwork {
+				t.Fatalf("network name = %q, want %q", got, tt.wantNetwork)
 			}
 		})
 	}
