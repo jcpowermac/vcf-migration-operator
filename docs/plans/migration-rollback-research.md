@@ -1,0 +1,167 @@
+# Research: Rollback feasibility when the new MachineSet / CPMS fails on a single master
+
+Status: research only — no implementation. Open for review; no code changes
+are proposed by this document.
+
+Question: if the target (new) MachineSet or the ControlPlaneMachineSet (CPMS) rollout fails
+on a single master, can the migration be rolled back, and how?
+
+Note: there are no single-master clusters; "single master" means one master in an
+N-master (3/5) control plane. "CPMS" in this repo = ControlPlaneMachineSet
+(`machine.openshift.io/v1`, `cluster` in `openshift-machine-api`). Worker Machines
+and MachineSets are `machine.openshift.io/v1beta1` (the CPMS embeds a v1beta1
+machine template, which is easy to conflate with the CPMS's own version).
+
+## Answer
+
+Yes, rollback is feasible — but only while the migration is still in the
+`WorkloadMigrated` phase, and today it is a manual process, not an operator feature.
+The point of no return is `SourceCleaned` (source vCenter removed from cluster config).
+
+## Where the failure lands
+
+Condition flow (`vmwarecloudfoundationmigration_controller.go`):
+
+```
+InfrastructurePrepared -> DestinationInitialized -> MultiSiteConfigured
+  -> WorkloadMigrated -> SourceCleaned -> Ready
+```
+
+Within `ensureWorkloadMigrated` / `ensureWorkloadMigratedRolloutAndScaleDown`:
+
+1. Target worker MachineSets created (`CreateWorkerMachineSet`), workers awaited.
+2. CPMS spec re-pointed to target failure domains, state set to Active
+   (`UpdateCPMSFailureDomain`, `internal/openshift/machines.go:235`). In-place update —
+   the CPMS operator resolves topology (vCenter, datacenter, datastore, ...) from the
+   Infrastructure resource.
+3. Rollout awaited (`CheckControlPlaneRolloutStatus`, `machines.go:281`):
+   complete only when `replicas > 0 && updatedReplicas == replicas &&
+   readyReplicas == replicas`.
+4. Source worker MachineSets scaled to 0, machines/nodes awaited deleted, empty
+   source MachineSets deleted (steps 6–8).
+
+### Single-master failure state
+
+The CPMS operator uses quorum-safe rolling replacement: create replacement machine,
+wait for its node Ready, then delete the old machine (enforced by
+`UpdateCPMSFailureDomain` refusing non-RollingUpdate strategies, `machines.go:254`).
+
+Consequence: if one new master fails to become Ready, the old source master for that
+machine is **not** deleted. If the failure hits the k-th of the N replacements, the
+resulting cluster state is:
+
+- (k−1) masters on target failure domains (completed replacements)
+- (N−k+1) old masters still on source, including the stuck replacement's old machine
+- 1 stuck new machine on target (provisioning failed / node NotReady / CPMS rollout stuck)
+- etcd quorum intact
+
+(Worst case, a failure on the final replacement — k=N — leaves N−1 masters on
+target and 1 old master on source.)
+
+Operator behavior on a stuck rollout: `CheckControlPlaneRolloutStatus` returns
+incomplete → `RequeueAfter(30s)` forever with condition
+`WorkloadMigrated=Progressing, "Control plane rolling out (updated/replicas,
+ready/replicas)"`. No timeout, no failure reason, no auto-rollback. (The only stall
+detection in the operator is for old-worker deletion: `oldWorkerStallDetail`
+Warning events, rate-limited.)
+
+## What is reversible at the failure moment
+
+| Change made by migration | Reversible? |
+|---|---|
+| Target vCenter added to Infrastructure spec, cloud-provider-config, vsphere-creds (`ensureMultiSiteConfigured`) | Yes — additive. Source failure domains (index 0, `GetSourceFailureDomain`) remain present, so CPMS can still resolve source topology. |
+| Target worker MachineSets + machines + VMs in target vCenter | Yes — scale to 0, delete; machine deletion removes VMs. Source worker MachineSets untouched until steps 6–8. |
+| CPMS spec re-pointed to target FDs | Yes — spec-only change; can be re-pointed back to source FD names. |
+| Already-replaced masters (old source machines deleted by CPMS operator) | Old VMs gone, but source vCenter is still fully configured → new source masters provision fine. |
+| After `SourceCleaned` (`RemoveSourceVCenter` + config + creds removal) | **No** — source vCenter removed from Infrastructure/cloud-provider-config/creds; CPMS can no longer resolve source FD topology. Point of no return. |
+| After steps 6–8 (source workers scaled down + source MachineSets deleted) | Worker rollback window closes: source worker MachineSets must be recreated manually (source vCenter still configured until `SourceCleaned`). |
+
+## Recovery options
+
+### A. Resume (recommended; works today)
+
+Fix the target vCenter root cause (template, storage, network, resource pool, quota),
+then delete the stuck `Machine`. The CPMS operator recreates it to meet replica count.
+The operator is idempotent — it re-derives phase progress from cluster state every
+reconcile (`IsCPMSUpdatedForFailureDomains`, `CheckControlPlaneRolloutStatus`) and
+continues. No CR change, no rollback. This is the designed path for transient
+target-side failures.
+
+### B. True rollback to source (manual; feasible before `SourceCleaned`)
+
+1. Set `spec.state: Paused` **first**. While `Running`, step 3
+   (`UpdateCPMSFailureDomain`) re-applies target FDs to the CPMS on any reconcile
+   where `IsCPMSUpdatedForFailureDomains` no longer matches, so a manual re-point
+   would be reverted. `Paused` makes the reconciler early-return.
+   (Note: pausing the migration operator does NOT pause the CPMS rollout itself —
+   the CPMS operator keeps working.)
+2. Re-point CPMS `spec.template...failureDomains.vSphere` back to the source FD
+   names (state stays `Active`). CPMS operator rolls the target masters back to
+   source, quorum-safe, one at a time.
+3. Scale down + delete target worker MachineSets (or leave them for forensics).
+   Source worker MachineSets are still at full replicas.
+4. Optionally strip the target vCenter from Infrastructure spec,
+   cloud-provider-config, and vsphere-creds. No target-removal code path exists —
+   manual today (the source-removal methods are server-parameterized and could be
+   reused for the target server, but nothing wires them for it).
+5. Delete the migration CR (or leave it Paused).
+
+Caveats:
+
+- Slow: a full second control-plane roll (one master replacement at a time).
+- If the failure cause also breaks source-side provisioning, the rollback stalls the
+  same way — but never worse than forward, because old machines persist until their
+  replacements are Ready.
+- Edge case: if the failed machine's node was briefly Ready (so the old source
+  machine was deleted) and then became unhealthy, the master is missing from source;
+  quorum still holds (2/3 or 4/5). CPMS re-pointing to source still replaces it.
+
+### C. After `SourceCleaned` (manual only, unsupported)
+
+Re-add the source vCenter to Infrastructure spec + cloud-provider-config +
+vsphere-creds, restart MCO/vSphere pods, re-point CPMS to source FDs, recreate source
+worker MachineSets. High-risk manual surgery; not an operator feature.
+
+## Gaps if an operator-native rollback is ever wanted
+
+1. No failure/timeout detection for a stalled CPMS rollout — infinite `Progressing`.
+2. No rollback state in the CRD (only `Pending`/`Running`/`Paused`); the condition
+   walk is forward-only and conditions are never un-set.
+3. No rollback wiring for removing the target vCenter. The remove methods that
+   exist (`RemoveSourceVCenter`, `RemoveSourceVCenterCreds`,
+   `RemoveSourceVCenterFromConfig`) are parameterized by server and would
+   mechanically work for the target — the gap is orchestration, not primitives.
+4. No rollback handler; `Paused` is the only freeze point (pause/resume already
+   covered by the QA test plan).
+5. No webhooks guard the spec — helps manual rollback, but nothing prevents deleting
+   a mid-migration CR.
+
+## Open questions / caveats
+
+- CPMS replacement semantics come from the upstream machine-api operator
+  (cluster-control-plane-machine-set-operator), not this repo. Edge-case behavior
+  (e.g., replacing a machine whose node went NotReady after the old machine was
+  deleted) must be validated against the specific OCP release before relying on
+  option B.
+- Multi-vCenter day-2 support requires the `VSphereMultiVCenterDay2` feature gate
+  (preflight hard-fails without it); rollback to source assumes the multi-vCenter
+  platform state remains valid.
+
+## Key code references
+
+- `internal/controller/vmwarecloudfoundationmigration_controller.go`
+  - `Reconcile` (:175) — state checks, Paused early-return, condition walk
+  - `ensureMultiSiteConfigured` (:543) — add target vCenter/FDs
+  - `ensureWorkloadMigrated` (:649) — worker MS creation, CPMS update
+  - `ensureWorkloadMigratedRolloutAndScaleDown` (:780) — rollout wait, source scale-down
+  - `ensureSourceCleaned` (:917) — source removal (point of no return)
+  - `oldWorkerStallDetail` (:1500s) — only existing stall detection
+- `internal/openshift/machines.go`
+  - `GetControlPlaneMachineSet` (:219)
+  - `UpdateCPMSFailureDomain` (:235) — RollingUpdate enforcement, in-place CPMS update
+  - `CheckControlPlaneRolloutStatus` (:281)
+  - `IsCPMSUpdatedForFailureDomains` (:302)
+- `internal/openshift/infrastructure.go` — `AddTargetVCenter` (:71),
+  `RemoveSourceVCenter` (:140s), `GetSourceFailureDomain` (:55)
+- `api/v1alpha1/vmwarecloudfoundationmigration_types.go` — `MigrationState`
+  (Pending/Running/Paused), `FailureDomains` spec
