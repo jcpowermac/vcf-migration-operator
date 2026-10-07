@@ -30,7 +30,7 @@ COPY LICENSE /licenses/license.txt
 USER 65532:65532
 LABEL com.redhat.component="VCF Migration Operator"
 LABEL distribution-scope="public"
-LABEL name="vcf-migration/vcf-migration-operator"
+LABEL name="vcf-migration-operator-tech-preview/vcf-migration-rhel9-operator"
 LABEL release="0.1.0"
 LABEL version="0.1.0"
 LABEL cpe="cpe:/a:redhat:vcf_migration_operator:0.1::el9"
