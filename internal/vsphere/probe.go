@@ -33,6 +33,9 @@ const (
 	// CreateProbeVM. ReapProbeVMs relies on it so it never destroys unrelated
 	// VMs that merely share the probe name prefix.
 	probeMarkerExtraConfig = "vcfmigration.netcheck.probe"
+
+	// probeMarkerValue is the value stored under probeMarkerExtraConfig.
+	probeMarkerValue = "true"
 )
 
 // ProbeSpec describes how to create a probe VM on a destination failure domain.
@@ -122,13 +125,47 @@ func (s *Session) CreateProbeVM(ctx context.Context, spec ProbeSpec) (*object.Vi
 	}
 	taskInfo, err := task.WaitForResult(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("cloning template %s as %s: %w", spec.Template, spec.Name, err)
+		// The clone task can still succeed after a failed wait (a phase
+		// timeout or cancellation), which would leak the probe VM.
+		return nil, s.cleanupFailedClone(ctx, spec, fmt.Errorf("cloning template %s as %s: %w", spec.Template, spec.Name, err))
 	}
 	result, ok := taskInfo.Result.(types.ManagedObjectReference)
 	if !ok {
 		return nil, fmt.Errorf("cloning template %s: unexpected clone result", spec.Template)
 	}
 	return object.NewVirtualMachine(s.Client.Client, result), nil
+}
+
+// cleanupFailedClone destroys the probe VM left behind when the clone task
+// succeeds after its wait already failed (a phase timeout or cancellation).
+// The VM is resolved by name on a fresh bounded context that ignores the
+// canceled request context, and it is only destroyed when it carries the
+// probe marker, so a name-colliding VM is untouched. Cleanup is best-effort;
+// waitErr is returned unchanged so the reported failure keeps its context.
+func (s *Session) cleanupFailedClone(ctx context.Context, spec ProbeSpec, waitErr error) error {
+	log := klog.FromContext(ctx)
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+	defer cancel()
+	vm, err := s.Finder.VirtualMachine(cleanupCtx, spec.Name)
+	if err != nil {
+		var notFound *find.NotFoundError
+		if !errors.As(err, &notFound) {
+			log.Error(err, "looking up probe VM after failed clone wait", "vm", spec.Name)
+		}
+		return waitErr
+	}
+	probe, err := isProbeVM(cleanupCtx, vm)
+	if err != nil {
+		log.Error(err, "checking leftover probe VM after failed clone wait", "vm", spec.Name)
+		return waitErr
+	}
+	if !probe {
+		return waitErr
+	}
+	if err := DestroyProbeVM(cleanupCtx, vm); err != nil {
+		log.Error(err, "destroying leftover probe VM after failed clone wait", "vm", spec.Name)
+	}
+	return waitErr
 }
 
 // probeFolder resolves spec.Folder or the datacenter default VM folder.
@@ -188,7 +225,7 @@ func probeExtraConfigValues(spec ProbeSpec) []types.BaseOptionValue {
 	}
 	// Set after the caller's entries so every probe VM carries the marker
 	// regardless of caller-supplied extra config.
-	values[probeMarkerExtraConfig] = "true"
+	values[probeMarkerExtraConfig] = probeMarkerValue
 	options := make([]types.BaseOptionValue, 0, len(values))
 	for key, value := range values {
 		options = append(options, &types.OptionValue{Key: key, Value: value})
@@ -327,7 +364,11 @@ func readGuestNetworks(ctx context.Context, vm *object.VirtualMachine) ([]Networ
 // plus the deprecated flat address list (prefix unknown, zero); the default
 // gateway comes from the guest route table. Disconnected NICs are skipped
 // because their reported addresses are stale. An ambiguous route table
-// (multiple distinct IPv4 default gateways) is rejected.
+// (multiple distinct IPv4 default gateways) is rejected. The single default
+// gateway applies to every NIC: guest routes identify their NIC only by the
+// guest interface name (the gateway device), which GuestNicInfo does not
+// report, so per-NIC gateway attribution cannot be derived from the guest
+// data.
 func networksFromGuest(guest *types.GuestInfo) ([]NetworkInfo, error) {
 	gateway, err := defaultGateway(guest.IpStack)
 	if err != nil {
@@ -534,7 +575,7 @@ func isProbeVM(ctx context.Context, vm *object.VirtualMachine) (bool, error) {
 		return false, nil
 	}
 	for _, base := range moVM.Config.ExtraConfig {
-		if ov := base.GetOptionValue(); ov.Key == probeMarkerExtraConfig && fmt.Sprint(ov.Value) == "true" {
+		if ov := base.GetOptionValue(); ov.Key == probeMarkerExtraConfig && fmt.Sprint(ov.Value) == probeMarkerValue {
 			return true, nil
 		}
 	}
