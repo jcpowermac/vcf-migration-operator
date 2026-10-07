@@ -727,6 +727,9 @@ func TestRunPreflightChecks(t *testing.T) {
 				KubeClient:    kubeClient,
 				ConfigClient:  configClient,
 				DynamicClient: dynamicClient,
+				checkNetworkingViaProbeVMsFunc: func(context.Context, *migrationv1alpha1.VmwareCloudFoundationMigration, *configv1.VSpherePlatformVCenterSpec) error {
+					return nil
+				},
 			}
 
 			migration := newMigrationForPreflight(server.URL.Host, inventory)
