@@ -194,6 +194,41 @@ func (e *probeTestEnv) baseSpec(name string) ProbeSpec {
 	}
 }
 
+// cloneUnmarkedVM clones the template into the probe folder without the
+// probe marker, simulating an unrelated VM that shares the probe name
+// prefix, and returns the clone.
+func (e *probeTestEnv) cloneUnmarkedVM(t *testing.T, name string) *object.VirtualMachine {
+	t.Helper()
+	template, err := e.session.Finder.VirtualMachine(e.ctx, e.template)
+	if err != nil {
+		t.Fatalf("finding template VM: %v", err)
+	}
+	folder, err := e.session.probeFolder(e.ctx, e.baseSpec(name))
+	if err != nil {
+		t.Fatalf("resolving folder for %s: %v", name, err)
+	}
+	folderRef := folder.Reference()
+	dsRef := e.dsRef
+	task, err := template.Clone(e.ctx, folder, name, types.VirtualMachineCloneSpec{
+		Location: types.VirtualMachineRelocateSpec{
+			Folder:    &folderRef,
+			Datastore: &dsRef,
+		},
+	})
+	if err != nil {
+		t.Fatalf("cloning VM %s: %v", name, err)
+	}
+	taskInfo, err := task.WaitForResult(e.ctx)
+	if err != nil {
+		t.Fatalf("cloning VM %s: %v", name, err)
+	}
+	ref, ok := taskInfo.Result.(types.ManagedObjectReference)
+	if !ok {
+		t.Fatalf("cloning VM %s: unexpected result %T", name, taskInfo.Result)
+	}
+	return object.NewVirtualMachine(e.session.Client.Client, ref)
+}
+
 func TestSingleNICDeviceChangePreservesVMXNET3Subtype(t *testing.T) {
 	e := newProbeTestEnv(t)
 	template, err := e.session.Finder.VirtualMachine(e.ctx, e.template)
@@ -280,8 +315,8 @@ func TestCreateProbeVM(t *testing.T) {
 	if got := extra["stealclock.enable"]; got != "TRUE" {
 		t.Errorf("CreateProbeVM: stealclock.enable = %q, want TRUE", got)
 	}
-	if got := extra[probeMarkerExtraConfig]; got != "true" {
-		t.Errorf("CreateProbeVM: probe marker = %q, want true", got)
+	if got := extra[probeMarkerExtraConfig]; got != probeMarkerValue {
+		t.Errorf("CreateProbeVM: probe marker = %q, want %q", got, probeMarkerValue)
 	}
 	if got := extra["guestinfo.afterburn.initrd.network-kargs"]; got != spec.NetworkKargs {
 		t.Errorf("CreateProbeVM: network-kargs = %q, want %q", got, spec.NetworkKargs)
@@ -353,6 +388,40 @@ func TestCreateProbeVMCustomIgnitionAndExtraConfig(t *testing.T) {
 	}
 	if got := extra["guestinfo.custom.key"]; got != "custom-value" {
 		t.Errorf("CreateProbeVM: custom extra config = %q, want custom-value", got)
+	}
+}
+
+func TestCleanupFailedClone(t *testing.T) {
+	e := newProbeTestEnv(t)
+	waitErr := fmt.Errorf("cloning template %s as %s: %w", e.template, "netcheck-cleanup-a", context.DeadlineExceeded)
+
+	// A leftover probe VM is destroyed and the original wait error returned.
+	spec := e.baseSpec("netcheck-cleanup-a")
+	vm, err := e.session.CreateProbeVM(e.ctx, spec)
+	if err != nil {
+		t.Fatalf("CreateProbeVM: %v", err)
+	}
+	t.Cleanup(func() { _ = DestroyProbeVM(e.ctx, vm) })
+	if got := e.session.cleanupFailedClone(e.ctx, spec, waitErr); got != waitErr {
+		t.Errorf("cleanupFailedClone error = %v, want the original wait error", got)
+	}
+	if _, err := e.session.Finder.VirtualMachine(e.ctx, spec.Name); err == nil {
+		t.Errorf("cleanupFailedClone: probe VM %s still present", spec.Name)
+	}
+
+	// No leftover VM: the wait error is returned unchanged.
+	if got := e.session.cleanupFailedClone(e.ctx, e.baseSpec("netcheck-cleanup-missing"), waitErr); got != waitErr {
+		t.Errorf("cleanupFailedClone (missing) error = %v, want the original wait error", got)
+	}
+
+	// A name-colliding VM without the probe marker is not destroyed.
+	decoy := e.cloneUnmarkedVM(t, "netcheck-cleanup-decoy")
+	t.Cleanup(func() { _ = DestroyProbeVM(e.ctx, decoy) })
+	if got := e.session.cleanupFailedClone(e.ctx, e.baseSpec("netcheck-cleanup-decoy"), waitErr); got != waitErr {
+		t.Errorf("cleanupFailedClone (decoy) error = %v, want the original wait error", got)
+	}
+	if _, err := e.session.Finder.VirtualMachine(e.ctx, "netcheck-cleanup-decoy"); err != nil {
+		t.Errorf("cleanupFailedClone: decoy VM must survive: %v", err)
 	}
 }
 
@@ -459,34 +528,7 @@ func TestReapProbeVMs(t *testing.T) {
 
 	// A VM that shares the name prefix but was not created as a probe must
 	// survive the reap.
-	template, err := e.session.Finder.VirtualMachine(e.ctx, e.template)
-	if err != nil {
-		t.Fatalf("finding template VM: %v", err)
-	}
-	folder, err := e.session.probeFolder(e.ctx, e.baseSpec("netcheck-reap-decoy"))
-	if err != nil {
-		t.Fatalf("resolving decoy folder: %v", err)
-	}
-	folderRef := folder.Reference()
-	dsRef := e.dsRef
-	decoyTask, err := template.Clone(e.ctx, folder, "netcheck-reap-decoy", types.VirtualMachineCloneSpec{
-		Location: types.VirtualMachineRelocateSpec{
-			Folder:    &folderRef,
-			Datastore: &dsRef,
-		},
-	})
-	if err != nil {
-		t.Fatalf("cloning decoy VM: %v", err)
-	}
-	decoyInfo, err := decoyTask.WaitForResult(e.ctx)
-	if err != nil {
-		t.Fatalf("cloning decoy VM: %v", err)
-	}
-	decoyRef, ok := decoyInfo.Result.(types.ManagedObjectReference)
-	if !ok {
-		t.Fatalf("cloning decoy VM: unexpected result %T", decoyInfo.Result)
-	}
-	decoy := object.NewVirtualMachine(e.session.Client.Client, decoyRef)
+	decoy := e.cloneUnmarkedVM(t, "netcheck-reap-decoy")
 	t.Cleanup(func() { _ = DestroyProbeVM(e.ctx, decoy) })
 
 	destroyed, err := e.session.ReapProbeVMs(e.ctx, "netcheck-reap-")
