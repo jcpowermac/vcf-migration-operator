@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 	"time"
 
 	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -26,6 +28,11 @@ const (
 	// guestToolsRunning is the GuestInfo.toolsRunningStatus value that
 	// indicates guest tools are running.
 	guestToolsRunning = "guestToolsRunning"
+
+	// probeMarkerExtraConfig is the extraConfig key that marks VMs cloned by
+	// CreateProbeVM. ReapProbeVMs relies on it so it never destroys unrelated
+	// VMs that merely share the probe name prefix.
+	probeMarkerExtraConfig = "vcfmigration.netcheck.probe"
 )
 
 // ProbeSpec describes how to create a probe VM on a destination failure domain.
@@ -160,7 +167,8 @@ func (s *Session) probeResourcePool(ctx context.Context, spec ProbeSpec) (*types
 }
 
 // probeExtraConfigValues builds the probe extra config entries: base64 ignition,
-// hostname, stealclock, optional network kargs, and any caller extra config.
+// hostname, stealclock, optional network kargs, any caller extra config, and
+// the netcheck probe marker consumed by ReapProbeVMs.
 func probeExtraConfigValues(spec ProbeSpec) []types.BaseOptionValue {
 	ignition := spec.Ignition
 	if ignition == "" {
@@ -178,6 +186,9 @@ func probeExtraConfigValues(spec ProbeSpec) []types.BaseOptionValue {
 	for key, value := range spec.ExtraConfig {
 		values[key] = value
 	}
+	// Set after the caller's entries so every probe VM carries the marker
+	// regardless of caller-supplied extra config.
+	values[probeMarkerExtraConfig] = "true"
 	options := make([]types.BaseOptionValue, 0, len(values))
 	for key, value := range values {
 		options = append(options, &types.OptionValue{Key: key, Value: value})
@@ -299,7 +310,10 @@ func readGuestNetworks(ctx context.Context, vm *object.VirtualMachine) ([]Networ
 	if guest.ToolsRunningStatus != guestToolsRunning {
 		return nil, false, nil
 	}
-	networks := networksFromGuest(guest)
+	networks, err := networksFromGuest(guest)
+	if err != nil {
+		return nil, false, err
+	}
 	for i := range networks {
 		if networks[i].Gateway != "" {
 			return networks, true, nil
@@ -311,11 +325,19 @@ func readGuestNetworks(ctx context.Context, vm *object.VirtualMachine) ([]Networ
 // networksFromGuest extracts the observed IPv4 networks from a guest info
 // snapshot. Addresses come from the NIC ipConfig (with their prefix lengths)
 // plus the deprecated flat address list (prefix unknown, zero); the default
-// gateway comes from the guest route table.
-func networksFromGuest(guest *types.GuestInfo) []NetworkInfo {
-	gateway := defaultGateway(guest.IpStack)
+// gateway comes from the guest route table. Disconnected NICs are skipped
+// because their reported addresses are stale. An ambiguous route table
+// (multiple distinct IPv4 default gateways) is rejected.
+func networksFromGuest(guest *types.GuestInfo) ([]NetworkInfo, error) {
+	gateway, err := defaultGateway(guest.IpStack)
+	if err != nil {
+		return nil, err
+	}
 	var networks []NetworkInfo
 	for _, nic := range guest.Net {
+		if !nic.Connected {
+			continue
+		}
 		type addrInfo struct {
 			ip     string
 			prefix int
@@ -345,29 +367,43 @@ func networksFromGuest(guest *types.GuestInfo) []NetworkInfo {
 			})
 		}
 	}
-	return networks
+	return networks, nil
 }
 
 // defaultGateway returns the IPv4 default route gateway from the guest IP
-// stacks, or the empty string when no default route is reported.
-func defaultGateway(stacks []types.GuestStackInfo) string {
+// stacks, or the empty string when no default route is reported. Multiple
+// distinct IPv4 default gateways are ambiguous — selecting one would make the
+// source/probe comparison depend on route order — so they are rejected and
+// the caller fails closed.
+func defaultGateway(stacks []types.GuestStackInfo) (string, error) {
+	var gateways []string
 	for _, stack := range stacks {
 		if stack.IpRouteConfig == nil {
 			continue
 		}
 		for _, route := range stack.IpRouteConfig.IpRoute {
-			if route.Network == "0.0.0.0" && route.PrefixLength == 0 {
-				if gw := route.Gateway.IpAddress; gw != "" {
-					return gw
-				}
+			if route.Network != "0.0.0.0" || route.PrefixLength != 0 {
+				continue
+			}
+			if gw := route.Gateway.IpAddress; gw != "" && !slices.Contains(gateways, gw) {
+				gateways = append(gateways, gw)
 			}
 		}
 	}
-	return ""
+	switch len(gateways) {
+	case 0:
+		return "", nil
+	case 1:
+		return gateways[0], nil
+	default:
+		return "", fmt.Errorf("guest reports %d distinct IPv4 default gateways (%v); refusing to select one", len(gateways), gateways)
+	}
 }
 
 // MatchesAny reports whether n is on the same masked IPv4 subnet with the same
-// default gateway as at least one of sources. The returned string describes n.
+// default gateway as at least one of sources. Both gateways must be valid IPv4
+// addresses, so identical malformed or IPv6 gateway strings cannot match. The
+// returned string describes n.
 func (n NetworkInfo) MatchesAny(sources []NetworkInfo) (bool, string) {
 	desc := fmt.Sprintf("%s (gateway %s)", n.IP, n.Gateway)
 	if n.Prefix == 0 {
@@ -383,6 +419,10 @@ func (n NetworkInfo) MatchesAny(sources []NetworkInfo) (bool, string) {
 	}
 	probeNet := probePfx.Masked().String()
 	desc = fmt.Sprintf("%s (gateway %s)", probeNet, n.Gateway)
+	gateway, err := netip.ParseAddr(n.Gateway)
+	if err != nil || !gateway.Is4() {
+		return false, desc
+	}
 	for _, src := range sources {
 		if src.Prefix == 0 {
 			continue
@@ -395,7 +435,11 @@ func (n NetworkInfo) MatchesAny(sources []NetworkInfo) (bool, string) {
 		if err != nil {
 			continue
 		}
-		if srcPfx.Masked().String() == probeNet && src.Gateway == n.Gateway {
+		srcGw, err := netip.ParseAddr(src.Gateway)
+		if err != nil || !srcGw.Is4() {
+			continue
+		}
+		if srcPfx.Masked().String() == probeNet && srcGw == gateway {
 			return true, desc
 		}
 	}
@@ -418,7 +462,7 @@ func (s *Session) GetVMNetworks(ctx context.Context, vmName string) ([]NetworkIn
 	if guest.ToolsRunningStatus != guestToolsRunning {
 		return nil, fmt.Errorf("guest tools are not running on VM %s", vmName)
 	}
-	return networksFromGuest(guest), nil
+	return networksFromGuest(guest)
 }
 
 // DestroyProbeVM destroys the probe VM, powering it off first when running
@@ -447,8 +491,11 @@ func DestroyProbeVM(ctx context.Context, vm *object.VirtualMachine) error {
 	return nil
 }
 
-// ReapProbeVMs destroys every VM whose name starts with namePrefix and returns
-// the names destroyed. When no VM matches the prefix, it returns an empty list.
+// ReapProbeVMs destroys every VM that carries the probe marker and whose name
+// starts with namePrefix, returning the names destroyed. VMs that share the
+// prefix but were not created as probes are skipped, so an unrelated VM with a
+// colliding name is never destroyed. When no VM matches the prefix, it
+// returns an empty list.
 func (s *Session) ReapProbeVMs(ctx context.Context, namePrefix string) ([]string, error) {
 	vms, err := s.Finder.VirtualMachineList(ctx, namePrefix+"*")
 	if err != nil {
@@ -458,12 +505,38 @@ func (s *Session) ReapProbeVMs(ctx context.Context, namePrefix string) ([]string
 		}
 		return nil, nil
 	}
+	log := klog.FromContext(ctx)
 	destroyed := make([]string, 0, len(vms))
 	for _, vm := range vms {
+		probe, err := isProbeVM(ctx, vm)
+		if err != nil {
+			return destroyed, err
+		}
+		if !probe {
+			log.V(2).Info("skipping non-probe VM matching probe prefix", "vm", vm.Name(), "namePrefix", namePrefix)
+			continue
+		}
 		if err := DestroyProbeVM(ctx, vm); err != nil {
 			return destroyed, err
 		}
 		destroyed = append(destroyed, vm.Name())
 	}
 	return destroyed, nil
+}
+
+// isProbeVM reports whether vm carries the probe marker set by CreateProbeVM.
+func isProbeVM(ctx context.Context, vm *object.VirtualMachine) (bool, error) {
+	var moVM mo.VirtualMachine
+	if err := vm.Properties(ctx, vm.Reference(), []string{"config"}, &moVM); err != nil {
+		return false, fmt.Errorf("reading config for VM %s: %w", vm.Name(), err)
+	}
+	if moVM.Config == nil {
+		return false, nil
+	}
+	for _, base := range moVM.Config.ExtraConfig {
+		if ov := base.GetOptionValue(); ov.Key == probeMarkerExtraConfig && fmt.Sprint(ov.Value) == "true" {
+			return true, nil
+		}
+	}
+	return false, nil
 }

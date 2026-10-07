@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -144,6 +145,7 @@ func readyGuest() *types.GuestInfo {
 		ToolsRunningStatus: guestToolsRunning,
 		Net: []types.GuestNicInfo{{
 			Network:   "test-network",
+			Connected: true,
 			IpAddress: []string{"10.0.1.5", "fd00::5"},
 			IpConfig: &types.NetIpConfigInfo{
 				IpAddress: []types.NetIpConfigInfoIpAddress{
@@ -277,6 +279,9 @@ func TestCreateProbeVM(t *testing.T) {
 	}
 	if got := extra["stealclock.enable"]; got != "TRUE" {
 		t.Errorf("CreateProbeVM: stealclock.enable = %q, want TRUE", got)
+	}
+	if got := extra[probeMarkerExtraConfig]; got != "true" {
+		t.Errorf("CreateProbeVM: probe marker = %q, want true", got)
 	}
 	if got := extra["guestinfo.afterburn.initrd.network-kargs"]; got != spec.NetworkKargs {
 		t.Errorf("CreateProbeVM: network-kargs = %q, want %q", got, spec.NetworkKargs)
@@ -452,6 +457,38 @@ func TestReapProbeVMs(t *testing.T) {
 		}
 	})
 
+	// A VM that shares the name prefix but was not created as a probe must
+	// survive the reap.
+	template, err := e.session.Finder.VirtualMachine(e.ctx, e.template)
+	if err != nil {
+		t.Fatalf("finding template VM: %v", err)
+	}
+	folder, err := e.session.probeFolder(e.ctx, e.baseSpec("netcheck-reap-decoy"))
+	if err != nil {
+		t.Fatalf("resolving decoy folder: %v", err)
+	}
+	folderRef := folder.Reference()
+	dsRef := e.dsRef
+	decoyTask, err := template.Clone(e.ctx, folder, "netcheck-reap-decoy", types.VirtualMachineCloneSpec{
+		Location: types.VirtualMachineRelocateSpec{
+			Folder:    &folderRef,
+			Datastore: &dsRef,
+		},
+	})
+	if err != nil {
+		t.Fatalf("cloning decoy VM: %v", err)
+	}
+	decoyInfo, err := decoyTask.WaitForResult(e.ctx)
+	if err != nil {
+		t.Fatalf("cloning decoy VM: %v", err)
+	}
+	decoyRef, ok := decoyInfo.Result.(types.ManagedObjectReference)
+	if !ok {
+		t.Fatalf("cloning decoy VM: unexpected result %T", decoyInfo.Result)
+	}
+	decoy := object.NewVirtualMachine(e.session.Client.Client, decoyRef)
+	t.Cleanup(func() { _ = DestroyProbeVM(e.ctx, decoy) })
+
 	destroyed, err := e.session.ReapProbeVMs(e.ctx, "netcheck-reap-")
 	if err != nil {
 		t.Fatalf("ReapProbeVMs: %v", err)
@@ -465,11 +502,10 @@ func TestReapProbeVMs(t *testing.T) {
 		}
 	}
 
-	// The finder reports an error when the glob matches no VMs, which is the
-	// desired outcome here.
+	// Only the decoy may remain: the probes are gone and the decoy untouched.
 	remaining, err := e.session.Finder.VirtualMachineList(e.ctx, "netcheck-reap-*")
-	if err == nil && len(remaining) != 0 {
-		t.Errorf("ReapProbeVMs: %d probe VMs remain", len(remaining))
+	if err != nil || len(remaining) != 1 {
+		t.Errorf("ReapProbeVMs: %d VMs remain after reap (want only the decoy), err = %v", len(remaining), err)
 	}
 
 	// Non-matching inventory VMs must be untouched.
@@ -484,6 +520,10 @@ func TestReapProbeVMs(t *testing.T) {
 	}
 	if len(again) != 0 {
 		t.Errorf("ReapProbeVMs (empty) destroyed %v, want none", again)
+	}
+
+	if _, err := e.session.Finder.VirtualMachine(e.ctx, "netcheck-reap-decoy"); err != nil {
+		t.Errorf("ReapProbeVMs: decoy VM must survive the reap: %v", err)
 	}
 }
 
@@ -544,12 +584,226 @@ func TestNetworkInfoMatchesAny(t *testing.T) {
 			n:    NetworkInfo{IP: "192.168.5.42", Prefix: 24, Gateway: "192.168.5.1"},
 			srcs: []NetworkInfo{{IP: "192.168.5.10", Prefix: 0, Gateway: "192.168.5.1"}},
 		},
+		{
+			name: "identical malformed gateways do not match",
+			n:    NetworkInfo{IP: "192.168.5.42", Prefix: 24, Gateway: "not-an-ip"},
+			srcs: []NetworkInfo{{IP: "192.168.5.10", Prefix: 24, Gateway: "not-an-ip"}},
+		},
+		{
+			name: "identical ipv6 gateways do not match",
+			n:    NetworkInfo{IP: "192.168.5.42", Prefix: 24, Gateway: "fe80::1"},
+			srcs: []NetworkInfo{{IP: "192.168.5.10", Prefix: 24, Gateway: "fe80::1"}},
+		},
+		{
+			name: "empty gateways do not match",
+			n:    NetworkInfo{IP: "192.168.5.42", Prefix: 24, Gateway: ""},
+			srcs: []NetworkInfo{{IP: "192.168.5.10", Prefix: 24, Gateway: ""}},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, _ := tt.n.MatchesAny(tt.srcs)
 			if got != tt.want {
 				t.Errorf("MatchesAny(%+v, %v) = %v, want %v", tt.n, tt.srcs, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNetworksFromGuest(t *testing.T) {
+	gatewayStack := func(gw string) types.GuestStackInfo {
+		return types.GuestStackInfo{
+			IpRouteConfig: &types.NetIpRouteConfigInfo{
+				IpRoute: []types.NetIpRouteConfigInfoIpRoute{{
+					Network: "0.0.0.0",
+					Gateway: types.NetIpRouteConfigInfoGateway{IpAddress: gw},
+				}},
+			},
+		}
+	}
+	tests := []struct {
+		name    string
+		guest   *types.GuestInfo
+		want    []NetworkInfo
+		wantErr bool
+	}{
+		{
+			name: "ipconfig addresses retained with prefix",
+			guest: &types.GuestInfo{
+				Net: []types.GuestNicInfo{{
+					Connected: true,
+					IpConfig: &types.NetIpConfigInfo{
+						IpAddress: []types.NetIpConfigInfoIpAddress{
+							{IpAddress: "10.0.1.5", PrefixLength: 24},
+						},
+					},
+				}},
+				IpStack: []types.GuestStackInfo{gatewayStack("10.0.1.1")},
+			},
+			want: []NetworkInfo{{IP: "10.0.1.5", Prefix: 24, Gateway: "10.0.1.1"}},
+		},
+		{
+			name: "flat-list-only address retained with unknown prefix",
+			guest: &types.GuestInfo{
+				Net: []types.GuestNicInfo{{
+					Connected: true,
+					IpAddress: []string{"10.0.2.7"},
+				}},
+				IpStack: []types.GuestStackInfo{gatewayStack("10.0.2.1")},
+			},
+			want: []NetworkInfo{{IP: "10.0.2.7", Prefix: 0, Gateway: "10.0.2.1"}},
+		},
+		{
+			name: "duplicate address between ipconfig and flat list reported once",
+			guest: &types.GuestInfo{
+				Net: []types.GuestNicInfo{{
+					Connected: true,
+					IpAddress: []string{"10.0.1.5"},
+					IpConfig: &types.NetIpConfigInfo{
+						IpAddress: []types.NetIpConfigInfoIpAddress{
+							{IpAddress: "10.0.1.5", PrefixLength: 24},
+						},
+					},
+				}},
+				IpStack: []types.GuestStackInfo{gatewayStack("10.0.1.1")},
+			},
+			want: []NetworkInfo{{IP: "10.0.1.5", Prefix: 24, Gateway: "10.0.1.1"}},
+		},
+		{
+			name: "ipv6 and malformed addresses excluded",
+			guest: &types.GuestInfo{
+				Net: []types.GuestNicInfo{{
+					Connected: true,
+					IpAddress: []string{"fd00::5", "not-an-ip", "10.0.1.5"},
+				}},
+				IpStack: []types.GuestStackInfo{gatewayStack("10.0.1.1")},
+			},
+			want: []NetworkInfo{{IP: "10.0.1.5", Prefix: 0, Gateway: "10.0.1.1"}},
+		},
+		{
+			name: "disconnected nic excluded and connected nic retained",
+			guest: &types.GuestInfo{
+				Net: []types.GuestNicInfo{
+					{
+						Connected: false,
+						IpAddress: []string{"10.0.9.9"},
+						IpConfig: &types.NetIpConfigInfo{
+							IpAddress: []types.NetIpConfigInfoIpAddress{
+								{IpAddress: "10.0.9.9", PrefixLength: 24},
+							},
+						},
+					},
+					{
+						Connected: true,
+						IpAddress: []string{"10.0.1.5"},
+					},
+				},
+				IpStack: []types.GuestStackInfo{gatewayStack("10.0.1.1")},
+			},
+			want: []NetworkInfo{{IP: "10.0.1.5", Prefix: 0, Gateway: "10.0.1.1"}},
+		},
+		{
+			name: "no default route yields empty gateway",
+			guest: &types.GuestInfo{
+				Net: []types.GuestNicInfo{{
+					Connected: true,
+					IpAddress: []string{"10.0.1.5"},
+				}},
+			},
+			want: []NetworkInfo{{IP: "10.0.1.5", Prefix: 0, Gateway: ""}},
+		},
+		{
+			name: "ambiguous default gateways rejected",
+			guest: &types.GuestInfo{
+				Net: []types.GuestNicInfo{{
+					Connected: true,
+					IpAddress: []string{"10.0.1.5"},
+				}},
+				IpStack: []types.GuestStackInfo{gatewayStack("10.0.1.1"), gatewayStack("10.0.1.254")},
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := networksFromGuest(tt.guest)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("networksFromGuest: want error, got %v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("networksFromGuest: %v", err)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("networksFromGuest = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDefaultGateway(t *testing.T) {
+	route := func(network, gw string) types.NetIpRouteConfigInfoIpRoute {
+		return types.NetIpRouteConfigInfoIpRoute{
+			Network: network,
+			Gateway: types.NetIpRouteConfigInfoGateway{IpAddress: gw},
+		}
+	}
+	stack := func(routes ...types.NetIpRouteConfigInfoIpRoute) types.GuestStackInfo {
+		return types.GuestStackInfo{IpRouteConfig: &types.NetIpRouteConfigInfo{IpRoute: routes}}
+	}
+	tests := []struct {
+		name    string
+		stacks  []types.GuestStackInfo
+		want    string
+		wantErr bool
+	}{
+		{
+			name:   "single default gateway",
+			stacks: []types.GuestStackInfo{stack(route("0.0.0.0", "10.0.1.1"))},
+			want:   "10.0.1.1",
+		},
+		{
+			name:   "identical default gateways across stacks are unambiguous",
+			stacks: []types.GuestStackInfo{stack(route("0.0.0.0", "10.0.2.1")), stack(route("0.0.0.0", "10.0.2.1"))},
+			want:   "10.0.2.1",
+		},
+		{
+			name:    "two distinct default gateways are rejected",
+			stacks:  []types.GuestStackInfo{stack(route("0.0.0.0", "10.0.3.1"), route("0.0.0.0", "10.0.3.254"))},
+			wantErr: true,
+		},
+		{
+			name:    "two distinct default gateways are rejected in reverse order",
+			stacks:  []types.GuestStackInfo{stack(route("0.0.0.0", "10.0.4.254"), route("0.0.0.0", "10.0.4.1"))},
+			wantErr: true,
+		},
+		{
+			name:   "ipv6 and non-default routes are ignored",
+			stacks: []types.GuestStackInfo{stack(route("::", "fe80::1"), route("10.0.0.0", "10.0.5.1"))},
+			want:   "",
+		},
+		{
+			name:   "no routes",
+			stacks: []types.GuestStackInfo{stack()},
+			want:   "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := defaultGateway(tt.stacks)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("defaultGateway: want error, got %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("defaultGateway: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("defaultGateway = %q, want %q", got, tt.want)
 			}
 		})
 	}
