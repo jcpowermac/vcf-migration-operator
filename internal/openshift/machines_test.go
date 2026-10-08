@@ -187,7 +187,9 @@ func TestCheckControlPlaneRolloutStatus(t *testing.T) {
 		replicas     int32
 		updated      int32
 		ready        int32
+		conditions   []metav1.Condition
 		wantComplete bool
+		wantErrSub   string
 	}{
 		{
 			name:         "complete when all counts match",
@@ -217,6 +219,47 @@ func TestCheckControlPlaneRolloutStatus(t *testing.T) {
 			ready:        0,
 			wantComplete: false,
 		},
+		{
+			name:     "error when CPMS is degraded",
+			replicas: 3,
+			updated:  1,
+			ready:    3,
+			conditions: []metav1.Condition{{
+				Type:    "Degraded",
+				Status:  metav1.ConditionTrue,
+				Reason:  "FailedReplacement",
+				Message: "machine cluster-cpms-1 has error",
+			}},
+			wantComplete: false,
+			wantErrSub:   "FailedReplacement",
+		},
+		{
+			name:     "error when CPMS reports continuous errors",
+			replicas: 3,
+			updated:  1,
+			ready:    3,
+			conditions: []metav1.Condition{{
+				Type:    "Error",
+				Status:  metav1.ConditionTrue,
+				Reason:  "ContinuousErrors",
+				Message: "repeatedly failed to create machine",
+			}},
+			wantComplete: false,
+			wantErrSub:   "ContinuousErrors",
+		},
+		{
+			name:     "no error when conditions are healthy",
+			replicas: 3,
+			updated:  2,
+			ready:    3,
+			conditions: []metav1.Condition{
+				{Type: "Available", Status: metav1.ConditionFalse, Reason: "UnavailableReplicas"},
+				{Type: "Degraded", Status: metav1.ConditionFalse, Reason: "AsExpected"},
+				{Type: "Error", Status: metav1.ConditionFalse, Reason: "AsExpected"},
+				{Type: "Progressing", Status: metav1.ConditionTrue, Reason: "NeedsUpdateReplicas"},
+			},
+			wantComplete: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -225,10 +268,20 @@ func TestCheckControlPlaneRolloutStatus(t *testing.T) {
 			cpms.Status.Replicas = tt.replicas
 			cpms.Status.UpdatedReplicas = tt.updated
 			cpms.Status.ReadyReplicas = tt.ready
+			cpms.Status.Conditions = tt.conditions
 			machineClient := fakemachineclient.NewClientset(cpms)
 			mgr := NewMachineManager(fakekube.NewClientset(), machineClient, nil)
 
 			complete, replicas, updated, ready, err := mgr.CheckControlPlaneRolloutStatus(context.Background())
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("CheckControlPlaneRolloutStatus error = %v, want containing %q", err, tt.wantErrSub)
+				}
+				if complete {
+					t.Errorf("complete = true, want false when rollout is stuck")
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("CheckControlPlaneRolloutStatus: %v", err)
 			}
