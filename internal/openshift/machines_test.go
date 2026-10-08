@@ -763,6 +763,13 @@ func TestCheckMachinesReady(t *testing.T) {
 		return machine
 	}
 
+	failedPhase := string(machinev1beta1.PhaseFailed)
+	withFailure := func(machine *machinev1beta1.Machine, reason machinev1beta1.MachineStatusError, message string) *machinev1beta1.Machine {
+		machine.Status.ErrorReason = &reason
+		machine.Status.ErrorMessage = &message
+		return machine
+	}
+
 	tests := []struct {
 		name              string
 		machines          []*machinev1beta1.Machine
@@ -772,6 +779,7 @@ func TestCheckMachinesReady(t *testing.T) {
 		wantReady         int32
 		wantTotal         int32
 		wantError         bool
+		wantErrSub        string
 	}{
 		{
 			name: "all running machines with node references are ready",
@@ -793,6 +801,14 @@ func TestCheckMachinesReady(t *testing.T) {
 			},
 			wantReady: 1,
 			wantTotal: 4,
+		},
+		{
+			name: "failed machine returns an error",
+			machines: []*machinev1beta1.Machine{
+				newMachine("worker-a", &running, "node-a"),
+				withFailure(newMachine("worker-f", &failedPhase, ""), machinev1beta1.CreateMachineError, "simulated create failure"),
+			},
+			wantErrSub: `"worker-f" is Failed`,
 		},
 		{
 			name:      "empty machine set is incomplete",
@@ -828,6 +844,12 @@ func TestCheckMachinesReady(t *testing.T) {
 			manager := NewMachineManager(fakekube.NewClientset(), machineClient, nil)
 
 			complete, ready, total, err := manager.CheckMachinesReady(context.Background(), "workers-a")
+			if tt.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+					t.Fatalf("CheckMachinesReady() error = %v, want containing %q", err, tt.wantErrSub)
+				}
+				return
+			}
 			if (err != nil) != tt.wantError {
 				t.Fatalf("CheckMachinesReady() error = %v, wantError %t", err, tt.wantError)
 			}

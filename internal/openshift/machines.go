@@ -20,6 +20,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 )
 
 const (
@@ -374,6 +375,10 @@ func (m *MachineManager) machinesetSelectorLabel(ctx context.Context, machineSet
 
 // CheckMachinesReady checks whether all machines for the given MachineSet are in
 // a Ready state (phase Running and has a NodeRef).
+// It returns an error when any machine is in the Failed phase. Failure is
+// terminal in the machine-api controller (it will not reconcile a failed
+// machine again), so the wait can never complete; the machine must be deleted
+// and replaced.
 func (m *MachineManager) CheckMachinesReady(ctx context.Context, machineSetName string) (complete bool, ready, total int32, err error) {
 	log := klog.FromContext(ctx)
 
@@ -391,7 +396,12 @@ func (m *MachineManager) CheckMachinesReady(ctx context.Context, machineSetName 
 	total = int32(len(machines.Items))
 	for i := range machines.Items {
 		machine := &machines.Items[i]
-		if machine.Status.Phase != nil && *machine.Status.Phase == machinePhaseRunning && machine.Status.NodeRef != nil {
+		phase := ptr.Deref(machine.Status.Phase, "")
+		if phase == machinev1beta1.PhaseFailed {
+			return false, ready, total, fmt.Errorf("waiting for machineset %q: machine %q is Failed (%s): %s",
+				machineSetName, machine.Name, ptr.Deref(machine.Status.ErrorReason, ""), ptr.Deref(machine.Status.ErrorMessage, ""))
+		}
+		if phase == machinePhaseRunning && machine.Status.NodeRef != nil {
 			ready++
 		}
 	}
