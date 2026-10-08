@@ -19,12 +19,16 @@ import (
 	"github.com/openshift/vcf-migration-operator/internal/openshift"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	fakekube "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/klog/v2"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 // machinePhaseRunning is the machinev1beta1 Machine Phase value for a running
@@ -366,6 +370,107 @@ func TestEnsureWorkloadMigratedRolloutGate(t *testing.T) {
 				tt.assertions(t, reconciler)
 			}
 		})
+	}
+}
+
+// TestReconcileWorkloadMigratedFailedWorkerMachine is a controller-level
+// regression test for a terminally Failed worker Machine behind a target
+// MachineSet: the error surfaces from CheckMachinesReady through
+// checkWorkerReadiness and ensureWorkloadMigrated, and Reconcile persists
+// ConditionWorkloadMigrated False with ReasonFailed (the error is not
+// transient, so ReasonRetrying must not be used). The direct manager-level
+// behavior is covered by TestCheckMachinesReady in internal/openshift.
+func TestReconcileWorkloadMigratedFailedWorkerMachine(t *testing.T) {
+	ctx := context.Background()
+	targetMSName := workerMachineSetName("test-infra", "target-fd-1")
+
+	failedPhase := machinev1beta1.PhaseFailed
+	failureReason := machinev1beta1.CreateMachineError
+	failureMessage := "simulated create failure"
+	reconciler := newRolloutReconciler(t, []runtime.Object{
+		newInfrastructureForRollout(),
+		newTargetMachineSetForRollout(targetMSName, "target.example.com", 1),
+		&machinev1beta1.Machine{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      targetMSName + "-failed",
+				Namespace: openshift.MachineAPINamespace,
+				Labels: map[string]string{
+					"machine.openshift.io/cluster-api-machineset": targetMSName,
+				},
+			},
+			Status: machinev1beta1.MachineStatus{
+				Phase:        &failedPhase,
+				ErrorReason:  &failureReason,
+				ErrorMessage: &failureMessage,
+			},
+		},
+	})
+
+	start := metav1.Now()
+	migration := &migrationv1alpha1.VmwareCloudFoundationMigration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       migrationv1alpha1.SingletonName,
+			Namespace:  "default",
+			Generation: 1,
+		},
+		Spec: migrationv1alpha1.VmwareCloudFoundationMigrationSpec{
+			State: migrationv1alpha1.MigrationStateRunning,
+			FailureDomains: []configv1.VSpherePlatformFailureDomainSpec{{
+				Name:   "target-fd-1",
+				Server: "target.example.com",
+				Topology: configv1.VSpherePlatformTopology{
+					Template:       "/dc1/vm/target-template",
+					Datacenter:     "dc1",
+					Datastore:      "ds1",
+					ResourcePool:   "rp1",
+					ComputeCluster: "cl1",
+				},
+			}},
+		},
+		Status: migrationv1alpha1.VmwareCloudFoundationMigrationStatus{
+			StartTime: &start,
+		},
+	}
+	// Earlier phases are complete so Reconcile dispatches straight to
+	// ensureWorkloadMigrated.
+	completedMessage := "completed"
+	reconciler.setCondition(migration, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
+	reconciler.setCondition(migration, migrationv1alpha1.ConditionDestinationInitialized, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
+	reconciler.setCondition(migration, migrationv1alpha1.ConditionMultiSiteConfigured, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, completedMessage)
+
+	scheme := runtime.NewScheme()
+	if err := migrationv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("building scheme: %v", err)
+	}
+	fakeClient := clientfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(migration).
+		WithStatusSubresource(&migrationv1alpha1.VmwareCloudFoundationMigration{}).
+		Build()
+	reconciler.Client = fakeClient
+	reconciler.Scheme = scheme
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(migration)})
+	if err == nil || !strings.Contains(err.Error(), "is Failed") {
+		t.Fatalf("Reconcile() error = %v, want error containing %q", err, "is Failed")
+	}
+
+	persisted := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(migration), persisted); err != nil {
+		t.Fatalf("getting persisted migration: %v", err)
+	}
+	cond := apimeta.FindStatusCondition(persisted.Status.Conditions, migrationv1alpha1.ConditionWorkloadMigrated)
+	if cond == nil {
+		t.Fatalf("condition %q not found on persisted migration", migrationv1alpha1.ConditionWorkloadMigrated)
+	}
+	if cond.Status != metav1.ConditionFalse {
+		t.Fatalf("condition status = %q, want %q", cond.Status, metav1.ConditionFalse)
+	}
+	if cond.Reason != migrationv1alpha1.ReasonFailed {
+		t.Fatalf("condition reason = %q, want %q", cond.Reason, migrationv1alpha1.ReasonFailed)
+	}
+	if !strings.Contains(cond.Message, "is Failed") {
+		t.Fatalf("condition message = %q, want containing %q", cond.Message, "is Failed")
 	}
 }
 
