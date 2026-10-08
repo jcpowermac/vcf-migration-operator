@@ -763,7 +763,7 @@ func TestCheckMachinesReady(t *testing.T) {
 		return machine
 	}
 
-	failedPhase := string(machinev1beta1.PhaseFailed)
+	failedPhase := machinev1beta1.PhaseFailed
 	withFailure := func(machine *machinev1beta1.Machine, reason machinev1beta1.MachineStatusError, message string) *machinev1beta1.Machine {
 		machine.Status.ErrorReason = &reason
 		machine.Status.ErrorMessage = &message
