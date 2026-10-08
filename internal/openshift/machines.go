@@ -15,6 +15,7 @@ import (
 	machineclient "github.com/openshift/client-go/machine/clientset/versioned"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic"
@@ -30,6 +31,12 @@ const (
 	machineSetLabelKey = "machine.openshift.io/cluster-api-machineset"
 	// machinePhaseRunning is the Machine phase for healthy, node-bound machines.
 	machinePhaseRunning = "Running"
+	// CPMS status condition types set by the control-plane-machine-set
+	// operator (the constants are unexported upstream, so they are mirrored
+	// here). A true condition means the operator has stopped rolling the
+	// control plane and will not proceed without intervention.
+	cpmsConditionDegraded = "Degraded"
+	cpmsConditionError    = "Error"
 )
 
 // MachineManager manages Machine API resources including MachineSets and
@@ -280,6 +287,9 @@ func (m *MachineManager) UpdateCPMSFailureDomain(ctx context.Context, failureDom
 
 // CheckControlPlaneRolloutStatus checks the rollout status of the ControlPlaneMachineSet.
 // It returns whether the rollout is complete and the replica counts.
+// It returns an error when the ControlPlaneMachineSet reports a Degraded or
+// Error condition, which means the rollout is stuck and will not proceed
+// without intervention.
 func (m *MachineManager) CheckControlPlaneRolloutStatus(ctx context.Context) (complete bool, replicas, updatedReplicas, readyReplicas int32, err error) {
 	log := klog.FromContext(ctx)
 
@@ -291,6 +301,19 @@ func (m *MachineManager) CheckControlPlaneRolloutStatus(ctx context.Context) (co
 	replicas = cpms.Status.Replicas
 	updatedReplicas = cpms.Status.UpdatedReplicas
 	readyReplicas = cpms.Status.ReadyReplicas
+
+	// The CPMS operator sets Degraded (e.g. FailedReplacement,
+	// MachinesAlreadyOwned) or Error (ContinuousErrors) when it has stopped
+	// rolling the control plane. Waiting further would never complete the
+	// rollout, so fail the migration instead of requeueing forever.
+	for _, condType := range []string{cpmsConditionDegraded, cpmsConditionError} {
+		cond := meta.FindStatusCondition(cpms.Status.Conditions, condType)
+		if cond == nil || cond.Status != metav1.ConditionTrue {
+			continue
+		}
+		return false, replicas, updatedReplicas, readyReplicas,
+			fmt.Errorf("waiting for control plane rollout: CPMS condition %s=%s (%s): %s", cond.Type, cond.Status, cond.Reason, cond.Message)
+	}
 
 	complete = replicas > 0 && updatedReplicas == replicas && readyReplicas == replicas
 	log.V(2).Info("CPMS rollout status", "complete", complete, "replicas", replicas, "updatedReplicas", updatedReplicas, "readyReplicas", readyReplicas)
