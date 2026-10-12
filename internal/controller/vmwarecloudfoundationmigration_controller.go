@@ -759,6 +759,32 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureWorkloadMigrated(ctx co
 		return r.ensureWorkloadMigratedRolloutAndScaleDown(ctx, migration)
 	}
 
+	// The migration's own cloud provider and credential changes (vsphere-creds,
+	// Infrastructure, cloud-provider-config) trigger an MCO rollout that reboots
+	// the same masters the CPMS is about to replace. A master that is mid-reboot
+	// looks unhealthy to the etcd operator, which releases its machine deletion
+	// hook, so the CPMS can delete the machine before a replacement etcd member
+	// graduates — permanently losing quorum. Hold the CPMS update until every
+	// machine config pool has finished rolling.
+	poolMgr := openshift.NewMachineConfigPoolManager(r.MachineConfigClient)
+	converged, poolSummary, err := poolMgr.CheckPoolsConverged(ctx)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("checking machine config pool convergence: %w", err)
+	}
+	if !converged {
+		blockers := make([]string, 0, 2)
+		if len(poolSummary.NotUpdatedPools) > 0 {
+			blockers = append(blockers, fmt.Sprintf("not updated: %s", strings.Join(poolSummary.NotUpdatedPools, ", ")))
+		}
+		if len(poolSummary.DegradedPools) > 0 {
+			blockers = append(blockers, fmt.Sprintf("degraded: %s", strings.Join(poolSummary.DegradedPools, ", ")))
+		}
+		log.V(1).Info("machine config pools not converged, holding CPMS update", "blockers", blockers)
+		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing,
+			fmt.Sprintf("Waiting for machine config pools to converge (%s)", strings.Join(blockers, ", ")))
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
 	// Step 3: Update CPMS with target failure domains and set state to Active.
 	// The CPMS is updated in place — no delete/recreate needed. The CPMS operator
 	// resolves failure domain topology from the Infrastructure resource and triggers
