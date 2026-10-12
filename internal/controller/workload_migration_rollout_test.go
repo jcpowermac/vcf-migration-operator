@@ -269,8 +269,8 @@ func TestEnsureWorkloadMigratedRolloutGate(t *testing.T) {
 			objects: []runtime.Object{
 				newInfrastructureForRollout(),
 				newTargetMachineSetForRollout(targetMSName, "target.example.com", 1),
-				newReadyWorkerMachineForRollout(targetMSName, "worker-node-1"),
-				newReadyNodeForRollout("worker-node-1"),
+				newReadyWorkerMachineForRollout(targetMSName),
+				newReadyNodeForRollout(rolloutReadyNodeName),
 				newCPMSUpdatedForRollout([]string{"target-fd-1"}, false),
 				newSourceMachineSetForRollout(1),
 			},
@@ -293,8 +293,8 @@ func TestEnsureWorkloadMigratedRolloutGate(t *testing.T) {
 			objects: []runtime.Object{
 				newInfrastructureForRollout(),
 				newTargetMachineSetForRollout(targetMSName, "target.example.com", 2),
-				newReadyWorkerMachineForRollout(targetMSName, "worker-node-1"),
-				newReadyNodeForRollout("worker-node-1"),
+				newReadyWorkerMachineForRollout(targetMSName),
+				newReadyNodeForRollout(rolloutReadyNodeName),
 				&machinev1beta1.Machine{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      targetMSName + "-pending",
@@ -337,8 +337,8 @@ func TestEnsureWorkloadMigratedRolloutGate(t *testing.T) {
 			objects: []runtime.Object{
 				newInfrastructureForRollout(),
 				newTargetMachineSetForRollout(targetMSName, "target.example.com", 1),
-				newReadyWorkerMachineForRollout(targetMSName, "worker-node-1"),
-				newReadyNodeForRollout("worker-node-1"),
+				newReadyWorkerMachineForRollout(targetMSName),
+				newReadyNodeForRollout(rolloutReadyNodeName),
 				newCPMSUpdatedForRollout([]string{"source-fd-1"}, false),
 				newSourceMachineSetForRollout(1),
 			},
@@ -362,8 +362,8 @@ func TestEnsureWorkloadMigratedRolloutGate(t *testing.T) {
 			objects: []runtime.Object{
 				newInfrastructureForRollout(),
 				newTargetMachineSetForRollout(targetMSName, "target.example.com", 1),
-				newReadyWorkerMachineForRollout(targetMSName, "worker-node-1"),
-				newReadyNodeForRollout("worker-node-1"),
+				newReadyWorkerMachineForRollout(targetMSName),
+				newReadyNodeForRollout(rolloutReadyNodeName),
 				newCPMSUpdatedForRollout([]string{"source-fd-1"}, false),
 				newSourceMachineSetForRollout(1),
 			},
@@ -814,7 +814,13 @@ func newTargetMachineSetForRollout(name, server string, replicas int32) *machine
 	}
 }
 
-func newReadyWorkerMachineForRollout(machineSetName, nodeName string) *machinev1beta1.Machine {
+// rolloutReadyNodeName is the node name carried by machines built by
+// newReadyWorkerMachineForRollout; pair them with
+// newReadyNodeForRollout(rolloutReadyNodeName) so the machine's NodeRef and
+// the node object stay in sync.
+const rolloutReadyNodeName = "worker-node-1"
+
+func newReadyWorkerMachineForRollout(machineSetName string) *machinev1beta1.Machine {
 	running := machinePhaseRunning
 	return &machinev1beta1.Machine{
 		ObjectMeta: metav1.ObjectMeta{
@@ -827,7 +833,7 @@ func newReadyWorkerMachineForRollout(machineSetName, nodeName string) *machinev1
 		Status: machinev1beta1.MachineStatus{
 			Phase: &running,
 			NodeRef: &corev1.ObjectReference{
-				Name: nodeName,
+				Name: rolloutReadyNodeName,
 			},
 		},
 	}
