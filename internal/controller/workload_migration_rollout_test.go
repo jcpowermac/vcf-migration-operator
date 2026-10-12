@@ -15,6 +15,7 @@ import (
 	machinev1beta1 "github.com/openshift/api/machine/v1beta1"
 	configfake "github.com/openshift/client-go/config/clientset/versioned/fake"
 	fakemachineclient "github.com/openshift/client-go/machine/clientset/versioned/fake"
+	machineconfigfake "github.com/openshift/client-go/machineconfiguration/clientset/versioned/fake"
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
 	"github.com/openshift/vcf-migration-operator/internal/openshift"
 	corev1 "k8s.io/api/core/v1"
@@ -258,6 +259,7 @@ func TestEnsureWorkloadMigratedRolloutGate(t *testing.T) {
 	tests := []struct {
 		name        string
 		objects     []runtime.Object
+		mcpPools    []runtime.Object
 		wantRequeue time.Duration
 		wantMessage string
 		assertions  func(t *testing.T, reconciler *VmwareCloudFoundationMigrationReconciler)
@@ -325,6 +327,64 @@ func TestEnsureWorkloadMigratedRolloutGate(t *testing.T) {
 				}
 			},
 		},
+		{
+			// The migration's own cloud provider and credential changes trigger an
+			// MCO machine config pool rollout that reboots the same masters the
+			// CPMS replaces. Updating the CPMS while a pool is mid-roll can defeat
+			// the etcd quorum guard (member unhealthy mid-reboot), so the CPMS
+			// update must hold until every pool has converged.
+			name: "holds CPMS update while machine config pools are rolling out",
+			objects: []runtime.Object{
+				newInfrastructureForRollout(),
+				newTargetMachineSetForRollout(targetMSName, "target.example.com", 1),
+				newReadyWorkerMachineForRollout(targetMSName, "worker-node-1"),
+				newReadyNodeForRollout("worker-node-1"),
+				newCPMSUpdatedForRollout([]string{"source-fd-1"}, false),
+				newSourceMachineSetForRollout(1),
+			},
+			mcpPools:    []runtime.Object{newUnconvergedReadyTestPool("master"), newConvergedReadyTestPool("worker")},
+			wantRequeue: 30 * time.Second,
+			wantMessage: "Waiting for machine config pools to converge (not updated: master)",
+			assertions: func(t *testing.T, reconciler *VmwareCloudFoundationMigrationReconciler) {
+				t.Helper()
+				cpms, err := reconciler.MachineClient.MachineV1().ControlPlaneMachineSets(openshift.MachineAPINamespace).Get(ctx, "cluster", metav1.GetOptions{})
+				if err != nil {
+					t.Fatalf("getting CPMS: %v", err)
+				}
+				fds := cpms.Spec.Template.OpenShiftMachineV1Beta1Machine.FailureDomains
+				if fds == nil || len(fds.VSphere) != 1 || fds.VSphere[0].Name != "source-fd-1" {
+					t.Fatalf("CPMS failure domains = %+v, want source-fd-1 (CPMS must not be updated before pools converge)", fds)
+				}
+			},
+		},
+		{
+			name: "updates CPMS once machine config pools have converged",
+			objects: []runtime.Object{
+				newInfrastructureForRollout(),
+				newTargetMachineSetForRollout(targetMSName, "target.example.com", 1),
+				newReadyWorkerMachineForRollout(targetMSName, "worker-node-1"),
+				newReadyNodeForRollout("worker-node-1"),
+				newCPMSUpdatedForRollout([]string{"source-fd-1"}, false),
+				newSourceMachineSetForRollout(1),
+			},
+			mcpPools:    []runtime.Object{newConvergedReadyTestPool("master"), newConvergedReadyTestPool("worker")},
+			wantRequeue: 15 * time.Second,
+			wantMessage: "Waiting for control plane rollout to start (CPMS generation 2/1 observed)",
+			assertions: func(t *testing.T, reconciler *VmwareCloudFoundationMigrationReconciler) {
+				t.Helper()
+				cpms, err := reconciler.MachineClient.MachineV1().ControlPlaneMachineSets(openshift.MachineAPINamespace).Get(ctx, "cluster", metav1.GetOptions{})
+				if err != nil {
+					t.Fatalf("getting CPMS: %v", err)
+				}
+				fds := cpms.Spec.Template.OpenShiftMachineV1Beta1Machine.FailureDomains
+				if fds == nil || len(fds.VSphere) != 1 || fds.VSphere[0].Name != "target-fd-1" {
+					t.Fatalf("CPMS failure domains = %+v, want target-fd-1 (CPMS should be updated once pools converge)", fds)
+				}
+				if cpms.Spec.State != machinev1.ControlPlaneMachineSetStateActive {
+					t.Fatalf("CPMS state = %q, want %q", cpms.Spec.State, machinev1.ControlPlaneMachineSetStateActive)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -332,10 +392,11 @@ func TestEnsureWorkloadMigratedRolloutGate(t *testing.T) {
 			kubeObjects, configClientObjects, machineClientObjects := splitRolloutTestObjects(t, tt.objects)
 
 			reconciler := &VmwareCloudFoundationMigrationReconciler{
-				KubeClient:    fakekube.NewClientset(kubeObjects...),
-				ConfigClient:  configfake.NewClientset(configClientObjects...),
-				MachineClient: fakemachineclient.NewClientset(machineClientObjects...),
-				Recorder:      events.NewFakeRecorder(20),
+				KubeClient:          fakekube.NewClientset(kubeObjects...),
+				ConfigClient:        configfake.NewClientset(configClientObjects...),
+				MachineClient:       fakemachineclient.NewClientset(machineClientObjects...),
+				MachineConfigClient: machineconfigfake.NewClientset(tt.mcpPools...),
+				Recorder:            events.NewFakeRecorder(20),
 			}
 			migration := &migrationv1alpha1.VmwareCloudFoundationMigration{
 				ObjectMeta: metav1.ObjectMeta{Name: migrationv1alpha1.SingletonName, Generation: 1},
