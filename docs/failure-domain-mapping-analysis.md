@@ -134,6 +134,7 @@ Field on the spec:
 // +listMapKey=source
 // +kubebuilder:validation:MinItems=1
 // +kubebuilder:validation:XValidation:rule="self.map(m, m.destination).distinct().size() == self.size()",message="destination must be unique across mappings"
+// +kubebuilder:validation:MaxItems=64
 FailureDomainMappings []FailureDomainMapping `json:"failureDomainMappings,omitempty"`
 ```
 
