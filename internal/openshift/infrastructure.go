@@ -144,6 +144,12 @@ func (m *InfrastructureManager) RemoveSourceVCenter(ctx context.Context, infra *
 		return nil, fmt.Errorf("infrastructure spec has no vSphere platform configuration")
 	}
 
+	// Refuse to remove the last configured vCenter; cleanup must leave the
+	// destination vCenters in place, and an empty list would break the cluster.
+	if len(infra.Spec.PlatformSpec.VSphere.VCenters) == 1 && infra.Spec.PlatformSpec.VSphere.VCenters[0].Server == sourceServer {
+		return nil, fmt.Errorf("refusing to remove the last configured vCenter %q", sourceServer)
+	}
+
 	// Remove the vCenter entry.
 	var vcenters []configv1.VSpherePlatformVCenterSpec
 	for _, vc := range infra.Spec.PlatformSpec.VSphere.VCenters {

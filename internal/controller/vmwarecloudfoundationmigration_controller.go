@@ -957,57 +957,70 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureSourceCleaned(ctx conte
 		return ctrl.Result{}, fmt.Errorf("getting infrastructure: %w", err)
 	}
 
-	var sourceServer string
-	if infra.Spec.PlatformSpec.VSphere != nil && len(infra.Spec.PlatformSpec.VSphere.VCenters) > 0 {
+	// Resolve the source vCenter for cleanup. The identity is persisted
+	// before any side effects so retries (including after an operator restart
+	// mid-cleanup) stay bound to the original source; once the source is
+	// removed from the Infrastructure VCenters list, VCenters[0] would
+	// resolve to the destination.
+	sourceServer := migration.Status.SourceVCenter
+	if sourceServer == "" {
+		if infra.Spec.PlatformSpec.VSphere == nil || len(infra.Spec.PlatformSpec.VSphere.VCenters) == 0 {
+			return ctrl.Result{}, fmt.Errorf("determining source vCenter: no vCenters configured in infrastructure and none recorded in status")
+		}
 		sourceServer = infra.Spec.PlatformSpec.VSphere.VCenters[0].Server
-	} else {
-		log.V(1).Info("source vCenter not found in infrastructure, already removed")
+		if err := r.persistSourceVCenter(ctx, migration, sourceServer); err != nil {
+			return ctrl.Result{}, fmt.Errorf("persisting source vCenter identity: %w", err)
+		}
+		log.V(1).Info("recorded source vCenter for cleanup", "server", sourceServer)
+	}
+
+	// Never remove a server that is a configured destination; this guards
+	// against a retry resolving VCenters[0] to the destination after the
+	// source was already removed.
+	for i := range migration.Spec.FailureDomains {
+		if migration.Spec.FailureDomains[i].Server == sourceServer {
+			return ctrl.Result{}, fmt.Errorf("refusing to clean up %q: server is a configured destination failure domain", sourceServer)
+		}
 	}
 
 	// Complete all vCenter list changes (Infrastructure, config, secrets, pods).
-	if sourceServer != "" {
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Removing source vCenter from Infrastructure")
-		infra, err := infraMgr.Get(ctx)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("getting infrastructure: %w", err)
-		}
-		if _, err := infraMgr.RemoveSourceVCenter(ctx, infra, sourceServer); err != nil {
-			return ctrl.Result{}, fmt.Errorf("removing source vCenter from infrastructure: %w", err)
-		}
-		log.V(1).Info("removed source vCenter from infrastructure", "server", sourceServer)
+	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Removing source vCenter from Infrastructure")
+	if _, err := infraMgr.RemoveSourceVCenter(ctx, infra, sourceServer); err != nil {
+		return ctrl.Result{}, fmt.Errorf("removing source vCenter from infrastructure: %w", err)
+	}
+	log.V(1).Info("removed source vCenter from infrastructure", "server", sourceServer)
 
-		// Remove source from cloud-provider-config.
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Removing source vCenter from cloud-provider-config")
-		cmMgr := openshift.NewConfigMapManager(r.KubeClient)
-		cm, err := cmMgr.GetCloudProviderConfig(ctx)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("getting cloud-provider-config: %w", err)
-		}
+	// Remove source from cloud-provider-config.
+	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Removing source vCenter from cloud-provider-config")
+	cmMgr := openshift.NewConfigMapManager(r.KubeClient)
+	cm, err := cmMgr.GetCloudProviderConfig(ctx)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("getting cloud-provider-config: %w", err)
+	}
 
-		if _, err := cmMgr.RemoveSourceVCenterFromConfig(ctx, cm, sourceServer); err != nil {
-			return ctrl.Result{}, fmt.Errorf("removing source vCenter from cloud-provider-config: %w", err)
-		}
-		log.V(1).Info("removed source vCenter from cloud-provider-config", "server", sourceServer)
+	if _, err := cmMgr.RemoveSourceVCenterFromConfig(ctx, cm, sourceServer); err != nil {
+		return ctrl.Result{}, fmt.Errorf("removing source vCenter from cloud-provider-config: %w", err)
+	}
+	log.V(1).Info("removed source vCenter from cloud-provider-config", "server", sourceServer)
 
-		// Remove source creds from vsphere-creds.
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Removing source credentials from vsphere-creds")
-		sm := openshift.NewSecretManager(r.KubeClient)
-		credsSecret, err := sm.GetVSphereCredsSecret(ctx)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("getting vsphere-creds secret: %w", err)
-		}
+	// Remove source creds from vsphere-creds.
+	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Removing source credentials from vsphere-creds")
+	sm := openshift.NewSecretManager(r.KubeClient)
+	credsSecret, err := sm.GetVSphereCredsSecret(ctx)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("getting vsphere-creds secret: %w", err)
+	}
 
-		if _, err := sm.RemoveSourceVCenterCreds(ctx, credsSecret, sourceServer); err != nil {
-			return ctrl.Result{}, fmt.Errorf("removing source credentials: %w", err)
-		}
-		log.V(1).Info("removed source credentials from vsphere-creds", "server", sourceServer)
+	if _, err := sm.RemoveSourceVCenterCreds(ctx, credsSecret, sourceServer); err != nil {
+		return ctrl.Result{}, fmt.Errorf("removing source credentials: %w", err)
+	}
+	log.V(1).Info("removed source credentials from vsphere-creds", "server", sourceServer)
 
-		// Restart vSphere pods to pick up new config.
-		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Restarting vSphere pods after source removal")
-		podMgr := openshift.NewPodManager(r.KubeClient)
-		if err := podMgr.RestartVSpherePods(ctx); err != nil {
-			return ctrl.Result{}, fmt.Errorf("restarting vSphere pods: %w", err)
-		}
+	// Restart vSphere pods to pick up new config.
+	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Restarting vSphere pods after source removal")
+	podMgr := openshift.NewPodManager(r.KubeClient)
+	if err := podMgr.RestartVSpherePods(ctx); err != nil {
+		return ctrl.Result{}, fmt.Errorf("restarting vSphere pods: %w", err)
 	}
 
 	// Generate metadata (after vCenter list is updated).
@@ -1018,7 +1031,6 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureSourceCleaned(ctx conte
 	}
 
 	// Build credentials map for metadata generation.
-	sm := openshift.NewSecretManager(r.KubeClient)
 	creds := make(map[string]string)
 	for i := range migration.Spec.FailureDomains {
 		fd := &migration.Spec.FailureDomains[i]
@@ -1051,6 +1063,33 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureSourceCleaned(ctx conte
 	r.setCondition(migration, condType, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Source vCenter cleaned")
 	r.Recorder.Eventf(migration, nil, "Normal", migrationv1alpha1.ConditionSourceCleaned, migrationv1alpha1.ConditionSourceCleaned, "Source vCenter removed from cluster configuration")
 	return ctrl.Result{}, nil
+}
+
+// persistSourceVCenter durably records the source vCenter server in the
+// migration status before any cleanup side effects, so retries stay bound to
+// the original source after it is removed from the Infrastructure VCenters
+// list. Write-once: a different value already recorded in status wins and
+// refuses rebinding.
+func (r *VmwareCloudFoundationMigrationReconciler) persistSourceVCenter(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, server string) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(migration), latest); err != nil {
+			return err
+		}
+		if latest.Status.SourceVCenter != "" {
+			if latest.Status.SourceVCenter != server {
+				return fmt.Errorf("status already records source vCenter %q, refusing to rebind to %q", latest.Status.SourceVCenter, server)
+			}
+			migration.Status.SourceVCenter = server
+			return nil
+		}
+		latest.Status.SourceVCenter = server
+		if err := r.Status().Update(ctx, latest); err != nil {
+			return err
+		}
+		migration.Status.SourceVCenter = server
+		return nil
+	})
 }
 
 // ensureReady verifies all operators are healthy, every MachineConfigPool has
