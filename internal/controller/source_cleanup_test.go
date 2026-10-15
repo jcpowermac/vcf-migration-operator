@@ -16,10 +16,12 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	fakekube "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/events"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -585,5 +587,188 @@ func TestEnsureSourceCleanedPodRestartFailureRetried(t *testing.T) {
 	}
 	if !cleanupTestCredsHas(t, retryKube, cleanupTestDest) || cleanupTestCredsHas(t, retryKube, cleanupTestSource) {
 		t.Fatal("retry vsphere-creds state is wrong")
+	}
+}
+
+// TestEnsureSourceCleanedConflictRetriesPersist covers the conflict path of
+// the identity persist step: unlike the generic failure injected by
+// TestEnsureSourceCleanedPersistFailurePreventsCleanup, a status update
+// conflict must be retried by persistSourceVCenter and cleanup must complete
+// in the same call.
+func TestEnsureSourceCleanedConflictRetriesPersist(t *testing.T) {
+	ctx := context.Background()
+	migration := newCleanupTestMigration()
+
+	cfgClient := configfake.NewClientset(newCleanupTestInfrastructure(cleanupTestSource, cleanupTestDest))
+	kubeClient := fakekube.NewSimpleClientset(
+		newCleanupTestConfigMap(cleanupTestSource, cleanupTestDest),
+		newCleanupTestCredsSecret(cleanupTestSource, cleanupTestDest),
+		newCleanupTestTargetSecret(),
+	)
+
+	// Fail only the first status subresource write with a conflict; later
+	// writes delegate to the fake client.
+	conflict := apierrors.NewConflict(schema.GroupResource{
+		Group:    migrationv1alpha1.GroupVersion.Group,
+		Resource: "vmwarecloudfoundationmigrations",
+	}, migration.Name, fmt.Errorf("injected conflict"))
+	updates := 0
+	reconciler, fakeClient := newCleanupTestReconciler(t, migration, cfgClient, kubeClient, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			updates++
+			if updates == 1 {
+				return conflict
+			}
+			return c.SubResource(subResourceName).Update(ctx, obj, opts...)
+		},
+	})
+
+	if _, err := reconciler.ensureSourceCleaned(ctx, migration); err != nil {
+		t.Fatalf("cleanup must survive a status update conflict: %v", err)
+	}
+	if updates != 2 {
+		t.Fatalf("status subresource updates = %d, want 2 (one conflict, one success)", updates)
+	}
+
+	// The identity must be durable on the API object despite the first
+	// write conflicting.
+	persisted := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(migration), persisted); err != nil {
+		t.Fatalf("getting migration: %v", err)
+	}
+	if persisted.Status.SourceVCenter != cleanupTestSource {
+		t.Fatalf("persisted sourceVCenter = %q, want %q", persisted.Status.SourceVCenter, cleanupTestSource)
+	}
+
+	// Cleanup completed in the same call after the retried persist.
+	if got := cleanupTestInfraServers(t, cfgClient); len(got) != 1 || got[0] != cleanupTestDest {
+		t.Fatalf("infra servers = %v, want [%s]", got, cleanupTestDest)
+	}
+	if cleanupTestConfigHas(t, kubeClient, cleanupTestSource) {
+		t.Fatal("conflict retry skipped cloud-provider-config cleanup")
+	}
+	if cleanupTestCredsHas(t, kubeClient, cleanupTestSource) {
+		t.Fatal("conflict retry skipped vsphere-creds cleanup")
+	}
+}
+
+// TestReconcileSourceCleanedFailureRetried drives the full Reconcile loop
+// through the source cleanup phase: the first reconcile persists the source
+// identity, fails partway through cleanup, and records the failure as a
+// condition on the API object; the second reconcile loads the persisted
+// status and completes the remaining cleanup.
+func TestReconcileSourceCleanedFailureRetried(t *testing.T) {
+	ctx := context.Background()
+
+	// Every phase before source cleanup has already completed.
+	migration := newCleanupTestMigration()
+	migration.Spec.State = migrationv1alpha1.MigrationStateRunning
+	for _, condType := range []string{
+		migrationv1alpha1.ConditionInfrastructurePrepared,
+		migrationv1alpha1.ConditionDestinationInitialized,
+		migrationv1alpha1.ConditionMultiSiteConfigured,
+		migrationv1alpha1.ConditionWorkloadMigrated,
+	} {
+		apimeta.SetStatusCondition(&migration.Status.Conditions, metav1.Condition{
+			Type:               condType,
+			Status:             metav1.ConditionTrue,
+			Reason:             migrationv1alpha1.ReasonCompleted,
+			Message:            "done",
+			ObservedGeneration: migration.Generation,
+		})
+	}
+
+	cfgClient := configfake.NewClientset(newCleanupTestInfrastructure(cleanupTestSource, cleanupTestDest))
+	kubeClient := fakekube.NewSimpleClientset(
+		newCleanupTestConfigMap(cleanupTestSource, cleanupTestDest),
+		newCleanupTestCredsSecret(cleanupTestSource, cleanupTestDest),
+		newCleanupTestTargetSecret(),
+	)
+	// Fail every secret update so the credentials step errors after the
+	// infrastructure and cloud-provider-config cleanup already succeeded.
+	kubeClient.PrependReactor("update", "secrets", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, fmt.Errorf("injected credentials update failure")
+	})
+
+	reconciler, fakeClient := newCleanupTestReconciler(t, migration, cfgClient, kubeClient)
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(migration)}
+
+	// First reconcile: fails partway through cleanup.
+	if _, err := reconciler.Reconcile(ctx, req); err == nil {
+		t.Fatal("expected first reconcile to fail on injected credentials update error")
+	}
+
+	// The retry identity must already be durable, and the failure must be
+	// recorded as a condition on the API object.
+	persisted := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(migration), persisted); err != nil {
+		t.Fatalf("getting migration after failed reconcile: %v", err)
+	}
+	if persisted.Status.SourceVCenter != cleanupTestSource {
+		t.Fatalf("persisted sourceVCenter = %q, want %q", persisted.Status.SourceVCenter, cleanupTestSource)
+	}
+	cond := apimeta.FindStatusCondition(persisted.Status.Conditions, migrationv1alpha1.ConditionSourceCleaned)
+	if cond == nil || cond.Status != metav1.ConditionFalse {
+		t.Fatalf("sourceCleaned condition = %+v, want False", cond)
+	}
+	if cond != nil && !strings.Contains(cond.Message, "injected credentials update failure") {
+		t.Fatalf("sourceCleaned condition message = %q, want the injected failure", cond.Message)
+	}
+	if ready := apimeta.FindStatusCondition(persisted.Status.Conditions, migrationv1alpha1.ConditionReady); ready == nil || ready.Status != metav1.ConditionFalse {
+		t.Fatalf("ready condition = %+v, want False while source cleanup is failing", ready)
+	}
+
+	// Partial cleanup: infrastructure and cloud-provider-config were already
+	// cleaned, credentials were not.
+	if got := cleanupTestInfraServers(t, cfgClient); len(got) != 1 || got[0] != cleanupTestDest {
+		t.Fatalf("after failed reconcile infra servers = %v, want [%s]", got, cleanupTestDest)
+	}
+	if cleanupTestConfigHas(t, kubeClient, cleanupTestSource) {
+		t.Fatal("failed reconcile skipped cloud-provider-config cleanup")
+	}
+	if !cleanupTestCredsHas(t, kubeClient, cleanupTestSource) || !cleanupTestCredsHas(t, kubeClient, cleanupTestDest) {
+		t.Fatal("failed reconcile must leave both credentials in vsphere-creds")
+	}
+
+	// Second reconcile: retry from the persisted status without the injected
+	// failure, using the kube state the first attempt left behind.
+	cm, err := kubeClient.CoreV1().ConfigMaps(openshift.CloudProviderConfigMapNamespace).Get(ctx, openshift.CloudProviderConfigMapName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("getting configmap for retry: %v", err)
+	}
+	creds, err := kubeClient.CoreV1().Secrets(openshift.VSphereCredsSecretNamespace).Get(ctx, openshift.VSphereCredsSecretName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("getting vsphere-creds for retry: %v", err)
+	}
+	retryKube := fakekube.NewSimpleClientset(cm, creds, newCleanupTestTargetSecret())
+	retryReconciler := &VmwareCloudFoundationMigrationReconciler{
+		Client:       fakeClient,
+		Scheme:       reconciler.Scheme,
+		KubeClient:   retryKube,
+		ConfigClient: cfgClient,
+		Recorder:     events.NewFakeRecorder(10),
+	}
+
+	if _, err := retryReconciler.Reconcile(ctx, req); err != nil {
+		t.Fatalf("retry reconcile error: %v", err)
+	}
+
+	// The retry must have completed the cleanup and persisted True.
+	reloaded := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(migration), reloaded); err != nil {
+		t.Fatalf("getting migration after retry: %v", err)
+	}
+	cond = apimeta.FindStatusCondition(reloaded.Status.Conditions, migrationv1alpha1.ConditionSourceCleaned)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Fatalf("sourceCleaned condition after retry = %+v, want True", cond)
+	}
+	if reloaded.Status.SourceVCenter != cleanupTestSource {
+		t.Fatalf("reloaded sourceVCenter = %q, want %q", reloaded.Status.SourceVCenter, cleanupTestSource)
+	}
+	if !cleanupTestCredsHas(t, retryKube, cleanupTestDest) || cleanupTestCredsHas(t, retryKube, cleanupTestSource) {
+		t.Fatal("retry vsphere-creds state is wrong")
+	}
+	if !cleanupTestConfigHas(t, retryKube, cleanupTestDest) {
+		t.Fatal("retry removed the destination from cloud-provider-config")
 	}
 }
