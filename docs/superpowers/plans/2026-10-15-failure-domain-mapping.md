@@ -30,8 +30,8 @@ All findings from the plan review are addressed in the tasks below:
 - Release scope: exactly one source vCenter and one destination vCenter server; destination failure domains must all reference the same server.
 - Omitted `failureDomainMappings` means exactly one source FD and one destination FD, mapped implicitly. Anything else with the field omitted is a preflight error.
 - When present, mappings are a complete bijection: every source FD (in Infrastructure) and every destination FD (in `spec.failureDomains`) covered exactly once.
-- Effective mappings are immutable for the lifetime of the migration (recorded in status at preflight; drift afterwards is an error). Immutability compares the requested spec pairs against the recorded pairs; Infrastructure changes do not participate.
-- Field markers per the spec doc: `+listType=map`, `+listMapKey=source`, `MinItems=1`, `MaxItems=64`, `MinLength=1`, `MaxLength=256` (matching `configv1.VSpherePlatformFailureDomainSpec.Name`), XValidation for destination uniqueness via `distinct()`.
+- Effective mappings are immutable for the lifetime of the migration (recorded in status at preflight). Immutability applies to the *effective mapping*: edits to an explicitly set `spec.failureDomainMappings` that would change the effective pairs are errors, while clearing the field after preflight is not — the recorded effective mapping keeps driving every later phase, so nothing re-targets. Comparison uses the requested spec pairs against the recorded pairs; Infrastructure changes do not participate.
+- Field markers per the spec doc: `+listType=map`, `+listMapKey=source`, `MinItems=1`, `MaxItems=64` (bounds the CEL uniqueness-rule cost), `MinLength=1`, `MaxLength=256` (matching `configv1.VSpherePlatformFailureDomainSpec.Name`), XValidation for destination uniqueness via `distinct()`.
 - Project conventions (AGENTS.md): errors via `fmt.Errorf` with `%w`, lowercase gerund messages; klog from context; three import groups; unit tests standard `testing.T` table-driven, controller integration tests Ginkgo/Gomega envtest.
 
 ## Review Focus
@@ -239,6 +239,8 @@ git commit -m "Validate failure domain mappings and MachineSet name collisions a
 //     "failureDomainMappings are immutable"
 //   "omitted then edited"   -> status holds inferred pair, user adds an explicit
 //     list that differs; want error
+//   "explicit then cleared"  -> status holds explicit pairs, user clears the
+//     spec field; want NO error — the recorded effective mapping keeps driving
 //   "destination FD added"  -> Infrastructure gains a destination-side change;
 //     spec unchanged; want NO error (Infrastructure drift does not participate)
 //   "source FD removed"     -> Infrastructure drops a source FD (post-cleanup);
@@ -257,7 +259,7 @@ In the preflight success path, store the pairs returned by `resolveFailureDomain
 `ensureMappingImmutable` must **not** re-resolve from Infrastructure (finding 2): Infrastructure legitimately changes during the migration (destination vCenter/FDs added, source FDs removed), and re-resolving against it would reject those normal transitions. Instead:
 
 - Return nil while `Status.FailureDomainMappings` is unset (pre-preflight).
-- Derive requested pairs from the spec alone: `Spec.FailureDomainMappings` when present; when omitted, the recorded status pairs remain the effective (inferred) mapping.
+- Derive requested pairs from the spec alone: `Spec.FailureDomainMappings` when present; when omitted, the recorded status pairs remain the effective (inferred or cleared-but-recorded) mapping. Clearing an explicitly set list after preflight is therefore not an error — the recorded effective mapping keeps driving every later phase, so nothing re-targets (immutability applies to the effective mapping, not the presence of the field).
 - Compare requested vs recorded **order-insensitively** (finding 7): key both lists by `Source` into `map[string]string` and compare the maps — `reflect.DeepEqual` on the raw lists would reject reordered-but-equivalent entries.
 - Return `fmt.Errorf("failureDomainMappings are immutable after preflight; ...")` on drift.
 

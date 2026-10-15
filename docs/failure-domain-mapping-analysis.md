@@ -28,7 +28,11 @@ destination.
 - `ensureWorkloadMigrated` creates one worker MachineSet per destination FD
   (`workerMachineSetName(infraID, fdName)`), evenly splitting `totalReplicas`, with the
   remainder going to the last FD — `vmwarecloudfoundationmigration_controller.go`
-  (~line 685).
+  (~line 685). Each destination MachineSet is clamped to at least one replica, so a
+  zero or negative source total — or fewer source replicas than destination failure
+  domains — yields one replica per destination FD and the resulting total can exceed
+  the source total. The proposed mapping behavior below instead preserves a zero
+  replica total exactly.
 - `UpdateCPMSFailureDomain` (`internal/openshift/machines.go`) replaces the CPMS
   template's FD list wholesale; MAPI spreads the 3 masters across them.
 - `AddTargetVCenter` (`internal/openshift/infrastructure.go`) adds all destination FDs
@@ -142,6 +146,8 @@ Validated with `api_lint_types`: 0 errors, 0 warnings.
 - `listType=map` + `listMapKey=source` → source names unique within the list.
 - XValidation → destination names unique within the list (mapping is injective).
 - `MinItems=1` → the field is either absent or non-empty; no meaningful empty list.
+- `MaxItems=64` → bounds the quadratic cost of the CEL uniqueness rule and keeps the
+  list within a realistic failure-domain count.
 - MinLength/MaxLength match `configv1.VSpherePlatformFailureDomainSpec.Name`
   (1–256) so any name accepted here can exist in Infrastructure.
 
