@@ -442,6 +442,13 @@ spec:
                         type: integer
                     type: object
                 type: object
+              sourceVCenter:
+                description: |-
+                  sourceVCenter records the vCenter server removed during source cleanup.
+                  It is captured before any cleanup side effects so retries stay bound to
+                  the original source after it is removed from the Infrastructure
+                  vCenters list, where VCenters[0] would then be the destination.
+                type: string
               startTime:
                 description: startTime is when the migration started.
                 format: date-time

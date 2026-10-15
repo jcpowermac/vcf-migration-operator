@@ -12,6 +12,7 @@ import (
 	"github.com/openshift/vcf-migration-operator/internal/metadata"
 	"github.com/openshift/vcf-migration-operator/internal/openshift"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -21,6 +22,7 @@ import (
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 const (
@@ -100,17 +102,20 @@ func newCleanupTestTargetSecret() *corev1.Secret {
 	}
 }
 
-func newCleanupTestReconciler(t *testing.T, migration *migrationv1alpha1.VmwareCloudFoundationMigration, cfgClient *configfake.Clientset, kubeClient *fakekube.Clientset) (*VmwareCloudFoundationMigrationReconciler, client.Client) {
+func newCleanupTestReconciler(t *testing.T, migration *migrationv1alpha1.VmwareCloudFoundationMigration, cfgClient *configfake.Clientset, kubeClient *fakekube.Clientset, interceptorFuncs ...interceptor.Funcs) (*VmwareCloudFoundationMigrationReconciler, client.Client) {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := migrationv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("building scheme: %v", err)
 	}
-	fakeClient := clientfake.NewClientBuilder().
+	builder := clientfake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(migration).
-		WithStatusSubresource(&migrationv1alpha1.VmwareCloudFoundationMigration{}).
-		Build()
+		WithStatusSubresource(&migrationv1alpha1.VmwareCloudFoundationMigration{})
+	if len(interceptorFuncs) > 0 {
+		builder = builder.WithInterceptorFuncs(interceptorFuncs[0])
+	}
+	fakeClient := builder.Build()
 	return &VmwareCloudFoundationMigrationReconciler{
 		Client:       fakeClient,
 		Scheme:       scheme,
@@ -348,5 +353,175 @@ func TestEnsureSourceCleanedRefusesDestinationAsSource(t *testing.T) {
 	}
 	if !cleanupTestCredsHas(t, kubeClient, cleanupTestDest) {
 		t.Fatal("cleanup removed the destination credentials")
+	}
+}
+
+// TestEnsureSourceCleanedPersistFailurePreventsCleanup covers the safety
+// gate: when the source identity cannot be persisted to the migration
+// status, no cleanup side effects may run — otherwise a later retry could
+// resolve the destination as the source.
+func TestEnsureSourceCleanedPersistFailurePreventsCleanup(t *testing.T) {
+	ctx := context.Background()
+	migration := newCleanupTestMigration()
+
+	cfgClient := configfake.NewClientset(newCleanupTestInfrastructure(cleanupTestSource, cleanupTestDest))
+	kubeClient := fakekube.NewSimpleClientset(
+		newCleanupTestConfigMap(cleanupTestSource, cleanupTestDest),
+		newCleanupTestCredsSecret(cleanupTestSource, cleanupTestDest),
+		newCleanupTestTargetSecret(),
+	)
+
+	// Fail every status subresource write so the identity persist step errors.
+	reconciler, _ := newCleanupTestReconciler(t, migration, cfgClient, kubeClient, interceptor.Funcs{
+		SubResourceUpdate: func(context.Context, client.Client, string, client.Object, ...client.SubResourceUpdateOption) error {
+			return fmt.Errorf("injected status update failure")
+		},
+	})
+
+	if _, err := reconciler.ensureSourceCleaned(ctx, migration); err == nil {
+		t.Fatal("expected cleanup to fail when the source identity cannot be persisted")
+	}
+
+	// No cleanup step may have run while the identity is not durable.
+	if got := cleanupTestInfraServers(t, cfgClient); len(got) != 2 {
+		t.Fatalf("infra servers = %v, want both source and destination; cleanup ran without a persisted identity", got)
+	}
+	if !cleanupTestConfigHas(t, kubeClient, cleanupTestSource) || !cleanupTestConfigHas(t, kubeClient, cleanupTestDest) {
+		t.Fatal("cleanup modified cloud-provider-config despite failed identity persistence")
+	}
+	if !cleanupTestCredsHas(t, kubeClient, cleanupTestSource) || !cleanupTestCredsHas(t, kubeClient, cleanupTestDest) {
+		t.Fatal("cleanup modified vsphere-creds despite failed identity persistence")
+	}
+	if migration.Status.SourceVCenter != "" {
+		t.Fatalf("in-memory sourceVCenter = %q, want empty after failed persist", migration.Status.SourceVCenter)
+	}
+}
+
+// TestEnsureSourceCleanedRefusesSourceRebind covers the write-once rule for
+// the persisted identity: when the status already records a different source
+// vCenter, cleanup must refuse to rebind to the newly resolved one instead
+// of silently switching targets.
+func TestEnsureSourceCleanedRefusesSourceRebind(t *testing.T) {
+	ctx := context.Background()
+
+	// The API object already records a different source identity.
+	persisted := newCleanupTestMigration()
+	persisted.Status.SourceVCenter = "old.example.com"
+
+	cfgClient := configfake.NewClientset(newCleanupTestInfrastructure(cleanupTestSource, cleanupTestDest))
+	kubeClient := fakekube.NewSimpleClientset(
+		newCleanupTestConfigMap(cleanupTestSource, cleanupTestDest),
+		newCleanupTestCredsSecret(cleanupTestSource, cleanupTestDest),
+		newCleanupTestTargetSecret(),
+	)
+
+	reconciler, _ := newCleanupTestReconciler(t, persisted, cfgClient, kubeClient)
+
+	// A stale in-memory copy without the recorded identity resolves the
+	// source from VCenters[0]; the persisted identity must win.
+	stale := newCleanupTestMigration()
+
+	_, err := reconciler.ensureSourceCleaned(ctx, stale)
+	if err == nil {
+		t.Fatal("expected cleanup to refuse rebinding the source vCenter")
+	}
+	if !strings.Contains(err.Error(), "refusing to rebind") {
+		t.Fatalf("error = %v, want a rebind refusal", err)
+	}
+
+	// Nothing may have been cleaned up.
+	if got := cleanupTestInfraServers(t, cfgClient); len(got) != 2 {
+		t.Fatalf("infra servers = %v, want both source and destination; cleanup ran despite rebind refusal", got)
+	}
+	if !cleanupTestConfigHas(t, kubeClient, cleanupTestSource) || !cleanupTestConfigHas(t, kubeClient, cleanupTestDest) {
+		t.Fatal("cleanup modified cloud-provider-config despite rebind refusal")
+	}
+	if !cleanupTestCredsHas(t, kubeClient, cleanupTestSource) || !cleanupTestCredsHas(t, kubeClient, cleanupTestDest) {
+		t.Fatal("cleanup modified vsphere-creds despite rebind refusal")
+	}
+}
+
+// TestEnsureSourceCleanedPodRestartFailureRetried covers the final cleanup
+// step: when restarting vSphere pods fails, the retry must still complete
+// the remaining cleanup and actually restart (delete) the vSphere pods.
+func TestEnsureSourceCleanedPodRestartFailureRetried(t *testing.T) {
+	ctx := context.Background()
+	migration := newCleanupTestMigration()
+
+	ccmPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "vsphere-cloud-controller-manager-1",
+			Namespace: "openshift-cloud-controller-manager",
+			Labels:    map[string]string{"k8s-app": "vsphere-cloud-controller-manager"},
+		},
+	}
+
+	cfgClient := configfake.NewClientset(newCleanupTestInfrastructure(cleanupTestSource, cleanupTestDest))
+	kubeClient := fakekube.NewSimpleClientset(
+		newCleanupTestConfigMap(cleanupTestSource, cleanupTestDest),
+		newCleanupTestCredsSecret(cleanupTestSource, cleanupTestDest),
+		newCleanupTestTargetSecret(),
+		ccmPod,
+	)
+	// Fail pod listing so the pod restart step errors after infrastructure,
+	// cloud-provider-config, and credential cleanup already succeeded.
+	kubeClient.PrependReactor("list", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, fmt.Errorf("injected pod list failure")
+	})
+
+	reconciler, fakeClient := newCleanupTestReconciler(t, migration, cfgClient, kubeClient)
+
+	// First attempt: everything succeeds until the vSphere pod restart.
+	if _, err := reconciler.ensureSourceCleaned(ctx, migration); err == nil {
+		t.Fatal("expected first cleanup attempt to fail on injected pod restart error")
+	}
+	if migration.Status.SourceVCenter != cleanupTestSource {
+		t.Fatalf("persisted sourceVCenter = %q, want %q", migration.Status.SourceVCenter, cleanupTestSource)
+	}
+	if _, err := kubeClient.CoreV1().Pods(ccmPod.Namespace).Get(ctx, ccmPod.Name, metav1.GetOptions{}); err != nil {
+		t.Fatalf("first attempt must not delete pods when the restart step fails: %v", err)
+	}
+
+	// Retry without the injected failure, starting from persisted state.
+	cm, err := kubeClient.CoreV1().ConfigMaps(openshift.CloudProviderConfigMapNamespace).Get(ctx, openshift.CloudProviderConfigMapName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("getting configmap for retry: %v", err)
+	}
+	creds, err := kubeClient.CoreV1().Secrets(openshift.VSphereCredsSecretNamespace).Get(ctx, openshift.VSphereCredsSecretName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("getting vsphere-creds for retry: %v", err)
+	}
+	retryKube := fakekube.NewSimpleClientset(cm, creds, newCleanupTestTargetSecret(), ccmPod)
+	retryReconciler := &VmwareCloudFoundationMigrationReconciler{
+		Client:       fakeClient,
+		Scheme:       reconciler.Scheme,
+		KubeClient:   retryKube,
+		ConfigClient: cfgClient,
+		Recorder:     events.NewFakeRecorder(10),
+	}
+
+	// Simulate the operator restart: reload the migration from the cluster so
+	// only the persisted status drives the retry.
+	retried := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(migration), retried); err != nil {
+		t.Fatalf("getting migration for retry: %v", err)
+	}
+
+	if _, err := retryReconciler.ensureSourceCleaned(ctx, retried); err != nil {
+		t.Fatalf("cleanup retry error: %v", err)
+	}
+
+	// The vSphere pod that existed before the failed attempt must be
+	// restarted (deleted) by the retry, not skipped as already cleaned up.
+	if _, err := retryKube.CoreV1().Pods(ccmPod.Namespace).Get(ctx, ccmPod.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected CCM pod to be deleted on retry, got err %v", err)
+	}
+
+	// The destination must survive the retry and the source must be gone.
+	if got := cleanupTestInfraServers(t, cfgClient); len(got) != 1 || got[0] != cleanupTestDest {
+		t.Fatalf("after retry infra servers = %v, want [%s]", got, cleanupTestDest)
+	}
+	if !cleanupTestCredsHas(t, retryKube, cleanupTestDest) || cleanupTestCredsHas(t, retryKube, cleanupTestSource) {
+		t.Fatal("retry vsphere-creds state is wrong")
 	}
 }
