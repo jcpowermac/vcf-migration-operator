@@ -145,6 +145,13 @@ type VmwareCloudFoundationMigrationStatus struct {
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
+	// sourceVCenter records the vCenter server removed during source cleanup.
+	// It is captured before any cleanup side effects so retries stay bound to
+	// the original source after it is removed from the Infrastructure
+	// vCenters list, where VCenters[0] would then be the destination.
+	// +optional
+	SourceVCenter string `json:"sourceVCenter,omitempty"`
+
 	// startTime is when the migration started.
 	// +optional
 	StartTime *metav1.Time `json:"startTime,omitempty"`

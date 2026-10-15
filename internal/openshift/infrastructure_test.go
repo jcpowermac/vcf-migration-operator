@@ -322,6 +322,19 @@ func TestRemoveSourceVCenter(t *testing.T) {
 			wantErr:      true,
 		},
 		{
+			name: "errors when removing the last configured vCenter",
+			infra: newTestInfrastructure(
+				[]configv1.VSpherePlatformVCenterSpec{
+					{Server: "source.example.com", Port: 443, Datacenters: []string{"DC0"}},
+				},
+				[]configv1.VSpherePlatformFailureDomainSpec{
+					{Name: "fd-source", Server: "source.example.com"},
+				},
+			),
+			sourceServer: "source.example.com",
+			wantErr:      true,
+		},
+		{
 			name: "no-ops when source server not present",
 			infra: newTestInfrastructure(
 				[]configv1.VSpherePlatformVCenterSpec{
