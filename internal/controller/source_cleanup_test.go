@@ -335,7 +335,7 @@ func TestEnsureSourceCleanedRefusesDestinationAsSource(t *testing.T) {
 		newCleanupTestTargetSecret(),
 	)
 
-	reconciler, _ := newCleanupTestReconciler(t, migration, cfgClient, kubeClient)
+	reconciler, fakeClient := newCleanupTestReconciler(t, migration, cfgClient, kubeClient)
 
 	_, err := reconciler.ensureSourceCleaned(ctx, migration)
 	if err == nil {
@@ -343,6 +343,15 @@ func TestEnsureSourceCleanedRefusesDestinationAsSource(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "destination") {
 		t.Fatalf("error = %v, want it to identify the destination guard", err)
+	}
+
+	// The refused destination must not be recorded as the source identity.
+	after := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(migration), after); err != nil {
+		t.Fatalf("getting migration after refusal: %v", err)
+	}
+	if after.Status.SourceVCenter != "" {
+		t.Fatalf("status.sourceVCenter = %q, want empty; the destination must not be recorded as the source", after.Status.SourceVCenter)
 	}
 
 	if got := cleanupTestInfraServers(t, cfgClient); len(got) != 1 || got[0] != cleanupTestDest {
@@ -353,6 +362,59 @@ func TestEnsureSourceCleanedRefusesDestinationAsSource(t *testing.T) {
 	}
 	if !cleanupTestCredsHas(t, kubeClient, cleanupTestDest) {
 		t.Fatal("cleanup removed the destination credentials")
+	}
+}
+
+// TestEnsureSourceCleanedRecoversIdentityFromStatus covers the retry path
+// where the in-memory migration has no recorded source identity and
+// VCenters[0] resolves to the destination because the source was already
+// removed from Infrastructure: cleanup must recover the identity from the
+// persisted status instead of refusing or rebinding.
+func TestEnsureSourceCleanedRecoversIdentityFromStatus(t *testing.T) {
+	ctx := context.Background()
+
+	// The API object records the source identity, but a stale in-memory
+	// copy does not, and Infrastructure only holds the destination.
+	persisted := newCleanupTestMigration()
+	persisted.Status.SourceVCenter = cleanupTestSource
+
+	cfgClient := configfake.NewClientset(newCleanupTestInfrastructure(cleanupTestDest))
+	kubeClient := fakekube.NewSimpleClientset(
+		newCleanupTestConfigMap(cleanupTestSource, cleanupTestDest),
+		newCleanupTestCredsSecret(cleanupTestSource, cleanupTestDest),
+		newCleanupTestTargetSecret(),
+	)
+
+	reconciler, _ := newCleanupTestReconciler(t, persisted, cfgClient, kubeClient)
+
+	stale := newCleanupTestMigration()
+	if _, err := reconciler.ensureSourceCleaned(ctx, stale); err != nil {
+		t.Fatalf("cleanup with recovered identity error: %v", err)
+	}
+	if stale.Status.SourceVCenter != cleanupTestSource {
+		t.Fatalf("recovered sourceVCenter = %q, want %q", stale.Status.SourceVCenter, cleanupTestSource)
+	}
+
+	// The recovered identity must drive the remaining cleanup steps.
+	if got := cleanupTestInfraServers(t, cfgClient); len(got) != 1 || got[0] != cleanupTestDest {
+		t.Fatalf("infra servers = %v, want [%s]", got, cleanupTestDest)
+	}
+	if cleanupTestConfigHas(t, kubeClient, cleanupTestSource) {
+		t.Fatal("recovery skipped cloud-provider-config cleanup")
+	}
+	if !cleanupTestConfigHas(t, kubeClient, cleanupTestDest) {
+		t.Fatal("recovery removed the destination from cloud-provider-config")
+	}
+	if cleanupTestCredsHas(t, kubeClient, cleanupTestSource) {
+		t.Fatal("recovery skipped vsphere-creds cleanup")
+	}
+	if !cleanupTestCredsHas(t, kubeClient, cleanupTestDest) {
+		t.Fatal("recovery removed the destination credentials")
+	}
+
+	cond := apimeta.FindStatusCondition(stale.Status.Conditions, migrationv1alpha1.ConditionSourceCleaned)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Fatalf("sourceCleaned condition = %+v, want True", cond)
 	}
 }
 

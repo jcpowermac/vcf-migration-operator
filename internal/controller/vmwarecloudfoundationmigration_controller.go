@@ -968,6 +968,23 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureSourceCleaned(ctx conte
 			return ctrl.Result{}, fmt.Errorf("determining source vCenter: no vCenters configured in infrastructure and none recorded in status")
 		}
 		sourceServer = infra.Spec.PlatformSpec.VSphere.VCenters[0].Server
+
+		// VCenters[0] can resolve to the destination when a retry runs after
+		// the source was removed from Infrastructure or the in-memory status
+		// is stale. Never record a destination as the source: recover the
+		// recorded identity from the latest status when present; fail closed
+		// when it is not.
+		if isConfiguredDestination(migration, sourceServer) {
+			latest := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(migration), latest); err != nil {
+				return ctrl.Result{}, fmt.Errorf("getting migration to recover source vCenter identity: %w", err)
+			}
+			if latest.Status.SourceVCenter == "" {
+				return ctrl.Result{}, fmt.Errorf("refusing to clean up %q: server is a configured destination failure domain and no source is recorded in status", sourceServer)
+			}
+			sourceServer = latest.Status.SourceVCenter
+			log.V(1).Info("recovered source vCenter identity from status", "server", sourceServer)
+		}
 		if err := r.persistSourceVCenter(ctx, migration, sourceServer); err != nil {
 			return ctrl.Result{}, fmt.Errorf("persisting source vCenter identity: %w", err)
 		}
@@ -977,10 +994,8 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureSourceCleaned(ctx conte
 	// Never remove a server that is a configured destination; this guards
 	// against a retry resolving VCenters[0] to the destination after the
 	// source was already removed.
-	for i := range migration.Spec.FailureDomains {
-		if migration.Spec.FailureDomains[i].Server == sourceServer {
-			return ctrl.Result{}, fmt.Errorf("refusing to clean up %q: server is a configured destination failure domain", sourceServer)
-		}
+	if isConfiguredDestination(migration, sourceServer) {
+		return ctrl.Result{}, fmt.Errorf("refusing to clean up %q: server is a configured destination failure domain", sourceServer)
 	}
 
 	// Complete all vCenter list changes (Infrastructure, config, secrets, pods).
@@ -1090,6 +1105,17 @@ func (r *VmwareCloudFoundationMigrationReconciler) persistSourceVCenter(ctx cont
 		migration.Status.SourceVCenter = server
 		return nil
 	})
+}
+
+// isConfiguredDestination reports whether server matches one of the
+// migration's configured destination failure domains.
+func isConfiguredDestination(migration *migrationv1alpha1.VmwareCloudFoundationMigration, server string) bool {
+	for i := range migration.Spec.FailureDomains {
+		if migration.Spec.FailureDomains[i].Server == server {
+			return true
+		}
+	}
+	return false
 }
 
 // ensureReady verifies all operators are healthy, every MachineConfigPool has
