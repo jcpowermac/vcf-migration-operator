@@ -44,6 +44,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
@@ -192,16 +193,71 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 	// persists the fields changed relative to this snapshot.
 	baseStatus := *migration.Status.DeepCopy()
 
-	if migration.Name != migrationv1alpha1.SingletonName {
+	// Singleton gate: only the pair SingletonName/SingletonNamespace is
+	// reconciled. Anything else is ignored with Accepted=False and no side
+	// effects, using the same idempotent short-circuit for both reasons.
+	if migration.Name != migrationv1alpha1.SingletonName || migration.Namespace != migrationv1alpha1.SingletonNamespace {
+		reason := migrationv1alpha1.ReasonUnsupportedName
+		message := fmt.Sprintf("only a VmwareCloudFoundationMigration named %q is reconciled by this operator", migrationv1alpha1.SingletonName)
+		if migration.Name == migrationv1alpha1.SingletonName {
+			reason = migrationv1alpha1.ReasonUnsupportedNamespace
+			message = fmt.Sprintf("only a VmwareCloudFoundationMigration in namespace %q is reconciled by this operator", migrationv1alpha1.SingletonNamespace)
+		}
 		cond := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionAccepted)
 		alreadyRecorded := cond != nil &&
 			cond.Status == metav1.ConditionFalse &&
-			cond.Reason == migrationv1alpha1.ReasonUnsupportedName &&
+			cond.Reason == reason &&
 			cond.ObservedGeneration == migration.Generation
 		if !alreadyRecorded {
-			log.Info("ignoring VmwareCloudFoundationMigration with unsupported name; only a single resource is reconciled", "expectedName", migrationv1alpha1.SingletonName, "actualName", migration.Name)
-			r.Recorder.Eventf(migration, nil, "Warning", migrationv1alpha1.ReasonUnsupportedName, migrationv1alpha1.ReasonUnsupportedName, "this operator only reconciles a VmwareCloudFoundationMigration named %q; this resource will be ignored", migrationv1alpha1.SingletonName)
-			r.setCondition(migration, migrationv1alpha1.ConditionAccepted, metav1.ConditionFalse, migrationv1alpha1.ReasonUnsupportedName, fmt.Sprintf("only a VmwareCloudFoundationMigration named %q is reconciled by this operator", migrationv1alpha1.SingletonName))
+			log.Info("ignoring VmwareCloudFoundationMigration with unsupported name or namespace; only a single resource is reconciled", "expectedName", migrationv1alpha1.SingletonName, "actualName", migration.Name, "expectedNamespace", migrationv1alpha1.SingletonNamespace, "actualNamespace", migration.Namespace)
+			r.Recorder.Eventf(migration, nil, "Warning", reason, reason, "%s", message)
+			r.setCondition(migration, migrationv1alpha1.ConditionAccepted, metav1.ConditionFalse, reason, message)
+			if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// Add the record-retention finalizer before any work, so the migration
+	// record survives a deletion request. The patch triggers an update event
+	// that requeues the rest of the reconcile.
+	if migration.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(migration, migrationv1alpha1.FinalizerName) {
+		base := client.MergeFrom(migration.DeepCopy())
+		controllerutil.AddFinalizer(migration, migrationv1alpha1.FinalizerName)
+		if err := r.Patch(ctx, migration, base); err != nil {
+			return ctrl.Result{}, fmt.Errorf("adding finalizer %s: %w", migrationv1alpha1.FinalizerName, err)
+		}
+		log.V(1).Info("added migration record retention finalizer", "finalizer", migrationv1alpha1.FinalizerName)
+		return ctrl.Result{}, nil
+	}
+
+	// Deletion stops new actions only: nothing is cancelled, powered off,
+	// deleted, or rolled back. The record is retained behind the finalizer
+	// until the migration is complete or an administrator allows deletion.
+	if !migration.DeletionTimestamp.IsZero() {
+		complete := migration.Status.CompletionTime != nil || r.isConditionTrue(migration, migrationv1alpha1.ConditionReady)
+		adminAllowed := migration.Annotations[migrationv1alpha1.AnnotationAllowDeletion] == "true"
+		if complete || adminAllowed {
+			base := client.MergeFrom(migration.DeepCopy())
+			controllerutil.RemoveFinalizer(migration, migrationv1alpha1.FinalizerName)
+			if err := r.Patch(ctx, migration, base); err != nil {
+				return ctrl.Result{}, fmt.Errorf("removing finalizer %s: %w", migrationv1alpha1.FinalizerName, err)
+			}
+			log.Info("releasing migration record retention finalizer", "complete", complete, "adminAllowed", adminAllowed)
+			return ctrl.Result{}, nil
+		}
+
+		cond := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionAccepted)
+		alreadyRecorded := cond != nil &&
+			cond.Status == metav1.ConditionFalse &&
+			cond.Reason == migrationv1alpha1.ReasonDeletionBlocked &&
+			cond.ObservedGeneration == migration.Generation
+		if !alreadyRecorded {
+			message := fmt.Sprintf("deletion is blocked until the migration completes or an administrator sets the annotation %s=\"true\"", migrationv1alpha1.AnnotationAllowDeletion)
+			log.Info("retaining deleted migration record while work is outstanding")
+			r.Recorder.Eventf(migration, nil, "Warning", migrationv1alpha1.ReasonDeletionBlocked, migrationv1alpha1.ReasonDeletionBlocked, "%s", message)
+			r.setCondition(migration, migrationv1alpha1.ConditionAccepted, metav1.ConditionFalse, migrationv1alpha1.ReasonDeletionBlocked, message)
 			if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
 				return ctrl.Result{}, err
 			}
