@@ -81,6 +81,24 @@ type ControlPlaneProgress struct {
 // condition rather than cluster-scoped singleton=true.
 const SingletonName = "cluster"
 
+// SingletonNamespace is the only namespace the operator will reconcile the
+// singleton (SingletonName) from. It matches the namespace of the operator
+// deployment (config/default/kustomization.yaml), so the authoritative
+// migration record is openshift-vcf-migration/cluster.
+const SingletonNamespace = "openshift-vcf-migration"
+
+// FinalizerName is the finalizer that retains the VmwareCloudFoundationMigration
+// record once deletion is requested. Deletion stops new migration actions but
+// never cancels, powers off, deletes VMs, or rolls back; the record is held
+// until the migration is complete or an administrator releases it via
+// AnnotationAllowDeletion.
+const FinalizerName = "migration.openshift.io/record-retention"
+
+// AnnotationAllowDeletion is the administrator escape hatch that releases
+// FinalizerName on a migration whose work is not yet complete. The only
+// accepted value is "true".
+const AnnotationAllowDeletion = "migration.openshift.io/allow-deletion"
+
 // SecretReference references a secret by name and namespace.
 type SecretReference struct {
 	// name is the secret name.
@@ -130,8 +148,9 @@ type VmwareCloudFoundationMigrationStatus struct {
 
 	// conditions represent the current state of the migration.
 	// Known conditions are:
-	// - Accepted: admission gate; True is normal for the single reconciled instance (cluster),
-	//   while False indicates an unsupported object name.
+	// - Accepted: admission gate; True is normal for the single reconciled instance
+	//   (openshift-vcf-migration/cluster), while False indicates an unsupported
+	//   object name or namespace.
 	// - InfrastructurePrepared: preflight validation and migration path selection.
 	// - DestinationInitialized: destination vCenter folders and tags created.
 	// - MultiSiteConfigured: cluster configured for both source and target vCenters.
@@ -195,7 +214,7 @@ const (
 	ConditionReady = "Ready"
 
 	// ConditionAccepted indicates whether this object is the singleton instance
-	// (named SingletonName) that the operator will act on.
+	// (named SingletonName in SingletonNamespace) that the operator will act on.
 	ConditionAccepted = "Accepted"
 )
 
@@ -215,6 +234,14 @@ const (
 	// ReasonUnsupportedName indicates the object's name is not SingletonName,
 	// so the operator is ignoring it.
 	ReasonUnsupportedName = "UnsupportedName"
+
+	// ReasonUnsupportedNamespace indicates the object's namespace is not
+	// SingletonNamespace, so the operator is ignoring it.
+	ReasonUnsupportedNamespace = "UnsupportedNamespace"
+
+	// ReasonDeletionBlocked indicates deletion was requested while migration
+	// work is outstanding; the record is retained behind FinalizerName.
+	ReasonDeletionBlocked = "DeletionBlocked"
 )
 
 // +kubebuilder:object:root=true
