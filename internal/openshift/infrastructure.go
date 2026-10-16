@@ -8,6 +8,8 @@ import (
 	configclient "github.com/openshift/client-go/config/clientset/versioned"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
+
+	"github.com/openshift/vcf-migration-operator/internal/execution"
 )
 
 const (
@@ -125,6 +127,9 @@ func (m *InfrastructureManager) AddTargetVCenter(ctx context.Context, infra *con
 		log.V(2).Info("added failure domain", "name", failureDomains[i].Name)
 	}
 
+	if err := execution.Check(ctx); err != nil {
+		return nil, err
+	}
 	updated, err := m.client.ConfigV1().Infrastructures().Update(ctx, infra, metav1.UpdateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("updating infrastructure with target vCenter: %w", err)
@@ -168,6 +173,9 @@ func (m *InfrastructureManager) RemoveSourceVCenter(ctx context.Context, infra *
 	}
 	infra.Spec.PlatformSpec.VSphere.FailureDomains = fds
 
+	if err := execution.Check(ctx); err != nil {
+		return nil, err
+	}
 	updated, err := m.client.ConfigV1().Infrastructures().Update(ctx, infra, metav1.UpdateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("updating infrastructure after removing source vCenter: %w", err)

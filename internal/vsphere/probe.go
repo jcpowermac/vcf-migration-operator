@@ -14,6 +14,8 @@ import (
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
 	"k8s.io/klog/v2"
+
+	"github.com/openshift/vcf-migration-operator/internal/execution"
 )
 
 const (
@@ -119,6 +121,9 @@ func (s *Session) CreateProbeVM(ctx context.Context, spec ProbeSpec) (*object.Vi
 		},
 	}
 
+	if err := execution.Check(ctx); err != nil {
+		return nil, err
+	}
 	task, err := template.Clone(ctx, folder, spec.Name, cloneSpec)
 	if err != nil {
 		return nil, fmt.Errorf("cloning template %s as %s: %w", spec.Template, spec.Name, err)
@@ -514,6 +519,9 @@ func DestroyProbeVM(ctx context.Context, vm *object.VirtualMachine) error {
 		return fmt.Errorf("reading power state for probe VM %s: %w", vm.Name(), err)
 	}
 	if state == types.VirtualMachinePowerStatePoweredOn {
+		if err := execution.Check(ctx); err != nil {
+			return err
+		}
 		offTask, err := vm.PowerOff(ctx)
 		if err != nil {
 			return fmt.Errorf("powering off probe VM %s: %w", vm.Name(), err)
@@ -521,6 +529,9 @@ func DestroyProbeVM(ctx context.Context, vm *object.VirtualMachine) error {
 		if err := offTask.Wait(ctx); err != nil {
 			return fmt.Errorf("powering off probe VM %s: %w", vm.Name(), err)
 		}
+	}
+	if err := execution.Check(ctx); err != nil {
+		return err
 	}
 	task, err := vm.Destroy(ctx)
 	if err != nil {

@@ -312,6 +312,15 @@ spec:
           status:
             description: status defines the observed state of VmwareCloudFoundationMigration.
             properties:
+              completionSpecHash:
+                description: |-
+                  completionSpecHash is the lowercase hex SHA-256 of encoding/json.Marshal
+                  of the typed spec when Ready=True is established. With Ready=True and
+                  completionTime, a matching hash authorizes automatic record release even
+                  when deletion increments generation. When omitted, administrator handoff
+                  is required to release the record.
+                pattern: ^[a-f0-9]{64}$
+                type: string
               completionTime:
                 description: completionTime is when the migration completed.
                 format: date-time

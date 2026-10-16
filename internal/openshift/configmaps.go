@@ -5,13 +5,14 @@ import (
 	"fmt"
 
 	configv1 "github.com/openshift/api/config/v1"
+	"gopkg.in/yaml.v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	vsphereconfig "k8s.io/cloud-provider-vsphere/pkg/common/config"
 	"k8s.io/klog/v2"
 
-	"gopkg.in/yaml.v2"
-	vsphereconfig "k8s.io/cloud-provider-vsphere/pkg/common/config"
+	"github.com/openshift/vcf-migration-operator/internal/execution"
 )
 
 const (
@@ -180,6 +181,9 @@ func marshalAndUpdateConfig(ctx context.Context, client kubernetes.Interface, cm
 	}
 	cm.Data[cloudProviderConfigKey] = string(data)
 
+	if err := execution.Check(ctx); err != nil {
+		return nil, err
+	}
 	updated, err := client.CoreV1().ConfigMaps(cm.Namespace).Update(ctx, cm, metav1.UpdateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("updating cloud-provider-config ConfigMap: %w", err)

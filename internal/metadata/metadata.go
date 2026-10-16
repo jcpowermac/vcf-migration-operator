@@ -11,6 +11,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
+
+	"github.com/openshift/vcf-migration-operator/internal/execution"
 )
 
 // MetadataKey is the key used to store the metadata JSON in the Secret.
@@ -189,10 +191,16 @@ func (m *MetadataManager) SaveToSecret(ctx context.Context, md *ClusterMetadata,
 		existing.Labels[metadataSecretLabelKey] = metadataSecretLabelValue
 		existing.Data = secret.Data
 		existing.Type = corev1.SecretTypeOpaque
+		if err := execution.Check(ctx); err != nil {
+			return err
+		}
 		if _, err := m.kubeClient.CoreV1().Secrets(namespace).Update(ctx, existing, metav1.UpdateOptions{}); err != nil {
 			return fmt.Errorf("updating metadata Secret %s/%s: %w", namespace, name, err)
 		}
 	} else if apierrors.IsNotFound(err) {
+		if err := execution.Check(ctx); err != nil {
+			return err
+		}
 		if _, err := m.kubeClient.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
 			return fmt.Errorf("creating metadata Secret %s/%s: %w", namespace, name, err)
 		}

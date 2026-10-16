@@ -197,7 +197,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) checkNetworkingViaProbeVMs(ct
 		destroyProbe := func() error {
 			// Each attempt gets its own deadline, independent of both the probe
 			// phase and prior cleanup attempts.
-			cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 2*time.Minute)
+			cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 			defer cancelCleanup()
 			return vsphere.DestroyProbeVM(cleanupCtx, vm)
 		}

@@ -8,6 +8,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
+
+	"github.com/openshift/vcf-migration-operator/internal/execution"
 )
 
 const (
@@ -66,6 +68,9 @@ func (s *SecretManager) AddTargetVCenterCreds(ctx context.Context, secret *corev
 	secret.Data[usernameKey] = []byte(username)
 	secret.Data[passwordKey] = []byte(password)
 
+	if err := execution.Check(ctx); err != nil {
+		return nil, err
+	}
 	updated, err := s.client.CoreV1().Secrets(secret.Namespace).Update(ctx, secret, metav1.UpdateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("updating vsphere-creds secret with target credentials: %w", err)
@@ -94,6 +99,9 @@ func (s *SecretManager) RemoveSourceVCenterCreds(ctx context.Context, secret *co
 		delete(secret.Data, passwordKey)
 	}
 
+	if err := execution.Check(ctx); err != nil {
+		return nil, err
+	}
 	updated, err := s.client.CoreV1().Secrets(secret.Namespace).Update(ctx, secret, metav1.UpdateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("updating vsphere-creds secret to remove source credentials: %w", err)

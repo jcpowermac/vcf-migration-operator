@@ -211,6 +211,7 @@ func main() {
 
 	if err := (&controller.VmwareCloudFoundationMigrationReconciler{
 		Client:              mgr.GetClient(),
+		APIReader:           mgr.GetAPIReader(),
 		Scheme:              mgr.GetScheme(),
 		KubeClient:          kubeClient,
 		ConfigClient:        cfgClient,
