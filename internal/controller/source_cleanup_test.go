@@ -39,7 +39,10 @@ func newCleanupTestMigration() *migrationv1alpha1.VmwareCloudFoundationMigration
 	return &migrationv1alpha1.VmwareCloudFoundationMigration{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      migrationv1alpha1.SingletonName,
-			Namespace: "default",
+			Namespace: migrationv1alpha1.SingletonNamespace,
+			// The retention finalizer is normally added by the first reconcile;
+			// pre-setting it keeps these tests focused on the cleanup flow.
+			Finalizers: []string{migrationv1alpha1.FinalizerName},
 		},
 		Spec: migrationv1alpha1.VmwareCloudFoundationMigrationSpec{
 			TargetVCenterCredentialsSecret: migrationv1alpha1.SecretReference{
@@ -270,7 +273,7 @@ func TestEnsureSourceCleanedRetryKeepsDestination(t *testing.T) {
 		t.Fatalf("sourceCleaned condition = %+v, want True", cond)
 	}
 
-	if _, err := retryKube.CoreV1().Secrets("default").Get(ctx, metadata.GetMetadataSecretName(migration.Name), metav1.GetOptions{}); err != nil {
+	if _, err := retryKube.CoreV1().Secrets(migration.Namespace).Get(ctx, metadata.GetMetadataSecretName(migration.Name), metav1.GetOptions{}); err != nil {
 		t.Fatalf("getting generated metadata secret: %v", err)
 	}
 }

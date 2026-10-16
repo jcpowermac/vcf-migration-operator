@@ -54,7 +54,7 @@ func newDestinationInitializedReconciler(server, username, password, infraID str
 
 func newDestinationInitializedMigration(server string, inventory preflightTestInventory) *migrationv1alpha1.VmwareCloudFoundationMigration {
 	return &migrationv1alpha1.VmwareCloudFoundationMigration{
-		ObjectMeta: metav1.ObjectMeta{Name: "cluster", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "cluster", Namespace: migrationv1alpha1.SingletonNamespace},
 		Spec: migrationv1alpha1.VmwareCloudFoundationMigrationSpec{
 			TargetVCenterCredentialsSecret: migrationv1alpha1.SecretReference{
 				Name:      "target-vcenter-creds",

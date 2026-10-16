@@ -31,6 +31,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	fakekube "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/events"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -185,7 +189,7 @@ var _ = Describe("VmwareCloudFoundationMigration Controller", func() {
 
 		typeNamespacedName := types.NamespacedName{
 			Name:      resourceName,
-			Namespace: "default", // TODO(user):Modify as needed
+			Namespace: migrationv1alpha1.SingletonNamespace,
 		}
 		vmwarecloudfoundationmigration := &migrationv1alpha1.VmwareCloudFoundationMigration{}
 
@@ -196,7 +200,7 @@ var _ = Describe("VmwareCloudFoundationMigration Controller", func() {
 				resource := &migrationv1alpha1.VmwareCloudFoundationMigration{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
-						Namespace: "default",
+						Namespace: migrationv1alpha1.SingletonNamespace,
 					},
 					Spec: migrationv1alpha1.VmwareCloudFoundationMigrationSpec{
 						State: migrationv1alpha1.MigrationStatePending,
@@ -228,13 +232,13 @@ var _ = Describe("VmwareCloudFoundationMigration Controller", func() {
 		})
 
 		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
 			resource := &migrationv1alpha1.VmwareCloudFoundationMigration{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
 
 			By("Cleanup the specific resource instance VmwareCloudFoundationMigration")
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			releaseMigrationFinalizer(ctx, resource)
 		})
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
@@ -244,6 +248,13 @@ var _ = Describe("VmwareCloudFoundationMigration Controller", func() {
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// The first reconcile adds the record-retention finalizer and returns;
+			// the update event requeues the migration workflow itself.
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
@@ -267,6 +278,12 @@ var _ = Describe("VmwareCloudFoundationMigration Controller", func() {
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// The first reconcile adds the record-retention finalizer and returns.
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
@@ -371,14 +388,14 @@ var _ = Describe("VmwareCloudFoundationMigration Controller", func() {
 
 		typeNamespacedName := types.NamespacedName{
 			Name:      resourceName,
-			Namespace: "default",
+			Namespace: migrationv1alpha1.SingletonNamespace,
 		}
 
 		BeforeEach(func() {
 			resource := &migrationv1alpha1.VmwareCloudFoundationMigration{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      resourceName,
-					Namespace: "default",
+					Namespace: migrationv1alpha1.SingletonNamespace,
 				},
 				Spec: migrationv1alpha1.VmwareCloudFoundationMigrationSpec{
 					State: migrationv1alpha1.MigrationStatePaused,
@@ -412,6 +429,7 @@ var _ = Describe("VmwareCloudFoundationMigration Controller", func() {
 			resource := &migrationv1alpha1.VmwareCloudFoundationMigration{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			releaseMigrationFinalizer(ctx, resource)
 		})
 
 		It("should set the Ready condition to False with reason Paused and transition to Progressing on resume", func() {
@@ -423,7 +441,13 @@ var _ = Describe("VmwareCloudFoundationMigration Controller", func() {
 				Recorder:   fakeRecorder,
 			}
 
+			// The first reconcile adds the record-retention finalizer and returns.
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
@@ -812,3 +836,261 @@ var _ = Describe("seedReadyCondition", func() {
 		Expect(migration.Status.Conditions).To(HaveLen(1))
 	})
 })
+
+// releaseMigrationFinalizer strips the record-retention finalizer after a test
+// deletion so envtest actually removes the singleton between specs.
+func releaseMigrationFinalizer(ctx context.Context, resource *migrationv1alpha1.VmwareCloudFoundationMigration) {
+	if !controllerutil.ContainsFinalizer(resource, migrationv1alpha1.FinalizerName) {
+		return
+	}
+	base := client.MergeFrom(resource.DeepCopy())
+	controllerutil.RemoveFinalizer(resource, migrationv1alpha1.FinalizerName)
+	ExpectWithOffset(1, k8sClient.Patch(ctx, resource, base)).To(Succeed())
+	EventuallyWithOffset(1, func() error {
+		return k8sClient.Get(ctx, client.ObjectKeyFromObject(resource), &migrationv1alpha1.VmwareCloudFoundationMigration{})
+	}).ShouldNot(Succeed())
+}
+
+// newSingletonSpecResource builds a minimal valid singleton candidate in the
+// given namespace.
+func newSingletonSpecResource(namespace string, state migrationv1alpha1.MigrationState) *migrationv1alpha1.VmwareCloudFoundationMigration {
+	return &migrationv1alpha1.VmwareCloudFoundationMigration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      migrationv1alpha1.SingletonName,
+			Namespace: namespace,
+		},
+		Spec: migrationv1alpha1.VmwareCloudFoundationMigrationSpec{
+			State: state,
+			TargetVCenterCredentialsSecret: migrationv1alpha1.SecretReference{
+				Name:      "target-vcenter-creds",
+				Namespace: "default",
+			},
+			FailureDomains: []configv1.VSpherePlatformFailureDomainSpec{{
+				Name:   "target-fd-1",
+				Region: "target-region",
+				Zone:   "target-zone-1",
+				Server: "vcenter-target.example.com",
+				Topology: configv1.VSpherePlatformTopology{
+					Datacenter:     "TargetDC",
+					ComputeCluster: "/TargetDC/host/TargetCluster",
+					Datastore:      "/TargetDC/datastore/TargetDatastore",
+					Networks:       []string{"VM Network"},
+					Template:       "/TargetDC/vm/rhcos-template",
+				},
+			}},
+		},
+	}
+}
+
+var _ = Describe("Singleton namespace enforcement", func() {
+	ctx := context.Background()
+
+	It("ignores a resource named cluster in a non-singleton namespace", func() {
+		typeNamespacedName := types.NamespacedName{
+			Name:      migrationv1alpha1.SingletonName,
+			Namespace: "default",
+		}
+		resource := newSingletonSpecResource("default", migrationv1alpha1.MigrationStateRunning)
+		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		DeferCleanup(func() {
+			leftover := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, leftover); err != nil {
+				return
+			}
+			Expect(k8sClient.Delete(ctx, leftover)).To(Succeed())
+			releaseMigrationFinalizer(ctx, leftover)
+		})
+
+		fakeRecorder := events.NewFakeRecorder(10)
+		controllerReconciler := &VmwareCloudFoundationMigrationReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: fakeRecorder,
+		}
+
+		_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(fakeRecorder.Events).To(Receive(SatisfyAll(
+			ContainSubstring("Warning"),
+			ContainSubstring(migrationv1alpha1.ReasonUnsupportedNamespace),
+		)))
+
+		Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
+		cond := apimeta.FindStatusCondition(resource.Status.Conditions, migrationv1alpha1.ConditionAccepted)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(cond.Reason).To(Equal(migrationv1alpha1.ReasonUnsupportedNamespace))
+
+		By("not running any migration work")
+		Expect(resource.Status.StartTime).To(BeNil())
+		Expect(apimeta.FindStatusCondition(resource.Status.Conditions, migrationv1alpha1.ConditionInfrastructurePrepared)).To(BeNil())
+		Expect(controllerutil.ContainsFinalizer(resource, migrationv1alpha1.FinalizerName)).To(BeFalse())
+	})
+})
+
+var _ = Describe("Deletion finalizer", func() {
+	ctx := context.Background()
+
+	It("retains an incomplete migration and only releases it via the admin annotation", func() {
+		typeNamespacedName := types.NamespacedName{
+			Name:      migrationv1alpha1.SingletonName,
+			Namespace: migrationv1alpha1.SingletonNamespace,
+		}
+		resource := newSingletonSpecResource(migrationv1alpha1.SingletonNamespace, migrationv1alpha1.MigrationStatePending)
+		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		DeferCleanup(func() {
+			leftover := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, leftover); err != nil {
+				return
+			}
+			Expect(k8sClient.Delete(ctx, leftover)).To(Succeed())
+			releaseMigrationFinalizer(ctx, leftover)
+		})
+
+		fakeRecorder := events.NewFakeRecorder(10)
+		controllerReconciler := &VmwareCloudFoundationMigrationReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: fakeRecorder,
+		}
+
+		By("adding the record-retention finalizer on the first reconcile")
+		_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
+		Expect(controllerutil.ContainsFinalizer(resource, migrationv1alpha1.FinalizerName)).To(BeTrue())
+
+		By("deleting an incomplete migration")
+		Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+		_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(fakeRecorder.Events).To(Receive(SatisfyAll(
+			ContainSubstring("Warning"),
+			ContainSubstring(migrationv1alpha1.ReasonDeletionBlocked),
+		)))
+
+		By("keeping the record while migration work is outstanding")
+		Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
+		Expect(resource.DeletionTimestamp).NotTo(BeNil())
+		Expect(controllerutil.ContainsFinalizer(resource, migrationv1alpha1.FinalizerName)).To(BeTrue())
+		cond := apimeta.FindStatusCondition(resource.Status.Conditions, migrationv1alpha1.ConditionAccepted)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(cond.Reason).To(Equal(migrationv1alpha1.ReasonDeletionBlocked))
+
+		By("running no migration steps for a deleting resource")
+		Expect(resource.Status.StartTime).To(BeNil())
+		Expect(apimeta.FindStatusCondition(resource.Status.Conditions, migrationv1alpha1.ConditionInfrastructurePrepared)).To(BeNil())
+
+		By("holding the record when the annotation has a non-true value")
+		Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
+		resource.Annotations = map[string]string{migrationv1alpha1.AnnotationAllowDeletion: "false"}
+		Expect(k8sClient.Update(ctx, resource)).To(Succeed())
+		_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
+		Expect(controllerutil.ContainsFinalizer(resource, migrationv1alpha1.FinalizerName)).To(BeTrue())
+
+		By("releasing the record once the administrator allows deletion")
+		Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
+		resource.Annotations = map[string]string{migrationv1alpha1.AnnotationAllowDeletion: "true"}
+		Expect(k8sClient.Update(ctx, resource)).To(Succeed())
+		_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func() error {
+			return k8sClient.Get(ctx, typeNamespacedName, &migrationv1alpha1.VmwareCloudFoundationMigration{})
+		}).ShouldNot(Succeed())
+	})
+
+	It("releases the finalizer when a completed migration is deleted", func() {
+		typeNamespacedName := types.NamespacedName{
+			Name:      migrationv1alpha1.SingletonName,
+			Namespace: migrationv1alpha1.SingletonNamespace,
+		}
+		resource := newSingletonSpecResource(migrationv1alpha1.SingletonNamespace, migrationv1alpha1.MigrationStatePending)
+		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		DeferCleanup(func() {
+			leftover := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, leftover); err != nil {
+				return
+			}
+			Expect(k8sClient.Delete(ctx, leftover)).To(Succeed())
+			releaseMigrationFinalizer(ctx, leftover)
+		})
+
+		fakeRecorder := events.NewFakeRecorder(10)
+		controllerReconciler := &VmwareCloudFoundationMigrationReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: fakeRecorder,
+		}
+
+		_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+		Expect(err).NotTo(HaveOccurred())
+
+		By("marking the migration complete")
+		Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
+		completionTime := metav1.Now()
+		resource.Status.CompletionTime = &completionTime
+		Expect(k8sClient.Status().Update(ctx, resource)).To(Succeed())
+
+		By("deleting the completed migration removes the record")
+		Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+		_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func() error {
+			return k8sClient.Get(ctx, typeNamespacedName, &migrationv1alpha1.VmwareCloudFoundationMigration{})
+		}).ShouldNot(Succeed())
+	})
+})
+
+// TestReconcileAddsRecordRetentionFinalizer covers the finalizer-add path
+// without envtest, using a fake client.
+func TestReconcileAddsRecordRetentionFinalizer(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := migrationv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("building scheme: %v", err)
+	}
+	migration := newSingletonSpecResource(migrationv1alpha1.SingletonNamespace, migrationv1alpha1.MigrationStatePending)
+	fakeClient := clientfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(migration).
+		WithStatusSubresource(&migrationv1alpha1.VmwareCloudFoundationMigration{}).
+		Build()
+	reconciler := &VmwareCloudFoundationMigrationReconciler{
+		Client:   fakeClient,
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+	}
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(migration)}
+
+	if _, err := reconciler.Reconcile(ctx, req); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	persisted := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(migration), persisted); err != nil {
+		t.Fatalf("getting migration after first reconcile: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(persisted, migrationv1alpha1.FinalizerName) {
+		t.Fatalf("finalizer %s not added", migrationv1alpha1.FinalizerName)
+	}
+
+	// The second reconcile must not duplicate the finalizer and must proceed
+	// past the finalizer gate to the state gate (Pending: no workflow work).
+	if _, err := reconciler.Reconcile(ctx, req); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	persisted = &migrationv1alpha1.VmwareCloudFoundationMigration{}
+	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(migration), persisted); err != nil {
+		t.Fatalf("getting migration after second reconcile: %v", err)
+	}
+	if got := persisted.Finalizers; len(got) != 1 || got[0] != migrationv1alpha1.FinalizerName {
+		t.Fatalf("finalizers = %v, want exactly [%s]", got, migrationv1alpha1.FinalizerName)
+	}
+	if persisted.Status.StartTime != nil {
+		t.Fatalf("startTime = %v, want nil for a Pending migration", persisted.Status.StartTime)
+	}
+}
