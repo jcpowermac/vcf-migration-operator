@@ -471,8 +471,11 @@ func TestReconcileWorkloadMigratedFailedWorkerMachine(t *testing.T) {
 	migration := &migrationv1alpha1.VmwareCloudFoundationMigration{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       migrationv1alpha1.SingletonName,
-			Namespace:  "default",
+			Namespace:  migrationv1alpha1.SingletonNamespace,
 			Generation: 1,
+			// The retention finalizer is normally added by the first reconcile;
+			// pre-setting it keeps this test focused on the workload phase.
+			Finalizers: []string{migrationv1alpha1.FinalizerName},
 		},
 		Spec: migrationv1alpha1.VmwareCloudFoundationMigrationSpec{
 			State: migrationv1alpha1.MigrationStateRunning,
