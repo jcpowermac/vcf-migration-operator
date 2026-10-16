@@ -267,6 +267,13 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 		return ctrl.Result{}, nil
 	}
 
+	return r.reconcileWorkflow(ctx, migration, baseStatus)
+}
+
+// reconcileWorkflow processes migration state only after singleton and deletion guards pass.
+func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus) (ctrl.Result, error) {
+	log := klog.FromContext(ctx)
+
 	if migration.Spec.State != migrationv1alpha1.MigrationStateRunning {
 		log.V(1).Info("migration not in Running state, skipping", "state", migration.Spec.State)
 		if migration.Spec.State == migrationv1alpha1.MigrationStatePaused {
@@ -1393,40 +1400,12 @@ func statusConditionChanged(prev, next metav1.Condition) bool {
 // before the success was recorded (it self-heals on the next reconcile anyway,
 // but this avoids a visible flap).
 func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus) error {
-	log := klog.FromContext(ctx)
-
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &migrationv1alpha1.VmwareCloudFoundationMigration{}
 		if err := r.permissionReader().Get(ctx, client.ObjectKeyFromObject(migration), latest); err != nil {
 			return err
 		}
-		hasChanges := false
-		for i := range migration.Status.Conditions {
-			cond := migration.Status.Conditions[i]
-			// Skip conditions this reconcile did not change, so a concurrent
-			// writer's conditions survive.
-			if prev := apimeta.FindStatusCondition(baseStatus.Conditions, cond.Type); prev != nil && !statusConditionChanged(*prev, cond) {
-				continue
-			}
-			// Skip deltas from a reconcile that started before the current
-			// resource generation; a newer writer may have already committed
-			// up-to-date conditions for this type.
-			if cond.ObservedGeneration < latest.Generation {
-				log.V(1).Info("skipping stale generation condition update", "condition", cond.Type, "observedGeneration", cond.ObservedGeneration, "latestGeneration", latest.Generation)
-				continue
-			}
-			// Never downgrade a success another reconcile already committed.
-			if existing := apimeta.FindStatusCondition(latest.Status.Conditions, cond.Type); existing != nil &&
-				existing.Status == metav1.ConditionTrue && cond.Status != metav1.ConditionTrue {
-				log.V(1).Info("keeping committed condition success over stale update", "condition", cond.Type)
-				continue
-			}
-			existingCond := apimeta.FindStatusCondition(latest.Status.Conditions, cond.Type)
-			if existingCond == nil || statusConditionChanged(*existingCond, cond) {
-				hasChanges = true
-			}
-			apimeta.SetStatusCondition(&latest.Status.Conditions, cond)
-		}
+		hasChanges := mergeStatusConditions(ctx, migration, latest, baseStatus)
 		// Apply only progress deltas computed for the current resource
 		// generation, matching the generation protection used for conditions.
 		if migration.Generation == latest.Generation {
@@ -1479,6 +1458,39 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 		return fmt.Errorf("updating migration status: %w", err)
 	}
 	return nil
+}
+
+// mergeStatusConditions applies only changed, current-generation conditions without downgrading committed success.
+func mergeStatusConditions(ctx context.Context, migration, latest *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus) bool {
+	log := klog.FromContext(ctx)
+	hasChanges := false
+	for i := range migration.Status.Conditions {
+		cond := migration.Status.Conditions[i]
+		// Skip conditions this reconcile did not change, so a concurrent
+		// writer's conditions survive.
+		if prev := apimeta.FindStatusCondition(baseStatus.Conditions, cond.Type); prev != nil && !statusConditionChanged(*prev, cond) {
+			continue
+		}
+		// Skip deltas from a reconcile that started before the current
+		// resource generation; a newer writer may have already committed
+		// up-to-date conditions for this type.
+		if cond.ObservedGeneration < latest.Generation {
+			log.V(1).Info("skipping stale generation condition update", "condition", cond.Type, "observedGeneration", cond.ObservedGeneration, "latestGeneration", latest.Generation)
+			continue
+		}
+		// Never downgrade a success another reconcile already committed.
+		if existing := apimeta.FindStatusCondition(latest.Status.Conditions, cond.Type); existing != nil &&
+			existing.Status == metav1.ConditionTrue && cond.Status != metav1.ConditionTrue {
+			log.V(1).Info("keeping committed condition success over stale update", "condition", cond.Type)
+			continue
+		}
+		existingCond := apimeta.FindStatusCondition(latest.Status.Conditions, cond.Type)
+		if existingCond == nil || statusConditionChanged(*existingCond, cond) {
+			hasChanges = true
+		}
+		apimeta.SetStatusCondition(&latest.Status.Conditions, cond)
+	}
+	return hasChanges
 }
 
 // updateWorkloadProgress calculates and populates migration.Status.Progress with
