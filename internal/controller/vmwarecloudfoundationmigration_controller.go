@@ -1431,7 +1431,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 		}
 
 		if !hasChanges && latest.Status.LastUpdateTime != nil {
-			if latest.Name == migrationv1alpha1.SingletonName {
+			if latest.Name == migrationv1alpha1.SingletonName && latest.Namespace == migrationv1alpha1.SingletonNamespace {
 				metrics.UpdateMigrationMetrics(&latest.Status)
 			}
 			return nil
