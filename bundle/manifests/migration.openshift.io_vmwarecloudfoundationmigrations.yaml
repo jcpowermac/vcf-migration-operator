@@ -329,8 +329,9 @@ spec:
                 description: |-
                   conditions represent the current state of the migration.
                   Known conditions are:
-                  - Accepted: admission gate; True is normal for the single reconciled instance (cluster),
-                    while False indicates an unsupported object name.
+                  - Accepted: admission gate; True is normal for the single reconciled instance
+                    (openshift-vcf-migration/cluster), while False indicates an unsupported
+                    object name or namespace.
                   - InfrastructurePrepared: preflight validation and migration path selection.
                   - DestinationInitialized: destination vCenter folders and tags created.
                   - MultiSiteConfigured: cluster configured for both source and target vCenters.
