@@ -7,6 +7,8 @@ import (
 
 	"github.com/vmware/govmomi/object"
 	"k8s.io/klog/v2"
+
+	"github.com/openshift/vcf-migration-operator/internal/execution"
 )
 
 // CreateVMFolder creates a VM folder under the datacenter's vmFolder. The
@@ -43,6 +45,9 @@ func CreateVMFolder(ctx context.Context, s *Session, folderPath string) (*object
 	for _, part := range parts {
 		if part == "" {
 			continue
+		}
+		if err := execution.Check(ctx); err != nil {
+			return nil, err
 		}
 		created, err := parent.CreateFolder(ctx, part)
 		if err != nil {
@@ -91,6 +96,9 @@ func DeleteVMFolder(ctx context.Context, s *Session, folder *object.Folder) erro
 	log := klog.FromContext(ctx)
 	log.V(2).Info("deleting VM folder", "path", folder.InventoryPath)
 
+	if err := execution.Check(ctx); err != nil {
+		return err
+	}
 	task, err := folder.Destroy(ctx)
 	if err != nil {
 		return fmt.Errorf("destroying folder %s: %w", folder.InventoryPath, err)

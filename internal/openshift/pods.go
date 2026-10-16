@@ -11,6 +11,8 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
+
+	"github.com/openshift/vcf-migration-operator/internal/execution"
 )
 
 // PodSelector defines a namespace and label set used to locate pods.
@@ -115,6 +117,9 @@ func (p *PodManager) DeletePodsByLabel(ctx context.Context, namespace string, la
 	deleted := 0
 	for i := range pods.Items {
 		pod := &pods.Items[i]
+		if err := execution.Check(ctx); err != nil {
+			return deleted, err
+		}
 		if err := p.client.CoreV1().Pods(namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil {
 			log.V(2).Info("failed to delete pod", "namespace", namespace, "pod", pod.Name, "err", err)
 			continue

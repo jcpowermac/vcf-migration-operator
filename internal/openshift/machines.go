@@ -22,6 +22,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
+
+	"github.com/openshift/vcf-migration-operator/internal/execution"
 )
 
 const (
@@ -96,6 +98,9 @@ func (m *MachineManager) CreateWorkerMachineSet(ctx context.Context, name string
 		return nil, fmt.Errorf("updating provider spec for machineset %q: %w", name, err)
 	}
 
+	if err := execution.Check(ctx); err != nil {
+		return nil, err
+	}
 	created, err := m.machineClient.MachineV1beta1().MachineSets(MachineAPINamespace).Create(ctx, newMS, metav1.CreateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("creating machineset %q: %w", name, err)
@@ -159,6 +164,9 @@ func (m *MachineManager) ScaleMachineSet(ctx context.Context, name string, repli
 	}
 
 	ms.Spec.Replicas = &replicas
+	if err := execution.Check(ctx); err != nil {
+		return err
+	}
 	if _, err := m.machineClient.MachineV1beta1().MachineSets(MachineAPINamespace).Update(ctx, ms, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("scaling machineset %q to %d: %w", name, replicas, err)
 	}
@@ -173,6 +181,9 @@ func (m *MachineManager) DeleteMachineSet(ctx context.Context, name string) erro
 	log := klog.FromContext(ctx)
 	log.V(2).Info("deleting machineset", "name", name)
 
+	if err := execution.Check(ctx); err != nil {
+		return err
+	}
 	err := m.machineClient.MachineV1beta1().MachineSets(MachineAPINamespace).Delete(ctx, name, metav1.DeleteOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -278,6 +289,9 @@ func (m *MachineManager) UpdateCPMSFailureDomain(ctx context.Context, failureDom
 
 	cpms.Spec.State = machinev1.ControlPlaneMachineSetStateActive
 
+	if err := execution.Check(ctx); err != nil {
+		return err
+	}
 	if _, err := m.machineClient.MachineV1().ControlPlaneMachineSets(MachineAPINamespace).Update(ctx, cpms, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("updating ControlPlaneMachineSet: %w", err)
 	}

@@ -1034,10 +1034,18 @@ var _ = Describe("Deletion finalizer", func() {
 		Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
 		completionTime := metav1.Now()
 		resource.Status.CompletionTime = &completionTime
+		resource.Status.CompletionSpecHash = completionHashForTest(GinkgoT(), resource.Spec)
+		apimeta.SetStatusCondition(&resource.Status.Conditions, metav1.Condition{
+			Type: migrationv1alpha1.ConditionReady, Status: metav1.ConditionTrue,
+			Reason: migrationv1alpha1.ReasonCompleted, ObservedGeneration: resource.Generation,
+			LastTransitionTime: completionTime,
+		})
 		Expect(k8sClient.Status().Update(ctx, resource)).To(Succeed())
 
 		By("deleting the completed migration removes the record")
 		Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+		Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
+		Expect(apimeta.FindStatusCondition(resource.Status.Conditions, migrationv1alpha1.ConditionReady).ObservedGeneration).To(Equal(resource.Generation - 1))
 		_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 		Expect(err).NotTo(HaveOccurred())
 		Eventually(func() error {

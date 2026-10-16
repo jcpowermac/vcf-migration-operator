@@ -48,6 +48,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
+	"github.com/openshift/vcf-migration-operator/internal/execution"
 	"github.com/openshift/vcf-migration-operator/internal/metadata"
 	"github.com/openshift/vcf-migration-operator/internal/metrics"
 	"github.com/openshift/vcf-migration-operator/internal/openshift"
@@ -59,6 +60,8 @@ import (
 // progressing through a series of conditions in order.
 type VmwareCloudFoundationMigrationReconciler struct {
 	client.Client
+	// APIReader bypasses the cache for execution and retention decisions.
+	APIReader     client.Reader
 	Scheme        *runtime.Scheme
 	KubeClient    kubernetes.Interface
 	ConfigClient  configclient.Interface
@@ -223,9 +226,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 	// record survives a deletion request. The patch triggers an update event
 	// that requeues the rest of the reconcile.
 	if migration.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(migration, migrationv1alpha1.FinalizerName) {
-		base := client.MergeFrom(migration.DeepCopy())
-		controllerutil.AddFinalizer(migration, migrationv1alpha1.FinalizerName)
-		if err := r.Patch(ctx, migration, base); err != nil {
+		if err := r.updateRetentionFinalizer(ctx, migration); err != nil {
 			return ctrl.Result{}, fmt.Errorf("adding finalizer %s: %w", migrationv1alpha1.FinalizerName, err)
 		}
 		log.V(1).Info("added migration record retention finalizer", "finalizer", migrationv1alpha1.FinalizerName)
@@ -236,15 +237,16 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 	// deleted, or rolled back. The record is retained behind the finalizer
 	// until the migration is complete or an administrator allows deletion.
 	if !migration.DeletionTimestamp.IsZero() {
-		complete := migration.Status.CompletionTime != nil || r.isConditionTrue(migration, migrationv1alpha1.ConditionReady)
+		complete, err := isCompletionRecordedForSpec(migration)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
 		adminAllowed := migration.Annotations[migrationv1alpha1.AnnotationAllowDeletion] == "true"
 		if complete || adminAllowed {
-			base := client.MergeFrom(migration.DeepCopy())
-			controllerutil.RemoveFinalizer(migration, migrationv1alpha1.FinalizerName)
-			if err := r.Patch(ctx, migration, base); err != nil {
+			if err := r.updateRetentionFinalizer(ctx, migration); err != nil {
 				return ctrl.Result{}, fmt.Errorf("removing finalizer %s: %w", migrationv1alpha1.FinalizerName, err)
 			}
-			log.Info("releasing migration record retention finalizer", "complete", complete, "adminAllowed", adminAllowed)
+			log.V(1).Info("rechecked migration record release authorization")
 			return ctrl.Result{}, nil
 		}
 
@@ -323,6 +325,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 	}
 
 	r.seedReadyCondition(migration)
+	ctx = r.executionContext(ctx, migration)
 
 	for _, condType := range conditionOrder {
 		if r.isConditionTrue(migration, condType) {
@@ -335,7 +338,20 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 		}
 
 		log.V(1).Info("processing condition", "condition", condType)
+		if err := execution.Check(ctx); err != nil {
+			if errors.Is(err, errExecutionStopped) {
+				return ctrl.Result{}, nil
+			}
+			return ctrl.Result{}, err
+		}
 		result, err := handler(ctx, migration)
+		// Helpers may treat cleanup errors as best-effort; recheck before publishing success.
+		if permissionErr := execution.Check(ctx); permissionErr != nil {
+			err = permissionErr
+		}
+		if errors.Is(err, errExecutionStopped) {
+			return ctrl.Result{}, nil
+		}
 		if err != nil {
 			log.Error(err, "condition processing failed", "condition", condType)
 			r.setCondition(migration, condType, metav1.ConditionFalse, reasonForError(err), err.Error())
@@ -1381,7 +1397,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &migrationv1alpha1.VmwareCloudFoundationMigration{}
-		if err := r.Get(ctx, client.ObjectKeyFromObject(migration), latest); err != nil {
+		if err := r.permissionReader().Get(ctx, client.ObjectKeyFromObject(migration), latest); err != nil {
 			return err
 		}
 		hasChanges := false
@@ -1425,9 +1441,19 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 			latest.Status.StartTime = migration.Status.StartTime
 			hasChanges = true
 		}
-		if migration.Status.CompletionTime != nil && latest.Status.CompletionTime == nil {
-			latest.Status.CompletionTime = migration.Status.CompletionTime
-			hasChanges = true
+		ready := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionReady)
+		// Bind completion atomically to the spec that this reconcile actually completed.
+		if migration.Generation == latest.Generation && reflect.DeepEqual(migration.Spec, latest.Spec) &&
+			ready != nil && ready.Status == metav1.ConditionTrue && ready.ObservedGeneration == latest.Generation && migration.Status.CompletionTime != nil {
+			hash, err := completionSpecHash(migration.Spec)
+			if err != nil {
+				return err
+			}
+			if latest.Status.CompletionSpecHash != hash || latest.Status.CompletionTime == nil {
+				latest.Status.CompletionTime = migration.Status.CompletionTime
+				latest.Status.CompletionSpecHash = hash
+				hasChanges = true
+			}
 		}
 
 		if !hasChanges && latest.Status.LastUpdateTime != nil {

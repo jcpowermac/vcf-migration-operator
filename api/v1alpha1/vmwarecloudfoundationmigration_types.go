@@ -182,6 +182,15 @@ type VmwareCloudFoundationMigrationStatus struct {
 	// completionTime is when the migration completed.
 	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
+
+	// completionSpecHash is the lowercase hex SHA-256 of encoding/json.Marshal
+	// of the typed spec when Ready=True is established. With Ready=True and
+	// completionTime, a matching hash authorizes automatic record release even
+	// when deletion increments generation. When omitted, administrator handoff
+	// is required to release the record.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[a-f0-9]{64}$`
+	CompletionSpecHash string `json:"completionSpecHash,omitempty"`
 }
 
 // Condition type constants for the migration workflow.
