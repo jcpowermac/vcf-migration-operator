@@ -35,7 +35,6 @@ The secret must contain keys in the format `<vcenter-fqdn>.username` and `<vcent
 
 The operator reconciles exactly one resource: `openshift-vcf-migration/cluster` (`SingletonName` /
 `SingletonNamespace`, matching the operator deployment namespace). Enforcement is at reconcile
-
 time, not admission: any other `VmwareCloudFoundationMigration` object (wrong name or wrong
 namespace) is ignored with `Accepted=False` and a warning event, and no migration side effects
 run for it.
