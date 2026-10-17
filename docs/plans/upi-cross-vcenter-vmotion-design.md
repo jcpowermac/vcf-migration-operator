@@ -30,7 +30,7 @@ The first delivery retains the narrow baseline:
 
 Retain `migration.openshift.io/v1alpha1`, `VmwareCloudFoundationMigration`, and Namespaced scope. Only `openshift-vcf-migration/cluster` is executable. Check both namespace and name before migration side effects, including preparation. Other CR locations receive an actionable unsupported-location result. This does not require restricting the manager cache.
 
-An omitted optional `nodeMigration` selection retains the existing legacy path. Unsupported explicit VMotion requests must not fall through to MachineSet/CPMS replacement. Final optional API names, defaults, immutability rules, and generated schema remain API-review work; this document does not present proposed fields as an already shipped API.
+An omitted optional `nodeMigration` selection retains the existing legacy path. Unsupported explicit VMotion requests must not fall through to MachineSet/CPMS replacement. The API-only schema baseline, static defaults/validation, status fields, and wire decisions are recorded in [the Node Migration API reference](../dev/node-migration-api.md). This API foundation does not implement dispatch or runtime authorization; VMotion execution remains unsupported until the backend work and qualification gates below are complete.
 
 The invariants are:
 
@@ -322,7 +322,7 @@ Run repository-required generation, formatting, lint, unit/simulator and bundle 
 
 The design choices above are settled directions, not completed engineering work. Before enablement, record evidence for:
 
-- **G1 — API/status:** final optional engine/mode/recovery fields, compatibility/defaults/immutability, sanitized plan fingerprint, bounded field/state representation, merge/conflict rules and supported object-size bounds.
+- **G1 — API/status:** the API-only engine/mode/recovery/status schema baseline is recorded in the [Node Migration API reference](../dev/node-migration-api.md) and exercised through API-server tests. Runtime compatibility, immutable-plan enforcement, status merge/conflict rules and supported object-size bounds remain open.
 - **G2 — vSphere integration:** actual `CheckRelocate_Task` result handling/empty semantics, source/target references, deterministic host selection, SDK retry behavior, selected power-on API/result/placement contract, and applicable action/inheritance permissions.
 - **G3 — Supported combinations:** exact OCP build, vCenter/ESXi versions and cross-major directions, DRS/pool/boot-device combinations and existing address families qualified for Hot/Cold. No exclusions or support guarantees inferred from an API's minimum version alone.
 - **G4 — etcd integration/security:** credential authority/delivery/rotation, precise RBAC, expected member-to-Node binding, bounded reads/polling/freshness, guard-respecting drain and supported OCP integration.

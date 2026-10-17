@@ -1,9 +1,9 @@
----
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
+  creationTimestamp: null
   name: vmwarecloudfoundationmigrations.migration.openshift.io
 spec:
   group: migration.openshift.io
@@ -64,7 +64,8 @@ spec:
                   element type intentionally tracks config.openshift.io/v1 VSpherePlatformFailureDomainSpec
                   (including Name, Region, Zone, Server, and Topology) to align with OpenShift API
                   failure domain semantics; the schema is re-inlined on "make manifests" after
-                  dependency bumps.
+                  dependency bumps. Legacy and Recreate configurations require topology.template;
+                  VMotion configurations do not use a template and are limited to one failure domain.
                 items:
                   description: VSpherePlatformFailureDomainSpec holds the region and
                     zone failure domain and the vCenter topology of that failure domain.
@@ -272,15 +273,11 @@ spec:
                 minItems: 1
                 type: array
                 x-kubernetes-list-type: atomic
-                x-kubernetes-validations:
-                - message: topology.template is required for every failure domain
-                  rule: self.all(fd, has(fd.topology.template) && fd.topology.template
-                    != '')
               nodeMigration:
                 description: |-
                   nodeMigration controls how nodes move to the target vCenter.
                   When omitted, the operator keeps the current MachineSet/CPMS replacement path.
-                  When set, type is the cluster-wide engine; roles cannot override it.
+                  When set, both roles select the same migration engine.
                 properties:
                   controlPlane:
                     description: |-
@@ -311,15 +308,14 @@ spec:
                           Forbidden when type is Recreate.
                         properties:
                           mode:
-                            default: Auto
-                            description: |-
-                              mode selects live vs cold relocation.
-                              Auto tries Hot and falls back to Cold.
+                            description: mode explicitly selects live or cold relocation.
+                              There is no fallback mode.
                             enum:
-                            - Auto
                             - Hot
                             - Cold
                             type: string
+                        required:
+                        - mode
                         type: object
                     type: object
                     x-kubernetes-validations:
@@ -327,6 +323,37 @@ spec:
                       rule: '!has(self.type) || self.type == ''VMotion'' || !has(self.vmotion)'
                     - message: vmotion is required when type is VMotion
                       rule: '!has(self.type) || self.type != ''VMotion'' || has(self.vmotion)'
+                  recoveryRequest:
+                    description: |-
+                      recoveryRequest asks the operator to recheck one blocked action. It is an
+                      action-bound request, not evidence that the action is inactive or authority
+                      to replay it. Runtime validation and authorization are not performed by schema.
+                    properties:
+                      actionID:
+                        description: actionID identifies the specific blocked action
+                          being rechecked.
+                        format: uuid
+                        type: string
+                      executionID:
+                        description: executionID identifies the frozen execution being
+                          rechecked.
+                        format: uuid
+                        type: string
+                      reason:
+                        description: reason is a sanitized, bounded administrator
+                          note; it must not contain secrets.
+                        maxLength: 1024
+                        type: string
+                      requestID:
+                        description: requestID uniquely identifies this acknowledgement
+                          request.
+                        format: uuid
+                        type: string
+                    required:
+                    - actionID
+                    - executionID
+                    - requestID
+                    type: object
                   workers:
                     description: workers defines the migration engine and rolling
                       limits for worker nodes.
@@ -355,15 +382,14 @@ spec:
                           Forbidden when type is Recreate.
                         properties:
                           mode:
-                            default: Auto
-                            description: |-
-                              mode selects live vs cold relocation.
-                              Auto tries Hot and falls back to Cold.
+                            description: mode explicitly selects live or cold relocation.
+                              There is no fallback mode.
                             enum:
-                            - Auto
                             - Hot
                             - Cold
                             type: string
+                        required:
+                        - mode
                         type: object
                     type: object
                     x-kubernetes-validations:
@@ -383,6 +409,19 @@ spec:
                 - message: controlPlane.maxUnavailable must be 1
                   rule: '!has(self.controlPlane) || !has(self.controlPlane.maxUnavailable)
                     || self.controlPlane.maxUnavailable == 1'
+                - message: workers and controlPlane must use the same migration type
+                  rule: '!has(self.workers) || !has(self.controlPlane) || self.workers.type
+                    == self.controlPlane.type'
+                - message: workers and controlPlane must use the same VMotion mode
+                  rule: '!has(self.workers) || !has(self.controlPlane) || self.workers.type
+                    != ''VMotion'' || self.controlPlane.type != ''VMotion'' || !has(self.workers.vmotion)
+                    || !has(self.controlPlane.vmotion) || !has(self.workers.vmotion.mode)
+                    || !has(self.controlPlane.vmotion.mode) || self.workers.vmotion.mode
+                    == self.controlPlane.vmotion.mode'
+                - message: VMotion workers.maxUnavailable must be 1
+                  rule: '!has(self.workers) || self.workers.type != ''VMotion'' ||
+                    !has(self.workers.maxUnavailable) || self.workers.maxUnavailable
+                    == 1'
               state:
                 default: Pending
                 description: |-
@@ -416,6 +455,16 @@ spec:
             - failureDomains
             - targetVCenterCredentialsSecret
             type: object
+            x-kubernetes-validations:
+            - message: topology.template is required for legacy and Recreate configurations
+              rule: (has(self.nodeMigration) && self.nodeMigration.workers.type ==
+                'VMotion' && self.nodeMigration.controlPlane.type == 'VMotion') ||
+                self.failureDomains.all(fd, has(fd.topology.template) && size(fd.topology.template)
+                > 0)
+            - message: VMotion requires exactly one failure domain
+              rule: '!has(self.nodeMigration) || (self.nodeMigration.workers.type
+                != ''VMotion'' && self.nodeMigration.controlPlane.type != ''VMotion'')
+                || size(self.failureDomains) == 1'
           status:
             description: status defines the observed state of VmwareCloudFoundationMigration.
             properties:
@@ -505,6 +554,150 @@ spec:
                   nodeMigration reports per-node move progress.
                   Nil when the MachineSet/CPMS replacement path is used.
                 properties:
+                  activeAction:
+                    description: |-
+                      activeAction is the single action claim currently being observed. A claim
+                      without a task reference means submission may have begun and is not safe to retry.
+                    properties:
+                      actionID:
+                        description: actionID is stable for this one mutating action.
+                        format: uuid
+                        type: string
+                      claimedAt:
+                        description: claimedAt is when the durable claim was written.
+                        format: date-time
+                        type: string
+                      deadline:
+                        description: deadline is the bounded action deadline, if set
+                          by the implementation.
+                        format: date-time
+                        type: string
+                      executionID:
+                        description: executionID binds this action to the frozen execution.
+                        format: uuid
+                        type: string
+                      kind:
+                        description: kind is the mutating operation claimed.
+                        enum:
+                        - ShutdownGuest
+                        - RelocateVM
+                        - PowerOnVM
+                        type: string
+                      lastObservedAt:
+                        description: lastObservedAt is the latest observation time,
+                          if any.
+                        format: date-time
+                        type: string
+                      nodeName:
+                        description: nodeName identifies the Kubernetes Node.
+                        maxLength: 253
+                        type: string
+                      nodeUID:
+                        description: nodeUID binds the action to the selected Node
+                          object.
+                        type: string
+                      observationState:
+                        description: observationState records the latest action observation.
+                        enum:
+                        - NotObserved
+                        - Running
+                        - Succeeded
+                        - Failed
+                        - Unknown
+                        type: string
+                      operationIdentity:
+                        description: operationIdentity is a digest of sanitized, non-secret
+                          intended-operation inputs.
+                        pattern: ^[a-f0-9]{64}$
+                        type: string
+                      ownerVCenter:
+                        description: ownerVCenter is the vCenter in which this action/task
+                          is interpreted.
+                        maxLength: 512
+                        type: string
+                      reason:
+                        description: reason is a sanitized, bounded observation/outcome
+                          detail.
+                        maxLength: 1024
+                        type: string
+                      submissionState:
+                        description: submissionState distinguishes a persisted claim
+                          from acknowledged submission.
+                        enum:
+                        - Claimed
+                        - Submitted
+                        - Unknown
+                        type: string
+                      submittedAt:
+                        description: submittedAt is when submission was acknowledged,
+                          if known.
+                        format: date-time
+                        type: string
+                      taskReference:
+                        description: taskReference is optional; ShutdownGuest has
+                          no task reference.
+                        properties:
+                          ownerVCenter:
+                            description: ownerVCenter scopes taskID to one vCenter.
+                            maxLength: 512
+                            type: string
+                          taskID:
+                            description: taskID is the vCenter-local task identifier.
+                            maxLength: 512
+                            type: string
+                        required:
+                        - ownerVCenter
+                        - taskID
+                        type: object
+                      vmBIOSUUID:
+                        description: vmBIOSUUID identifies the VM BIOS UUID, not vSphere
+                          instanceUUID.
+                        maxLength: 64
+                        type: string
+                    required:
+                    - actionID
+                    - claimedAt
+                    - executionID
+                    - kind
+                    - nodeName
+                    - nodeUID
+                    - observationState
+                    - operationIdentity
+                    - ownerVCenter
+                    - submissionState
+                    - vmBIOSUUID
+                    type: object
+                    x-kubernetes-validations:
+                    - message: taskReference.ownerVCenter must match ownerVCenter
+                      rule: '!has(self.taskReference) || self.taskReference.ownerVCenter
+                        == self.ownerVCenter'
+                    - message: ShutdownGuest does not have a task reference
+                      rule: self.kind != 'ShutdownGuest' || !has(self.taskReference)
+                  cleanup:
+                    description: |-
+                      cleanup is bounded progress for source-reference cleanup; it is observational
+                      state and does not authorize cleanup.
+                    properties:
+                      lastTransitionTime:
+                        description: lastTransitionTime is when phase last changed.
+                        format: date-time
+                        type: string
+                      phase:
+                        description: phase is the current cleanup observation.
+                        enum:
+                        - Pending
+                        - RemovingSourceReferences
+                        - VerifyingReadiness
+                        - Completed
+                        - Blocked
+                        type: string
+                      reason:
+                        description: reason is a sanitized, bounded explanation.
+                        maxLength: 1024
+                        type: string
+                    required:
+                    - phase
+                    type: object
                   controlPlane:
                     description: 'controlPlane is control-plane progress: counts plus
                       per-node entries.'
@@ -532,8 +725,11 @@ spec:
                               type: string
                             instanceUUID:
                               description: |-
-                                instanceUUID is the VM BIOS UUID (node spec.providerID, without vsphere://).
-                                Stable identity across vCenters; MoRef is not.
+                                instanceUUID is the legacy wire name for the VM BIOS UUID. It does not mean
+                                vSphere config.instanceUuid. Use vmBIOSUUID for new status; if both are set,
+                                they must contain the same BIOS UUID.
+                                Deprecated: retained for wire compatibility; use vmBIOSUUID.
+                              maxLength: 64
                               type: string
                             lastTransitionTime:
                               description: lastTransitionTime is when phase last changed.
@@ -542,19 +738,28 @@ spec:
                             message:
                               description: message is a short human-readable explanation
                                 of phase or failure.
+                              maxLength: 1024
                               type: string
                             name:
                               description: name is the Kubernetes Node name. List
                                 merge key.
                               type: string
+                            nodeUID:
+                              description: nodeUID binds this progress record to the
+                                Kubernetes Node object.
+                              type: string
                             observedMode:
-                              description: |-
-                                observedMode is the relocation that actually ran: Hot or Cold.
-                                Empty until RelocateVM starts. Auto resolves here, never in spec.
+                              description: 'observedMode is the relocation mode observed
+                                for this node: Hot or Cold.'
                               enum:
                               - Hot
                               - Cold
                               type: string
+                            originalUnschedulable:
+                              description: |-
+                                originalUnschedulable records the pre-migration scheduling state.
+                                Pointer presence distinguishes an unrecorded state from false.
+                              type: boolean
                             phase:
                               description: phase is the node-local relocation state.
                               enum:
@@ -565,44 +770,307 @@ spec:
                               - Succeeded
                               - Failed
                               type: string
+                            powerOnOutcome:
+                              description: powerOnOutcome records destination power-on
+                                separately from relocation.
+                              properties:
+                                actionID:
+                                  description: actionID identifies the action that
+                                    produced this outcome.
+                                  format: uuid
+                                  type: string
+                                completedAt:
+                                  description: completedAt is when the operation outcome
+                                    became terminal, if known.
+                                  format: date-time
+                                  type: string
+                                kind:
+                                  description: kind identifies the operation represented
+                                    by this outcome.
+                                  enum:
+                                  - ShutdownGuest
+                                  - RelocateVM
+                                  - PowerOnVM
+                                  type: string
+                                observedAt:
+                                  description: observedAt is when this outcome was
+                                    last established.
+                                  format: date-time
+                                  type: string
+                                ownerVCenter:
+                                  description: ownerVCenter scopes any task reference.
+                                  maxLength: 512
+                                  type: string
+                                reason:
+                                  description: reason is a sanitized, bounded explanation.
+                                  maxLength: 1024
+                                  type: string
+                                state:
+                                  description: state is the bounded result; it is
+                                    observational, not replay authority.
+                                  enum:
+                                  - Succeeded
+                                  - Failed
+                                  - Unknown
+                                  type: string
+                                taskReference:
+                                  description: taskReference is optional and scoped
+                                    to ownerVCenter.
+                                  properties:
+                                    ownerVCenter:
+                                      description: ownerVCenter scopes taskID to one
+                                        vCenter.
+                                      maxLength: 512
+                                      type: string
+                                    taskID:
+                                      description: taskID is the vCenter-local task
+                                        identifier.
+                                      maxLength: 512
+                                      type: string
+                                  required:
+                                  - ownerVCenter
+                                  - taskID
+                                  type: object
+                              required:
+                              - actionID
+                              - kind
+                              - ownerVCenter
+                              - state
+                              type: object
+                              x-kubernetes-validations:
+                              - message: taskReference.ownerVCenter must match ownerVCenter
+                                rule: '!has(self.taskReference) || self.taskReference.ownerVCenter
+                                  == self.ownerVCenter'
+                              - message: ShutdownGuest does not have a task reference
+                                rule: self.kind != 'ShutdownGuest' || !has(self.taskReference)
+                            providerID:
+                              description: providerID is the Node spec.providerID
+                                captured for the frozen identity.
+                              maxLength: 512
+                              type: string
+                            relocationOutcome:
+                              description: relocationOutcome remains intact when a
+                                later power-on is recorded.
+                              properties:
+                                actionID:
+                                  description: actionID identifies the action that
+                                    produced this outcome.
+                                  format: uuid
+                                  type: string
+                                completedAt:
+                                  description: completedAt is when the operation outcome
+                                    became terminal, if known.
+                                  format: date-time
+                                  type: string
+                                kind:
+                                  description: kind identifies the operation represented
+                                    by this outcome.
+                                  enum:
+                                  - ShutdownGuest
+                                  - RelocateVM
+                                  - PowerOnVM
+                                  type: string
+                                observedAt:
+                                  description: observedAt is when this outcome was
+                                    last established.
+                                  format: date-time
+                                  type: string
+                                ownerVCenter:
+                                  description: ownerVCenter scopes any task reference.
+                                  maxLength: 512
+                                  type: string
+                                reason:
+                                  description: reason is a sanitized, bounded explanation.
+                                  maxLength: 1024
+                                  type: string
+                                state:
+                                  description: state is the bounded result; it is
+                                    observational, not replay authority.
+                                  enum:
+                                  - Succeeded
+                                  - Failed
+                                  - Unknown
+                                  type: string
+                                taskReference:
+                                  description: taskReference is optional and scoped
+                                    to ownerVCenter.
+                                  properties:
+                                    ownerVCenter:
+                                      description: ownerVCenter scopes taskID to one
+                                        vCenter.
+                                      maxLength: 512
+                                      type: string
+                                    taskID:
+                                      description: taskID is the vCenter-local task
+                                        identifier.
+                                      maxLength: 512
+                                      type: string
+                                  required:
+                                  - ownerVCenter
+                                  - taskID
+                                  type: object
+                              required:
+                              - actionID
+                              - kind
+                              - ownerVCenter
+                              - state
+                              type: object
+                              x-kubernetes-validations:
+                              - message: taskReference.ownerVCenter must match ownerVCenter
+                                rule: '!has(self.taskReference) || self.taskReference.ownerVCenter
+                                  == self.ownerVCenter'
+                              - message: ShutdownGuest does not have a task reference
+                                rule: self.kind != 'ShutdownGuest' || !has(self.taskReference)
                             requestedMode:
-                              description: |-
-                                requestedMode is the mode in force when this node started.
-                                Frozen for in-flight nodes if spec changes later.
+                              description: requestedMode is the explicit mode in force
+                                when this node started.
                               enum:
-                              - Auto
                               - Hot
                               - Cold
                               type: string
+                            shutdownOutcome:
+                              description: shutdownOutcome records graceful shutdown
+                                separately from later operations.
+                              properties:
+                                actionID:
+                                  description: actionID identifies the action that
+                                    produced this outcome.
+                                  format: uuid
+                                  type: string
+                                completedAt:
+                                  description: completedAt is when the operation outcome
+                                    became terminal, if known.
+                                  format: date-time
+                                  type: string
+                                kind:
+                                  description: kind identifies the operation represented
+                                    by this outcome.
+                                  enum:
+                                  - ShutdownGuest
+                                  - RelocateVM
+                                  - PowerOnVM
+                                  type: string
+                                observedAt:
+                                  description: observedAt is when this outcome was
+                                    last established.
+                                  format: date-time
+                                  type: string
+                                ownerVCenter:
+                                  description: ownerVCenter scopes any task reference.
+                                  maxLength: 512
+                                  type: string
+                                reason:
+                                  description: reason is a sanitized, bounded explanation.
+                                  maxLength: 1024
+                                  type: string
+                                state:
+                                  description: state is the bounded result; it is
+                                    observational, not replay authority.
+                                  enum:
+                                  - Succeeded
+                                  - Failed
+                                  - Unknown
+                                  type: string
+                                taskReference:
+                                  description: taskReference is optional and scoped
+                                    to ownerVCenter.
+                                  properties:
+                                    ownerVCenter:
+                                      description: ownerVCenter scopes taskID to one
+                                        vCenter.
+                                      maxLength: 512
+                                      type: string
+                                    taskID:
+                                      description: taskID is the vCenter-local task
+                                        identifier.
+                                      maxLength: 512
+                                      type: string
+                                  required:
+                                  - ownerVCenter
+                                  - taskID
+                                  type: object
+                              required:
+                              - actionID
+                              - kind
+                              - ownerVCenter
+                              - state
+                              type: object
+                              x-kubernetes-validations:
+                              - message: taskReference.ownerVCenter must match ownerVCenter
+                                rule: '!has(self.taskReference) || self.taskReference.ownerVCenter
+                                  == self.ownerVCenter'
+                              - message: ShutdownGuest does not have a task reference
+                                rule: self.kind != 'ShutdownGuest' || !has(self.taskReference)
                             sourceInventoryPath:
                               description: sourceInventoryPath is the VM path before
                                 relocation.
+                              maxLength: 1024
                               type: string
                             startedAt:
                               description: startedAt is when Preparing began.
                               format: date-time
                               type: string
+                            targetDatastore:
+                              description: targetDatastore is the frozen destination
+                                datastore path.
+                              maxLength: 1024
+                              type: string
                             targetFailureDomain:
                               description: targetFailureDomain is the spec.failureDomains[].name
                                 chosen for placement.
+                              maxLength: 253
+                              type: string
+                            targetHost:
+                              description: targetHost is the frozen destination host
+                                identity, if selected.
+                              maxLength: 1024
                               type: string
                             targetInventoryPath:
                               description: targetInventoryPath is the VM path after
                                 relocation.
+                              maxLength: 1024
+                              type: string
+                            targetNetwork:
+                              description: targetNetwork is the frozen destination
+                                network identity.
+                              maxLength: 1024
+                              type: string
+                            targetResourcePool:
+                              description: targetResourcePool is the frozen destination
+                                resource-pool path.
+                              maxLength: 1024
+                              type: string
+                            vmBIOSUUID:
+                              description: vmBIOSUUID is the VM BIOS UUID identity,
+                                distinct from vSphere instanceUUID.
+                              maxLength: 64
                               type: string
                           required:
                           - name
                           - phase
                           type: object
+                          x-kubernetes-validations:
+                          - message: instanceUUID and vmBIOSUUID must identify the
+                              same VM BIOS UUID
+                            rule: '!has(self.instanceUUID) || !has(self.vmBIOSUUID)
+                              || self.instanceUUID == self.vmBIOSUUID'
+                          - message: shutdownOutcome.kind must be ShutdownGuest
+                            rule: '!has(self.shutdownOutcome) || self.shutdownOutcome.kind
+                              == ''ShutdownGuest'''
+                          - message: relocationOutcome.kind must be RelocateVM
+                            rule: '!has(self.relocationOutcome) || self.relocationOutcome.kind
+                              == ''RelocateVM'''
+                          - message: powerOnOutcome.kind must be PowerOnVM
+                            rule: '!has(self.powerOnOutcome) || self.powerOnOutcome.kind
+                              == ''PowerOnVM'''
+                        maxItems: 500
                         type: array
                         x-kubernetes-list-map-keys:
                         - name
                         x-kubernetes-list-type: map
                       observedMode:
-                        description: |-
-                          observedMode is the relocation that actually ran for this role: Hot or Cold.
-                          Never Auto. Empty until at least one node has started relocating, and empty
-                          if Auto produced a mix of Hot and Cold (inspect nodes[].observedMode).
+                        description: 'observedMode is the relocation mode observed
+                          for this role: Hot or Cold.'
                         enum:
                         - Hot
                         - Cold
@@ -612,12 +1080,9 @@ spec:
                         format: int32
                         type: integer
                       requestedMode:
-                        description: |-
-                          requestedMode is the vMotion mode from spec for this role
-                          (inherited from spec.nodeMigration.vmotion.mode when the role omits mode).
-                          Auto is spec policy, not what vCenter ran; see observedMode.
+                        description: requestedMode is the explicit vMotion mode selected
+                          for this role.
                         enum:
-                        - Auto
                         - Hot
                         - Cold
                         type: string
@@ -631,11 +1096,123 @@ spec:
                         format: int32
                         type: integer
                     type: object
+                  executionID:
+                    description: |-
+                      executionID is stable across pause-related generation changes; generation
+                      and observedGeneration are not operation identifiers.
+                    format: uuid
+                    type: string
+                  frozenPlan:
+                    description: frozenPlan records bounded source, destination, mode
+                      and placement identity.
+                    properties:
+                      destinationVCenter:
+                        description: destinationVCenter identifies the destination
+                          vCenter endpoint.
+                        maxLength: 512
+                        type: string
+                      mode:
+                        description: mode is the explicitly selected mode frozen for
+                          this execution.
+                        enum:
+                        - Hot
+                        - Cold
+                        type: string
+                      sourceDatacenter:
+                        description: sourceDatacenter identifies the source datacenter.
+                        maxLength: 253
+                        type: string
+                      sourceVCenter:
+                        description: sourceVCenter identifies the source vCenter endpoint.
+                        maxLength: 512
+                        type: string
+                      targetFailureDomain:
+                        description: targetFailureDomain is the selected target failure-domain
+                          name.
+                        maxLength: 253
+                        type: string
+                    required:
+                    - destinationVCenter
+                    - mode
+                    - sourceDatacenter
+                    - sourceVCenter
+                    - targetFailureDomain
+                    type: object
+                  intervention:
+                    description: |-
+                      intervention records an unresolved condition requiring administrator review.
+                      Its presence does not itself prove an action is inactive.
+                    properties:
+                      actionID:
+                        description: actionID identifies the affected action.
+                        format: uuid
+                        type: string
+                      executionID:
+                        description: executionID identifies the affected frozen execution.
+                        format: uuid
+                        type: string
+                      nodeName:
+                        description: nodeName identifies the affected Node.
+                        maxLength: 253
+                        type: string
+                      reason:
+                        description: reason is a sanitized, bounded explanation.
+                        maxLength: 1024
+                        type: string
+                      since:
+                        description: since is when intervention became necessary.
+                        format: date-time
+                        type: string
+                    required:
+                    - actionID
+                    - executionID
+                    - nodeName
+                    - reason
+                    - since
+                    type: object
+                  migrationUID:
+                    description: migrationUID binds this execution record to the originating
+                      CR UID.
+                    type: string
+                  planFingerprint:
+                    description: |-
+                      planFingerprint identifies the sanitized frozen plan, excluding credentials
+                      and other secret material.
+                    pattern: ^[a-f0-9]{64}$
+                    type: string
                   progress:
                     description: |-
                       progress is a human-readable rollup for kubectl get,
                       for example "control plane 2/3, workers 4/10".
+                    maxLength: 256
                     type: string
+                  recoveryAcknowledgement:
+                    description: |-
+                      recoveryAcknowledgement records consumption of a recovery request. It is not
+                      proof of inactivity, authorization, or replay safety.
+                    properties:
+                      actionID:
+                        description: actionID is the action named by the request.
+                        format: uuid
+                        type: string
+                      consumedAt:
+                        description: consumedAt records when the request was consumed.
+                        format: date-time
+                        type: string
+                      executionID:
+                        description: executionID is the execution named by the request.
+                        format: uuid
+                        type: string
+                      requestID:
+                        description: requestID identifies the consumed request.
+                        format: uuid
+                        type: string
+                    required:
+                    - actionID
+                    - consumedAt
+                    - executionID
+                    - requestID
+                    type: object
                   type:
                     description: type is the engine selected when WorkloadMigrated
                       started.
@@ -670,8 +1247,11 @@ spec:
                               type: string
                             instanceUUID:
                               description: |-
-                                instanceUUID is the VM BIOS UUID (node spec.providerID, without vsphere://).
-                                Stable identity across vCenters; MoRef is not.
+                                instanceUUID is the legacy wire name for the VM BIOS UUID. It does not mean
+                                vSphere config.instanceUuid. Use vmBIOSUUID for new status; if both are set,
+                                they must contain the same BIOS UUID.
+                                Deprecated: retained for wire compatibility; use vmBIOSUUID.
+                              maxLength: 64
                               type: string
                             lastTransitionTime:
                               description: lastTransitionTime is when phase last changed.
@@ -680,19 +1260,28 @@ spec:
                             message:
                               description: message is a short human-readable explanation
                                 of phase or failure.
+                              maxLength: 1024
                               type: string
                             name:
                               description: name is the Kubernetes Node name. List
                                 merge key.
                               type: string
+                            nodeUID:
+                              description: nodeUID binds this progress record to the
+                                Kubernetes Node object.
+                              type: string
                             observedMode:
-                              description: |-
-                                observedMode is the relocation that actually ran: Hot or Cold.
-                                Empty until RelocateVM starts. Auto resolves here, never in spec.
+                              description: 'observedMode is the relocation mode observed
+                                for this node: Hot or Cold.'
                               enum:
                               - Hot
                               - Cold
                               type: string
+                            originalUnschedulable:
+                              description: |-
+                                originalUnschedulable records the pre-migration scheduling state.
+                                Pointer presence distinguishes an unrecorded state from false.
+                              type: boolean
                             phase:
                               description: phase is the node-local relocation state.
                               enum:
@@ -703,44 +1292,307 @@ spec:
                               - Succeeded
                               - Failed
                               type: string
+                            powerOnOutcome:
+                              description: powerOnOutcome records destination power-on
+                                separately from relocation.
+                              properties:
+                                actionID:
+                                  description: actionID identifies the action that
+                                    produced this outcome.
+                                  format: uuid
+                                  type: string
+                                completedAt:
+                                  description: completedAt is when the operation outcome
+                                    became terminal, if known.
+                                  format: date-time
+                                  type: string
+                                kind:
+                                  description: kind identifies the operation represented
+                                    by this outcome.
+                                  enum:
+                                  - ShutdownGuest
+                                  - RelocateVM
+                                  - PowerOnVM
+                                  type: string
+                                observedAt:
+                                  description: observedAt is when this outcome was
+                                    last established.
+                                  format: date-time
+                                  type: string
+                                ownerVCenter:
+                                  description: ownerVCenter scopes any task reference.
+                                  maxLength: 512
+                                  type: string
+                                reason:
+                                  description: reason is a sanitized, bounded explanation.
+                                  maxLength: 1024
+                                  type: string
+                                state:
+                                  description: state is the bounded result; it is
+                                    observational, not replay authority.
+                                  enum:
+                                  - Succeeded
+                                  - Failed
+                                  - Unknown
+                                  type: string
+                                taskReference:
+                                  description: taskReference is optional and scoped
+                                    to ownerVCenter.
+                                  properties:
+                                    ownerVCenter:
+                                      description: ownerVCenter scopes taskID to one
+                                        vCenter.
+                                      maxLength: 512
+                                      type: string
+                                    taskID:
+                                      description: taskID is the vCenter-local task
+                                        identifier.
+                                      maxLength: 512
+                                      type: string
+                                  required:
+                                  - ownerVCenter
+                                  - taskID
+                                  type: object
+                              required:
+                              - actionID
+                              - kind
+                              - ownerVCenter
+                              - state
+                              type: object
+                              x-kubernetes-validations:
+                              - message: taskReference.ownerVCenter must match ownerVCenter
+                                rule: '!has(self.taskReference) || self.taskReference.ownerVCenter
+                                  == self.ownerVCenter'
+                              - message: ShutdownGuest does not have a task reference
+                                rule: self.kind != 'ShutdownGuest' || !has(self.taskReference)
+                            providerID:
+                              description: providerID is the Node spec.providerID
+                                captured for the frozen identity.
+                              maxLength: 512
+                              type: string
+                            relocationOutcome:
+                              description: relocationOutcome remains intact when a
+                                later power-on is recorded.
+                              properties:
+                                actionID:
+                                  description: actionID identifies the action that
+                                    produced this outcome.
+                                  format: uuid
+                                  type: string
+                                completedAt:
+                                  description: completedAt is when the operation outcome
+                                    became terminal, if known.
+                                  format: date-time
+                                  type: string
+                                kind:
+                                  description: kind identifies the operation represented
+                                    by this outcome.
+                                  enum:
+                                  - ShutdownGuest
+                                  - RelocateVM
+                                  - PowerOnVM
+                                  type: string
+                                observedAt:
+                                  description: observedAt is when this outcome was
+                                    last established.
+                                  format: date-time
+                                  type: string
+                                ownerVCenter:
+                                  description: ownerVCenter scopes any task reference.
+                                  maxLength: 512
+                                  type: string
+                                reason:
+                                  description: reason is a sanitized, bounded explanation.
+                                  maxLength: 1024
+                                  type: string
+                                state:
+                                  description: state is the bounded result; it is
+                                    observational, not replay authority.
+                                  enum:
+                                  - Succeeded
+                                  - Failed
+                                  - Unknown
+                                  type: string
+                                taskReference:
+                                  description: taskReference is optional and scoped
+                                    to ownerVCenter.
+                                  properties:
+                                    ownerVCenter:
+                                      description: ownerVCenter scopes taskID to one
+                                        vCenter.
+                                      maxLength: 512
+                                      type: string
+                                    taskID:
+                                      description: taskID is the vCenter-local task
+                                        identifier.
+                                      maxLength: 512
+                                      type: string
+                                  required:
+                                  - ownerVCenter
+                                  - taskID
+                                  type: object
+                              required:
+                              - actionID
+                              - kind
+                              - ownerVCenter
+                              - state
+                              type: object
+                              x-kubernetes-validations:
+                              - message: taskReference.ownerVCenter must match ownerVCenter
+                                rule: '!has(self.taskReference) || self.taskReference.ownerVCenter
+                                  == self.ownerVCenter'
+                              - message: ShutdownGuest does not have a task reference
+                                rule: self.kind != 'ShutdownGuest' || !has(self.taskReference)
                             requestedMode:
-                              description: |-
-                                requestedMode is the mode in force when this node started.
-                                Frozen for in-flight nodes if spec changes later.
+                              description: requestedMode is the explicit mode in force
+                                when this node started.
                               enum:
-                              - Auto
                               - Hot
                               - Cold
                               type: string
+                            shutdownOutcome:
+                              description: shutdownOutcome records graceful shutdown
+                                separately from later operations.
+                              properties:
+                                actionID:
+                                  description: actionID identifies the action that
+                                    produced this outcome.
+                                  format: uuid
+                                  type: string
+                                completedAt:
+                                  description: completedAt is when the operation outcome
+                                    became terminal, if known.
+                                  format: date-time
+                                  type: string
+                                kind:
+                                  description: kind identifies the operation represented
+                                    by this outcome.
+                                  enum:
+                                  - ShutdownGuest
+                                  - RelocateVM
+                                  - PowerOnVM
+                                  type: string
+                                observedAt:
+                                  description: observedAt is when this outcome was
+                                    last established.
+                                  format: date-time
+                                  type: string
+                                ownerVCenter:
+                                  description: ownerVCenter scopes any task reference.
+                                  maxLength: 512
+                                  type: string
+                                reason:
+                                  description: reason is a sanitized, bounded explanation.
+                                  maxLength: 1024
+                                  type: string
+                                state:
+                                  description: state is the bounded result; it is
+                                    observational, not replay authority.
+                                  enum:
+                                  - Succeeded
+                                  - Failed
+                                  - Unknown
+                                  type: string
+                                taskReference:
+                                  description: taskReference is optional and scoped
+                                    to ownerVCenter.
+                                  properties:
+                                    ownerVCenter:
+                                      description: ownerVCenter scopes taskID to one
+                                        vCenter.
+                                      maxLength: 512
+                                      type: string
+                                    taskID:
+                                      description: taskID is the vCenter-local task
+                                        identifier.
+                                      maxLength: 512
+                                      type: string
+                                  required:
+                                  - ownerVCenter
+                                  - taskID
+                                  type: object
+                              required:
+                              - actionID
+                              - kind
+                              - ownerVCenter
+                              - state
+                              type: object
+                              x-kubernetes-validations:
+                              - message: taskReference.ownerVCenter must match ownerVCenter
+                                rule: '!has(self.taskReference) || self.taskReference.ownerVCenter
+                                  == self.ownerVCenter'
+                              - message: ShutdownGuest does not have a task reference
+                                rule: self.kind != 'ShutdownGuest' || !has(self.taskReference)
                             sourceInventoryPath:
                               description: sourceInventoryPath is the VM path before
                                 relocation.
+                              maxLength: 1024
                               type: string
                             startedAt:
                               description: startedAt is when Preparing began.
                               format: date-time
                               type: string
+                            targetDatastore:
+                              description: targetDatastore is the frozen destination
+                                datastore path.
+                              maxLength: 1024
+                              type: string
                             targetFailureDomain:
                               description: targetFailureDomain is the spec.failureDomains[].name
                                 chosen for placement.
+                              maxLength: 253
+                              type: string
+                            targetHost:
+                              description: targetHost is the frozen destination host
+                                identity, if selected.
+                              maxLength: 1024
                               type: string
                             targetInventoryPath:
                               description: targetInventoryPath is the VM path after
                                 relocation.
+                              maxLength: 1024
+                              type: string
+                            targetNetwork:
+                              description: targetNetwork is the frozen destination
+                                network identity.
+                              maxLength: 1024
+                              type: string
+                            targetResourcePool:
+                              description: targetResourcePool is the frozen destination
+                                resource-pool path.
+                              maxLength: 1024
+                              type: string
+                            vmBIOSUUID:
+                              description: vmBIOSUUID is the VM BIOS UUID identity,
+                                distinct from vSphere instanceUUID.
+                              maxLength: 64
                               type: string
                           required:
                           - name
                           - phase
                           type: object
+                          x-kubernetes-validations:
+                          - message: instanceUUID and vmBIOSUUID must identify the
+                              same VM BIOS UUID
+                            rule: '!has(self.instanceUUID) || !has(self.vmBIOSUUID)
+                              || self.instanceUUID == self.vmBIOSUUID'
+                          - message: shutdownOutcome.kind must be ShutdownGuest
+                            rule: '!has(self.shutdownOutcome) || self.shutdownOutcome.kind
+                              == ''ShutdownGuest'''
+                          - message: relocationOutcome.kind must be RelocateVM
+                            rule: '!has(self.relocationOutcome) || self.relocationOutcome.kind
+                              == ''RelocateVM'''
+                          - message: powerOnOutcome.kind must be PowerOnVM
+                            rule: '!has(self.powerOnOutcome) || self.powerOnOutcome.kind
+                              == ''PowerOnVM'''
+                        maxItems: 500
                         type: array
                         x-kubernetes-list-map-keys:
                         - name
                         x-kubernetes-list-type: map
                       observedMode:
-                        description: |-
-                          observedMode is the relocation that actually ran for this role: Hot or Cold.
-                          Never Auto. Empty until at least one node has started relocating, and empty
-                          if Auto produced a mix of Hot and Cold (inspect nodes[].observedMode).
+                        description: 'observedMode is the relocation mode observed
+                          for this role: Hot or Cold.'
                         enum:
                         - Hot
                         - Cold
@@ -750,12 +1602,9 @@ spec:
                         format: int32
                         type: integer
                       requestedMode:
-                        description: |-
-                          requestedMode is the vMotion mode from spec for this role
-                          (inherited from spec.nodeMigration.vmotion.mode when the role omits mode).
-                          Auto is spec policy, not what vCenter ran; see observedMode.
+                        description: requestedMode is the explicit vMotion mode selected
+                          for this role.
                         enum:
-                        - Auto
                         - Hot
                         - Cold
                         type: string
@@ -829,3 +1678,9 @@ spec:
     storage: true
     subresources:
       status: {}
+status:
+  acceptedNames:
+    kind: ""
+    plural: ""
+  conditions: null
+  storedVersions: null
