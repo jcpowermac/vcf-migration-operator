@@ -19,6 +19,7 @@ package v1alpha1
 import (
 	configv1 "github.com/openshift/api/config/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // MigrationState represents the overall state of the migration workflow.
@@ -114,6 +115,7 @@ type SecretReference struct {
 }
 
 // VmwareCloudFoundationMigrationSpec defines the desired state of VmwareCloudFoundationMigration.
+// +kubebuilder:validation:XValidation:rule="(has(self.nodeMigration) && self.nodeMigration.workers.type == 'VMotion' && self.nodeMigration.controlPlane.type == 'VMotion') || self.failureDomains.all(fd, has(fd.topology.template) && size(fd.topology.template) > 0)",message="topology.template is required for legacy and Recreate configurations"
 type VmwareCloudFoundationMigrationSpec struct {
 	// state controls the workflow: Pending, Running, Paused.
 	// The migration workflow only executes when state is Running.
@@ -141,13 +143,16 @@ type VmwareCloudFoundationMigrationSpec struct {
 
 	// nodeMigration controls how nodes move to the target vCenter.
 	// When omitted, the operator keeps the current MachineSet/CPMS replacement path.
-	// When set, type is the cluster-wide engine; roles cannot override it.
+	// When set, both roles select the same migration engine.
 	// +optional
 	NodeMigration *NodeMigrationSpec `json:"nodeMigration,omitempty"`
 }
 
 // NodeMigrationType is the cluster-wide engine used to move nodes to the
-// target vCenter. It is the tagged-union discriminator for NodeMigrationSpec.
+// target vCenter. Allowed values are `VMotion` (relocate existing VMs) and
+// `Recreate` (replace VMs through MachineSets/CPMS). It is the tagged-union
+// discriminator for NodeMigrationSpec.
+// +kubebuilder:validation:Enum=VMotion;Recreate
 type NodeMigrationType string
 
 const (
@@ -157,76 +162,109 @@ const (
 	NodeMigrationTypeRecreate NodeMigrationType = "Recreate"
 )
 
-// VMotionMode selects live vs cold relocation for vMotion.
+// VMotionMode selects the vSphere relocation mode. Allowed values are `Hot`
+// (live relocation) and `Cold` (relocation after graceful shutdown).
+// +kubebuilder:validation:Enum=Hot;Cold
 type VMotionMode string
 
 const (
-	// VMotionModeAuto tries Hot and falls back to Cold.
-	VMotionModeAuto VMotionMode = "Auto"
 	// VMotionModeHot performs live (hot) relocation.
 	VMotionModeHot VMotionMode = "Hot"
 	// VMotionModeCold performs cold relocation (powered off).
 	VMotionModeCold VMotionMode = "Cold"
 )
 
-// NodeMigrationSpec controls how nodes move to the target vCenter.
-// Each role independently selects its migration engine (VMotion or Recreate)
-// and, when VMotion, the relocation mode (Auto, Hot, Cold).
-// Both workers and controlPlane must be specified; omitting a role is not
-// allowed because migration is a destructive operation and implicit defaults
-// could cause unintended node replacement or relocation.
-// +kubebuilder:validation:XValidation:rule="has(self.workers)",message="workers is required when nodeMigration is set"
-// +kubebuilder:validation:XValidation:rule="has(self.controlPlane)",message="controlPlane is required when nodeMigration is set"
-// +kubebuilder:validation:XValidation:rule="!has(self.controlPlane) || !has(self.controlPlane.maxUnavailable) || self.controlPlane.maxUnavailable == 1",message="controlPlane.maxUnavailable must be 1"
+// NodeMigrationSpec controls how nodes move to the target vCenter. Both roles
+// are required and must select the same engine: `VMotion` or `Recreate`. For
+// VMotion, both roles must explicitly select the same mode, `Hot` or `Cold`.
+// Control-plane maxUnavailable must always be 1; VMotion worker maxUnavailable
+// must also be 1.
+// +kubebuilder:validation:XValidation:rule="self.controlPlane.maxUnavailable == 1",message="controlPlane.maxUnavailable must be 1"
+// +kubebuilder:validation:XValidation:rule="self.workers.type == self.controlPlane.type",message="workers and controlPlane must use the same migration type"
+// +kubebuilder:validation:XValidation:rule="self.workers.type != 'VMotion' || self.controlPlane.type != 'VMotion' || !has(self.workers.vmotion) || !has(self.controlPlane.vmotion) || !has(self.workers.vmotion.mode) || !has(self.controlPlane.vmotion.mode) || self.workers.vmotion.mode == self.controlPlane.vmotion.mode",message="workers and controlPlane must use the same VMotion mode"
+// +kubebuilder:validation:XValidation:rule="self.workers.type != 'VMotion' || !has(self.workers.maxUnavailable) || self.workers.maxUnavailable == 1",message="VMotion workers.maxUnavailable must be 1"
 type NodeMigrationSpec struct {
-	// workers defines the migration engine and rolling limits for worker nodes.
+	// workers defines the migration engine and rolling limit for worker nodes.
+	// This field is required.
 	// +required
-	Workers *RoleMigrationSpec `json:"workers"`
+	Workers RoleMigrationSpec `json:"workers"`
 
-	// controlPlane defines the migration engine and rolling limits for
-	// control-plane nodes. maxUnavailable is validated to 1 for this role.
+	// controlPlane defines the migration engine and rolling limit for
+	// control-plane nodes. This field is required and maxUnavailable must be 1.
 	// +required
-	ControlPlane *RoleMigrationSpec `json:"controlPlane"`
+	ControlPlane RoleMigrationSpec `json:"controlPlane"`
+
+	// recoveryRequest asks the operator to recheck one blocked action. When omitted,
+	// no recovery recheck is requested. It is an action-bound request, not evidence
+	// that the action is inactive or authority to replay it. Runtime validation and
+	// authorization are not performed by schema.
+	// +optional
+	RecoveryRequest *NodeMigrationRecoveryRequest `json:"recoveryRequest,omitempty"`
 }
 
-// RoleMigrationSpec holds the migration engine selection and rolling limits
-// for one node role. type is a tagged-union discriminator: vmotion is
-// required when type is VMotion and forbidden when type is Recreate.
+// RoleMigrationSpec holds the migration engine selection and rolling limit for
+// one node role. `type` is required and accepts `VMotion` or `Recreate`. It is
+// a tagged-union discriminator: `vmotion` is required for `VMotion` and
+// forbidden for `Recreate`.
 // +union
-// +kubebuilder:validation:XValidation:rule="!has(self.type) || self.type == 'VMotion' || !has(self.vmotion)",message="vmotion is only valid when type is VMotion"
-// +kubebuilder:validation:XValidation:rule="!has(self.type) || self.type != 'VMotion' || has(self.vmotion)",message="vmotion is required when type is VMotion"
+// +kubebuilder:validation:XValidation:rule="self.type == 'VMotion' ? has(self.vmotion) : !has(self.vmotion)",message="vmotion is required when type is VMotion, and forbidden otherwise"
 type RoleMigrationSpec struct {
-	// type is the migration engine for this role.
-	// VMotion relocates existing VMs. Recreate replaces VMs via MachineSets/CPMS.
-	// +kubebuilder:validation:Enum=VMotion;Recreate
-	// +kubebuilder:default=Recreate
+	// type is the migration engine for this role: `VMotion` relocates existing
+	// VMs, while `Recreate` replaces VMs through MachineSets/CPMS. Required.
 	// +unionDiscriminator
-	// +optional
-	Type NodeMigrationType `json:"type,omitempty"`
+	// +required
+	Type NodeMigrationType `json:"type"`
 
-	// vmotion is VMotion-specific behavior. Required when type is VMotion.
-	// Forbidden when type is Recreate.
+	// vmotion contains VMotion-specific behavior. Required when type is
+	// `VMotion` and forbidden when type is `Recreate`.
 	// +unionMember
 	// +optional
 	VMotion *VMotionSpec `json:"vmotion,omitempty"`
 
-	// maxUnavailable is the maximum number of nodes in this role that can be
-	// migrating simultaneously. It must be a positive integer and defaults to 1.
-	// The control-plane value is restricted to 1.
+	// maxUnavailable is the maximum number of nodes in this role that can migrate
+	// simultaneously. It must be an integer from 1 through 32767 and defaults to
+	// 1 when omitted; percentage strings are not accepted. The control-plane value
+	// must be 1, and VMotion worker values must be 1.
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=32767
 	// +kubebuilder:default=1
 	// +optional
-	MaxUnavailable *int32 `json:"maxUnavailable,omitempty"`
+	MaxUnavailable int32 `json:"maxUnavailable,omitempty"`
 }
 
-// VMotionSpec is VMotion-specific migration behavior.
+// VMotionSpec is VMotion-specific migration behavior. `mode` is required and
+// accepts `Hot` or `Cold`; the operator does not fall back to another mode.
 type VMotionSpec struct {
-	// mode selects live vs cold relocation.
-	// Auto tries Hot and falls back to Cold.
-	// +kubebuilder:validation:Enum=Auto;Hot;Cold
-	// +kubebuilder:default=Auto
+	// mode explicitly selects `Hot` (live relocation) or `Cold` (graceful
+	// shutdown before relocation). There is no default or fallback mode.
+	// +required
+	Mode VMotionMode `json:"mode"`
+}
+
+// NodeMigrationRecoveryRequest is an action-bound request for runtime rechecking.
+// requestID, executionID, and actionID must each use the canonical UUID form
+// (8-4-4-4-12 hexadecimal digits), for example
+// `11111111-1111-4111-8111-111111111111`. They identify the request target but
+// do not prove safe recovery.
+type NodeMigrationRecoveryRequest struct {
+	// requestID uniquely identifies this acknowledgement request. Required UUID.
+	// +kubebuilder:validation:Format=uuid
+	// +kubebuilder:example="11111111-1111-4111-8111-111111111111"
+	// +required
+	RequestID string `json:"requestID"`
+	// executionID identifies the frozen execution being rechecked. Required UUID.
+	// +kubebuilder:validation:Format=uuid
+	// +required
+	ExecutionID string `json:"executionID"`
+	// actionID identifies the specific blocked action being rechecked. Required UUID.
+	// +kubebuilder:validation:Format=uuid
+	// +required
+	ActionID string `json:"actionID"`
+
+	// reason is an optional administrator note of at most 1024 characters.
+	// +kubebuilder:validation:MaxLength=1024
 	// +optional
-	Mode VMotionMode `json:"mode,omitempty"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // VmwareCloudFoundationMigrationStatus defines the observed state of VmwareCloudFoundationMigration.
@@ -287,15 +325,19 @@ type VmwareCloudFoundationMigrationStatus struct {
 	NodeMigration *NodeMigrationStatus `json:"nodeMigration,omitempty"`
 }
 
-// NodeMigrationStatus reports node-migration progress.
+// NodeMigrationStatus reports node-migration progress. UUID-formatted IDs use
+// canonical 8-4-4-4-12 hexadecimal form (for example,
+// `11111111-1111-4111-8111-111111111111`).
 type NodeMigrationStatus struct {
-	// type is the engine selected when WorkloadMigrated started.
-	// +kubebuilder:validation:Enum=VMotion;Recreate
-	// +optional
-	Type NodeMigrationType `json:"type,omitempty"`
+	// type is the engine selected when WorkloadMigrated started. When set to
+	// `VMotion`, existing VMs are relocated; when set to `Recreate`, VMs are
+	// replaced through MachineSets/CPMS. Required.
+	// +required
+	Type NodeMigrationType `json:"type"`
 
-	// progress is a human-readable rollup for kubectl get,
-	// for example "control plane 2/3, workers 4/10".
+	// progress is an optional human-readable rollup for kubectl get, for example
+	// "control plane 2/3, workers 4/10". It is at most 256 characters.
+	// +kubebuilder:validation:MaxLength=256
 	// +optional
 	Progress string `json:"progress,omitempty"`
 
@@ -306,20 +348,383 @@ type NodeMigrationStatus struct {
 	// workers is worker progress: counts plus per-node entries.
 	// +optional
 	Workers *RoleMigrationStatus `json:"workers,omitempty"`
+
+	// executionID is the UUID stable across pause-related generation changes;
+	// generation and observedGeneration are not operation identifiers.
+	// +kubebuilder:validation:Format=uuid
+	// +optional
+	ExecutionID string `json:"executionID,omitempty"`
+
+	// migrationUID binds this execution record to the originating CR UID. When
+	// set, it must not be empty.
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MinLength=1
+	// +optional
+	MigrationUID types.UID `json:"migrationUID,omitempty"`
+
+	// planFingerprint identifies the sanitized frozen plan, excluding credentials
+	// and other secret material. It must be exactly 64 lowercase hexadecimal
+	// characters (a SHA-256 digest).
+	// +kubebuilder:validation:Pattern=`^[a-f0-9]{64}$`
+	// +optional
+	PlanFingerprint string `json:"planFingerprint,omitempty"`
+
+	// frozenPlan records bounded source, destination, mode and placement identity.
+	// +optional
+	FrozenPlan *NodeMigrationFrozenPlan `json:"frozenPlan,omitempty"`
+
+	// activeAction is the single action claim currently being observed. A claim
+	// without a task reference means submission may have begun and is not safe to retry.
+	// +optional
+	ActiveAction *NodeMigrationAction `json:"activeAction,omitempty"`
+
+	// intervention records an unresolved condition requiring administrator review.
+	// Its presence does not itself prove an action is inactive.
+	// +optional
+	Intervention *NodeMigrationIntervention `json:"intervention,omitempty"`
+
+	// recoveryAcknowledgement records consumption of a recovery request. It is not
+	// proof of inactivity, authorization, or replay safety.
+	// +optional
+	RecoveryAcknowledgement *NodeMigrationRecoveryAcknowledgement `json:"recoveryAcknowledgement,omitempty"`
+
+	// cleanup is bounded progress for source-reference cleanup; it is observational
+	// state and does not authorize cleanup.
+	// +optional
+	Cleanup *NodeMigrationCleanupProgress `json:"cleanup,omitempty"`
 }
 
-// RoleMigrationStatus is progress for one role. Counts are derived from nodes.
+// NodeMigrationFrozenPlan is the bounded, sanitized identity of one frozen plan.
+type NodeMigrationFrozenPlan struct {
+	// sourceVCenter identifies the source vCenter endpoint. Required, non-empty,
+	// and at most 512 characters.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	// +required
+	SourceVCenter string `json:"sourceVCenter"`
+	// sourceDatacenter identifies the source datacenter. Required, non-empty,
+	// and at most 253 characters.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +required
+	SourceDatacenter string `json:"sourceDatacenter"`
+	// destinationVCenter identifies the destination vCenter endpoint. Required,
+	// non-empty, and at most 512 characters.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	// +required
+	DestinationVCenter string `json:"destinationVCenter"`
+	// mode is the explicitly selected mode frozen for this execution. When set to
+	// `Hot`, VMs are live-relocated; when set to `Cold`, they are shut down
+	// gracefully before relocation. Required.
+	// +required
+	Mode VMotionMode `json:"mode"`
+}
+
+// NodeMigrationActionKind identifies one mutating VM operation. Allowed values
+// are `ShutdownGuest`, `RelocateVM`, and `PowerOnVM`.
+// +kubebuilder:validation:Enum=ShutdownGuest;RelocateVM;PowerOnVM
+type NodeMigrationActionKind string
+
+const (
+	// NodeMigrationActionShutdownGuest requests graceful guest shutdown.
+	NodeMigrationActionShutdownGuest NodeMigrationActionKind = "ShutdownGuest"
+	// NodeMigrationActionRelocateVM submits VM relocation.
+	NodeMigrationActionRelocateVM NodeMigrationActionKind = "RelocateVM"
+	// NodeMigrationActionPowerOnVM submits VM power-on.
+	NodeMigrationActionPowerOnVM NodeMigrationActionKind = "PowerOnVM"
+)
+
+// NodeMigrationSubmissionState reports durable submission knowledge. Allowed
+// values are `Claimed` (submission may have begun), `Submitted` (submission was
+// acknowledged), and `Unknown` (the outcome of submission cannot be established).
+// +kubebuilder:validation:Enum=Claimed;Submitted;Unknown
+type NodeMigrationSubmissionState string
+
+const (
+	// NodeMigrationSubmissionClaimed means submission may have begun; it is not safe to retry.
+	NodeMigrationSubmissionClaimed NodeMigrationSubmissionState = "Claimed"
+	// NodeMigrationSubmissionSubmitted means the request submission was acknowledged.
+	NodeMigrationSubmissionSubmitted NodeMigrationSubmissionState = "Submitted"
+	// NodeMigrationSubmissionUnknown means submission outcome cannot be established.
+	NodeMigrationSubmissionUnknown NodeMigrationSubmissionState = "Unknown"
+)
+
+// NodeMigrationObservationState reports the latest bounded action observation.
+// Allowed values are `NotObserved`, `Running`, `Succeeded`, `Failed`, and
+// `Unknown`.
+// +kubebuilder:validation:Enum=NotObserved;Running;Succeeded;Failed;Unknown
+type NodeMigrationObservationState string
+
+const (
+	// NodeMigrationObservationNotObserved means no authoritative action observation is recorded.
+	NodeMigrationObservationNotObserved NodeMigrationObservationState = "NotObserved"
+	// NodeMigrationObservationRunning means the action is observed in progress.
+	NodeMigrationObservationRunning NodeMigrationObservationState = "Running"
+	// NodeMigrationObservationSucceeded means the action outcome was observed successful.
+	NodeMigrationObservationSucceeded NodeMigrationObservationState = "Succeeded"
+	// NodeMigrationObservationFailed means the action outcome was observed failed.
+	NodeMigrationObservationFailed NodeMigrationObservationState = "Failed"
+	// NodeMigrationObservationUnknown means the action outcome remains unknown.
+	NodeMigrationObservationUnknown NodeMigrationObservationState = "Unknown"
+)
+
+// NodeMigrationOutcomeState is the bounded result of one completed or uncertain
+// operation. Allowed values are `Succeeded`, `Failed`, and `Unknown`.
+// +kubebuilder:validation:Enum=Succeeded;Failed;Unknown
+type NodeMigrationOutcomeState string
+
+const (
+	// NodeMigrationOutcomeSucceeded records observed success.
+	NodeMigrationOutcomeSucceeded NodeMigrationOutcomeState = "Succeeded"
+	// NodeMigrationOutcomeFailed records observed failure.
+	NodeMigrationOutcomeFailed NodeMigrationOutcomeState = "Failed"
+	// NodeMigrationOutcomeUnknown records an unresolved outcome.
+	NodeMigrationOutcomeUnknown NodeMigrationOutcomeState = "Unknown"
+)
+
+// NodeMigrationTaskReference identifies a task within its owning vCenter.
+type NodeMigrationTaskReference struct {
+	// ownerVCenter scopes taskID to one vCenter. Required, non-empty, and at most
+	// 512 characters.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	// +required
+	OwnerVCenter string `json:"ownerVCenter"`
+	// taskID is the vCenter-local task identifier. Required, non-empty, and at
+	// most 512 characters.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	// +required
+	TaskID string `json:"taskID"`
+}
+
+// NodeMigrationAction is the single durable mutating-action claim. actionID and
+// executionID are UUIDs in canonical 8-4-4-4-12 hexadecimal form. A task
+// reference must use the same ownerVCenter, and `ShutdownGuest` cannot have a
+// task reference.
+// +kubebuilder:validation:XValidation:rule="!has(self.taskReference) || self.taskReference.ownerVCenter == self.ownerVCenter",message="taskReference.ownerVCenter must match ownerVCenter"
+// +kubebuilder:validation:XValidation:rule="self.kind != 'ShutdownGuest' || !has(self.taskReference)",message="ShutdownGuest does not have a task reference"
+type NodeMigrationAction struct {
+	// actionID is the UUID stable for this one mutating action.
+	// +kubebuilder:validation:Format=uuid
+	// +required
+	ActionID string `json:"actionID"`
+
+	// executionID binds this action to the frozen execution; it is a UUID.
+	// +kubebuilder:validation:Format=uuid
+	// +required
+	ExecutionID string `json:"executionID"`
+	// kind is the mutating operation claimed. When set to `ShutdownGuest`, the
+	// guest is asked to shut down; when set to `RelocateVM`, the VM is relocated;
+	// when set to `PowerOnVM`, the VM is powered on.
+	// +required
+	Kind NodeMigrationActionKind `json:"kind"`
+	// nodeName identifies the Kubernetes Node. Required, non-empty, and at most
+	// 253 characters.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +required
+	NodeName string `json:"nodeName"`
+	// nodeUID is the non-empty Kubernetes UID of the selected Node object.
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MinLength=1
+	// +required
+	NodeUID types.UID `json:"nodeUID"`
+	// vmBIOSUUID is the non-empty VM BIOS UUID, not the vSphere instanceUUID. It
+	// is at most 64 characters.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	// +required
+	VMBIOSUUID string `json:"vmBIOSUUID"`
+	// ownerVCenter is the non-empty vCenter in which this action/task is
+	// interpreted; it is at most 512 characters.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	// +required
+	OwnerVCenter string `json:"ownerVCenter"`
+	// operationIdentity is a digest of sanitized, non-secret intended-operation
+	// inputs. It must be exactly 64 lowercase hexadecimal characters.
+	// +kubebuilder:validation:Pattern=`^[a-f0-9]{64}$`
+	// +required
+	OperationIdentity string `json:"operationIdentity"`
+	// submissionState reports submission status. When set to `Claimed`, submission
+	// may have begun; `Submitted` means it was acknowledged; `Unknown` means its
+	// outcome cannot be established.
+	// +required
+	SubmissionState NodeMigrationSubmissionState `json:"submissionState"`
+	// observationState records the latest action observation. `NotObserved` means
+	// no authoritative observation is recorded; `Running` means the action is in
+	// progress; `Succeeded` means the action was observed successful; `Failed`
+	// means it was observed unsuccessful; `Unknown` means the outcome cannot be
+	// established.
+	// +required
+	ObservationState NodeMigrationObservationState `json:"observationState"`
+	// taskReference is optional; `ShutdownGuest` has no task reference. When
+	// present, its ownerVCenter must match this action's ownerVCenter.
+	// +optional
+	TaskReference *NodeMigrationTaskReference `json:"taskReference,omitempty"`
+	// claimedAt is when the durable claim was written.
+	// +required
+	ClaimedAt metav1.Time `json:"claimedAt"`
+	// submittedAt is when submission was acknowledged, if known.
+	// +optional
+	SubmittedAt *metav1.Time `json:"submittedAt,omitempty"`
+	// lastObservedAt is the latest observation time, if any.
+	// +optional
+	LastObservedAt *metav1.Time `json:"lastObservedAt,omitempty"`
+	// deadline is the bounded action deadline, if set by the implementation.
+	// +optional
+	Deadline *metav1.Time `json:"deadline,omitempty"`
+	// reason is an optional observation/outcome detail of at most 1024 characters.
+	// +kubebuilder:validation:MaxLength=1024
+	// +optional
+	Reason string `json:"reason,omitempty"`
+}
+
+// NodeMigrationOperationOutcome records one operation without overwriting
+// another operation's result. actionID is a UUID; kind is `ShutdownGuest`,
+// `RelocateVM`, or `PowerOnVM`; state is `Succeeded`, `Failed`, or `Unknown`.
+// A task reference, when present, must use the same ownerVCenter; `ShutdownGuest`
+// cannot have a task reference.
+// +kubebuilder:validation:XValidation:rule="!has(self.taskReference) || self.taskReference.ownerVCenter == self.ownerVCenter",message="taskReference.ownerVCenter must match ownerVCenter"
+// +kubebuilder:validation:XValidation:rule="self.kind != 'ShutdownGuest' || !has(self.taskReference)",message="ShutdownGuest does not have a task reference"
+type NodeMigrationOperationOutcome struct {
+	// actionID identifies the action that produced this outcome; it is a UUID.
+	// +kubebuilder:validation:Format=uuid
+	// +required
+	ActionID string `json:"actionID"`
+
+	// kind identifies the operation represented by this outcome. When set to
+	// `ShutdownGuest`, the guest was asked to shut down; when set to `RelocateVM`,
+	// the VM was relocated; when set to `PowerOnVM`, the VM was powered on.
+	// +required
+	Kind NodeMigrationActionKind `json:"kind"`
+	// state is the bounded result and is observational, not replay authority. When
+	// set to `Succeeded`, the operation was observed successful; `Failed` means it
+	// was observed unsuccessful; `Unknown` means its outcome is unresolved.
+	// +required
+	State NodeMigrationOutcomeState `json:"state"`
+	// ownerVCenter scopes any task reference. Required, non-empty, and at most
+	// 512 characters.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	// +required
+	OwnerVCenter string `json:"ownerVCenter"`
+	// taskReference is optional and scoped to ownerVCenter. It is forbidden for
+	// `ShutdownGuest`.
+	// +optional
+	TaskReference *NodeMigrationTaskReference `json:"taskReference,omitempty"`
+	// reason is an optional explanation of at most 1024 characters.
+	// +kubebuilder:validation:MaxLength=1024
+	// +optional
+	Reason string `json:"reason,omitempty"`
+	// observedAt is when this outcome was last established.
+	// +optional
+	ObservedAt *metav1.Time `json:"observedAt,omitempty"`
+	// completedAt is when the operation outcome became terminal, if known.
+	// +optional
+	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
+}
+
+// NodeMigrationIntervention records one unresolved intervention requirement.
+// executionID and actionID use canonical UUID format.
+type NodeMigrationIntervention struct {
+	// executionID identifies the affected frozen execution; it is a UUID.
+	// +kubebuilder:validation:Format=uuid
+	// +required
+	ExecutionID string `json:"executionID"`
+	// actionID identifies the affected action; it is a UUID.
+	// https://www.rfc-editor.org/rfc/rfc9562.txt
+	// +kubebuilder:validation:Format=uuid
+	// +required
+	ActionID string `json:"actionID"`
+	// nodeName identifies the affected Node. Required, non-empty, and at most
+	// 253 characters.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +required
+	NodeName string `json:"nodeName"`
+	// reason is a required, non-empty explanation of at most 1024
+	// characters.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=1024
+	// +required
+	Reason string `json:"reason"`
+	// since is when intervention became necessary.
+	// +required
+	Since metav1.Time `json:"since"`
+}
+
+// NodeMigrationRecoveryAcknowledgement records that a request was consumed.
+// requestID, executionID, and actionID are UUIDs in canonical format.
+// Consumption alone is not runtime evidence or replay authorization.
+type NodeMigrationRecoveryAcknowledgement struct {
+	// requestID identifies the consumed request.
+	// +kubebuilder:validation:Format=uuid
+	// +required
+	RequestID string `json:"requestID"`
+	// executionID is the execution named by the request.
+	// +kubebuilder:validation:Format=uuid
+	// +required
+	ExecutionID string `json:"executionID"`
+	// actionID is the action named by the request.
+	// +kubebuilder:validation:Format=uuid
+	// +required
+	ActionID string `json:"actionID"`
+
+	// consumedAt records when the request was consumed.
+	// +required
+	ConsumedAt metav1.Time `json:"consumedAt"`
+}
+
+// NodeMigrationCleanupPhase is bounded progress through source cleanup. Allowed
+// values are `Pending`, `RemovingSourceReferences`, `VerifyingReadiness`,
+// `Completed`, and `Blocked`.
+// +kubebuilder:validation:Enum=Pending;RemovingSourceReferences;VerifyingReadiness;Completed;Blocked
+type NodeMigrationCleanupPhase string
+
+const (
+	// NodeMigrationCleanupPending indicates cleanup has not started.
+	NodeMigrationCleanupPending NodeMigrationCleanupPhase = "Pending"
+	// NodeMigrationCleanupRemovingSourceReferences indicates source references are being removed.
+	NodeMigrationCleanupRemovingSourceReferences NodeMigrationCleanupPhase = "RemovingSourceReferences"
+	// NodeMigrationCleanupVerifyingReadiness indicates final readiness is being verified.
+	NodeMigrationCleanupVerifyingReadiness NodeMigrationCleanupPhase = "VerifyingReadiness"
+	// NodeMigrationCleanupCompleted indicates intended cleanup and verification completed.
+	NodeMigrationCleanupCompleted NodeMigrationCleanupPhase = "Completed"
+	// NodeMigrationCleanupBlocked indicates cleanup is blocked.
+	NodeMigrationCleanupBlocked NodeMigrationCleanupPhase = "Blocked"
+)
+
+// NodeMigrationCleanupProgress is bounded source-cleanup progress, not an event journal.
+type NodeMigrationCleanupProgress struct {
+	// phase is the current cleanup observation. `Pending` means cleanup has not
+	// started; `RemovingSourceReferences` means source references are being
+	// removed; `VerifyingReadiness` means readiness is being checked; `Completed`
+	// means cleanup finished; `Blocked` means it cannot proceed.
+	// +required
+	Phase NodeMigrationCleanupPhase `json:"phase"`
+	// lastTransitionTime is when phase last changed.
+	// +optional
+	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
+	// reason is an optional explanation of at most 1024 characters.
+	// +kubebuilder:validation:MaxLength=1024
+	// +optional
+	Reason string `json:"reason,omitempty"`
+}
+
+// RoleMigrationStatus is progress for one role. Counts are derived from nodes;
+// the nodes list is limited to 500 entries.
 type RoleMigrationStatus struct {
-	// requestedMode is the vMotion mode from spec for this role
-	// (inherited from spec.nodeMigration.vmotion.mode when the role omits mode).
-	// Auto is spec policy, not what vCenter ran; see observedMode.
-	// +kubebuilder:validation:Enum=Auto;Hot;Cold
+	// requestedMode is the explicit vMotion mode selected for this role. When set
+	// to `Hot`, VMs are live-relocated; when set to `Cold`, they are shut down
+	// gracefully before relocation.
 	// +optional
 	RequestedMode VMotionMode `json:"requestedMode,omitempty"`
-	// observedMode is the relocation that actually ran for this role: Hot or Cold.
-	// Never Auto. Empty until at least one node has started relocating, and empty
-	// if Auto produced a mix of Hot and Cold (inspect nodes[].observedMode).
-	// +kubebuilder:validation:Enum=Hot;Cold
+	// observedMode is the relocation mode observed for this role. When set to
+	// `Hot`, live relocation was observed; when set to `Cold`, relocation after
+	// graceful shutdown was observed.
 	// +optional
 	ObservedMode VMotionMode `json:"observedMode,omitempty"`
 	// total is the number of discovered nodes in this role.
@@ -338,72 +743,165 @@ type RoleMigrationStatus struct {
 	// +optional
 	Failed int32 `json:"failed,omitempty"`
 	// nodes is per-node progress for this role, keyed by Kubernetes node name.
+	// At most 500 entries are allowed.
 	// +optional
+	// +kubebuilder:validation:MaxItems=500
 	// +listType=map
 	// +listMapKey=name
 	Nodes []NodeMigrationProgress `json:"nodes,omitempty"`
 }
 
-// NodeMigrationPhase is the node-local relocation state.
-type NodeMigrationPhase string
+// NodeMigrationState is the coarse node-local migration state. Allowed values
+// are `Pending`, `Preparing`, `Migrating`, `WaitingForNode`, `Succeeded`, and
+// `Failed`.
+// +kubebuilder:validation:Enum=Pending;Preparing;Migrating;WaitingForNode;Succeeded;Failed
+type NodeMigrationState string
+
+// NodeMigrationSchedulingState is the recorded pre-migration scheduling state.
+// Allowed values are `Schedulable` and `Unschedulable`.
+// +kubebuilder:validation:Enum=Schedulable;Unschedulable
+type NodeMigrationSchedulingState string
 
 const (
-	// NodeMigrationPhasePending is discovered, not started.
-	NodeMigrationPhasePending NodeMigrationPhase = "Pending"
-	// NodeMigrationPhasePreparing is drain/cordon (Cold) or live-compat checks (Hot).
-	NodeMigrationPhasePreparing NodeMigrationPhase = "Preparing"
-	// NodeMigrationPhaseMigrating is RelocateVM_Task running.
-	NodeMigrationPhaseMigrating NodeMigrationPhase = "Migrating"
-	// NodeMigrationPhaseWaitingForNode is the VM on the target; kubelet not Ready yet.
-	NodeMigrationPhaseWaitingForNode NodeMigrationPhase = "WaitingForNode"
-	// NodeMigrationPhaseSucceeded is node Ready on the target.
-	NodeMigrationPhaseSucceeded NodeMigrationPhase = "Succeeded"
-	// NodeMigrationPhaseFailed is a terminal or currently-failed node.
-	NodeMigrationPhaseFailed NodeMigrationPhase = "Failed"
+	// NodeMigrationSchedulingStateSchedulable means the node was schedulable before migration.
+	NodeMigrationSchedulingStateSchedulable NodeMigrationSchedulingState = "Schedulable"
+	// NodeMigrationSchedulingStateUnschedulable means the node was unschedulable before migration.
+	NodeMigrationSchedulingStateUnschedulable NodeMigrationSchedulingState = "Unschedulable"
 )
 
-// NodeMigrationProgress is observed state for a single node/VM.
+const (
+	// NodeMigrationStatePending is discovered, not started.
+	NodeMigrationStatePending NodeMigrationState = "Pending"
+	// NodeMigrationStatePreparing covers pre-action checks and scheduling preparation;
+	// it does not imply that only Cold mode drains or cordons.
+	NodeMigrationStatePreparing NodeMigrationState = "Preparing"
+	// NodeMigrationStateMigrating is RelocateVM_Task running.
+	NodeMigrationStateMigrating NodeMigrationState = "Migrating"
+	// NodeMigrationStateWaitingForNode is the VM on the target; kubelet not Ready yet.
+	NodeMigrationStateWaitingForNode NodeMigrationState = "WaitingForNode"
+	// NodeMigrationStateSucceeded means required action, identity, placement and
+	// recovery verification completed; a stale Node Ready condition alone is insufficient.
+	NodeMigrationStateSucceeded NodeMigrationState = "Succeeded"
+	// NodeMigrationStateFailed is a terminal or currently-failed node.
+	NodeMigrationStateFailed NodeMigrationState = "Failed"
+)
+
+// NodeMigrationProgress is observed state for a single node/VM. When any outcome
+// is set, its kind must match the corresponding field: shutdownOutcome uses
+// `ShutdownGuest`, relocationOutcome uses `RelocateVM`, and powerOnOutcome uses
+// `PowerOnVM`.
+// +kubebuilder:validation:XValidation:rule="!has(self.shutdownOutcome) || self.shutdownOutcome.kind == 'ShutdownGuest'",message="shutdownOutcome.kind must be ShutdownGuest"
+// +kubebuilder:validation:XValidation:rule="!has(self.relocationOutcome) || self.relocationOutcome.kind == 'RelocateVM'",message="relocationOutcome.kind must be RelocateVM"
+// +kubebuilder:validation:XValidation:rule="!has(self.powerOnOutcome) || self.powerOnOutcome.kind == 'PowerOnVM'",message="powerOnOutcome.kind must be PowerOnVM"
 type NodeMigrationProgress struct {
-	// name is the Kubernetes Node name. List merge key.
+	// name is the required, non-empty Kubernetes Node name and list merge key; it
+	// is at most 253 characters.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
 	// +required
 	Name string `json:"name"`
-	// phase is the node-local relocation state.
-	// +kubebuilder:validation:Enum=Pending;Preparing;Migrating;WaitingForNode;Succeeded;Failed
+	// state is the node-local relocation state. `Pending` means not started;
+	// `Preparing` means pre-action checks are running; `Migrating` means relocation
+	// is running; `WaitingForNode` means the VM is on target but the node is not
+	// Ready; `Succeeded` means node migration completed successfully; `Failed`
+	// means node migration did not complete successfully.
 	// +required
-	Phase NodeMigrationPhase `json:"phase"`
-	// requestedMode is the mode in force when this node started.
-	// Frozen for in-flight nodes if spec changes later.
-	// +kubebuilder:validation:Enum=Auto;Hot;Cold
+	State NodeMigrationState `json:"state"`
+	// requestedMode is the explicit mode in force when this node started. When set
+	// to `Hot`, the node was live-relocated; when set to `Cold`, it was shut down
+	// gracefully before relocation.
 	// +optional
 	RequestedMode VMotionMode `json:"requestedMode,omitempty"`
-	// observedMode is the relocation that actually ran: Hot or Cold.
-	// Empty until RelocateVM starts. Auto resolves here, never in spec.
-	// +kubebuilder:validation:Enum=Hot;Cold
+	// observedMode is the relocation mode observed for this node. When set to
+	// `Hot`, live relocation was observed; when set to `Cold`, relocation after
+	// graceful shutdown was observed.
 	// +optional
 	ObservedMode VMotionMode `json:"observedMode,omitempty"`
-	// instanceUUID is the VM BIOS UUID (node spec.providerID, without vsphere://).
-	// Stable identity across vCenters; MoRef is not.
+	// vmBIOSUUID is the VM BIOS UUID identity, distinct from vSphere instanceUUID.
+	// When set, it must be non-empty and at most 64 characters.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
 	// +optional
-	InstanceUUID string `json:"instanceUUID,omitempty"`
+	VMBIOSUUID string `json:"vmBIOSUUID,omitempty"`
+	// nodeUID is the Kubernetes Node object UID, when recorded; it must not be
+	// empty when set.
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MinLength=1
+	// +optional
+	NodeUID types.UID `json:"nodeUID,omitempty"`
+	// providerID is the Node spec.providerID captured for the frozen identity.
+	// When set, it must be non-empty and at most 512 characters.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	// +optional
+	ProviderID string `json:"providerID,omitempty"`
+	// originalSchedulingState records whether the node was schedulable before
+	// migration: `Schedulable` or `Unschedulable`.
+	// +optional
+	OriginalSchedulingState NodeMigrationSchedulingState `json:"originalSchedulingState,omitempty"`
 	// targetFailureDomain is the spec.failureDomains[].name chosen for placement.
+	// When set, it must be non-empty and at most 253 characters.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
 	// +optional
 	TargetFailureDomain string `json:"targetFailureDomain,omitempty"`
-	// sourceInventoryPath is the VM path before relocation.
+	// targetHost is the frozen destination host identity, if selected. When set,
+	// it must be non-empty and at most 1024 characters.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=1024
+	// +optional
+	TargetHost string `json:"targetHost,omitempty"`
+	// targetResourcePool is the frozen destination resource-pool path. When set,
+	// it must be non-empty and at most 1024 characters.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=1024
+	// +optional
+	TargetResourcePool string `json:"targetResourcePool,omitempty"`
+	// targetDatastore is the frozen destination datastore path. When set, it must
+	// be non-empty and at most 1024 characters.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=1024
+	// +optional
+	TargetDatastore string `json:"targetDatastore,omitempty"`
+	// targetNetwork is the frozen destination network identity. When set, it must
+	// be non-empty and at most 1024 characters.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=1024
+	// +optional
+	TargetNetwork string `json:"targetNetwork,omitempty"`
+	// sourceInventoryPath is the VM path before relocation. When set, it must be
+	// non-empty and at most 1024 characters.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=1024
 	// +optional
 	SourceInventoryPath string `json:"sourceInventoryPath,omitempty"`
-	// targetInventoryPath is the VM path after relocation.
+	// targetInventoryPath is the VM path after relocation. When set, it must be
+	// non-empty and at most 1024 characters.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=1024
 	// +optional
 	TargetInventoryPath string `json:"targetInventoryPath,omitempty"`
-	// message is a short human-readable explanation of phase or failure.
+	// shutdownOutcome records graceful shutdown separately from later operations.
+	// +optional
+	ShutdownOutcome *NodeMigrationOperationOutcome `json:"shutdownOutcome,omitempty"`
+	// relocationOutcome remains intact when a later power-on is recorded.
+	// +optional
+	RelocationOutcome *NodeMigrationOperationOutcome `json:"relocationOutcome,omitempty"`
+	// powerOnOutcome records destination power-on separately from relocation.
+	// +optional
+	PowerOnOutcome *NodeMigrationOperationOutcome `json:"powerOnOutcome,omitempty"`
+	// message is an optional human-readable explanation of state or failure, at
+	// most 1024 characters.
+	// +kubebuilder:validation:MaxLength=1024
 	// +optional
 	Message string `json:"message,omitempty"`
-	// lastTransitionTime is when phase last changed.
+	// lastTransitionTime is when state last changed.
 	// +optional
 	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
 	// startedAt is when Preparing began.
 	// +optional
 	StartedAt *metav1.Time `json:"startedAt,omitempty"`
-	// completedAt is when phase became Succeeded or Failed.
+	// completedAt is when state became Succeeded or Failed.
 	// +optional
 	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
 }

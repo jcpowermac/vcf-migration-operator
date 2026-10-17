@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"encoding/json"
 	"fmt"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -26,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -34,46 +36,44 @@ var _ = Describe("NodeMigration API validation", func() {
 
 	baseResource := func(name string) *VmwareCloudFoundationMigration {
 		return &VmwareCloudFoundationMigration{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      name,
-				Namespace: "default",
-			},
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 			Spec: VmwareCloudFoundationMigrationSpec{
-				State: MigrationStatePending,
-				TargetVCenterCredentialsSecret: SecretReference{
-					Name:      "target-vcenter-creds",
-					Namespace: "default",
-				},
-				FailureDomains: []configv1.VSpherePlatformFailureDomainSpec{
-					{
-						Name:   "target-fd-1",
-						Region: "target-region",
-						Zone:   "target-zone-1",
-						Server: "vcenter-target.example.com",
-						Topology: configv1.VSpherePlatformTopology{
-							Datacenter:     "TargetDC",
-							ComputeCluster: "/TargetDC/host/TargetCluster",
-							Datastore:      "/TargetDC/datastore/TargetDS",
-							Networks:       []string{"VM Network"},
-							ResourcePool:   "/TargetDC/host/TargetCluster/Resources",
-							Template:       "/TargetDC/vm/rhcos-template",
-							Folder:         "/TargetDC/vm/my-cluster",
-						},
+				State:                          MigrationStatePending,
+				TargetVCenterCredentialsSecret: SecretReference{Name: "target-vcenter-creds", Namespace: "default"},
+				FailureDomains: []configv1.VSpherePlatformFailureDomainSpec{{
+					Name: "target-fd-1", Region: "target-region", Zone: "target-zone-1", Server: "vcenter-target.example.com",
+					Topology: configv1.VSpherePlatformTopology{
+						Datacenter: "TargetDC", ComputeCluster: "/TargetDC/host/TargetCluster",
+						Datastore: "/TargetDC/datastore/TargetDS", Networks: []string{"VM Network"},
+						ResourcePool: "/TargetDC/host/TargetCluster/Resources", Template: "/TargetDC/vm/rhcos-template",
+						Folder: "/TargetDC/vm/my-cluster",
 					},
-				},
+				}},
 			},
 		}
 	}
 
-	recreateRole := func() *RoleMigrationSpec {
-		return &RoleMigrationSpec{Type: NodeMigrationTypeRecreate}
+	recreateRole := func() RoleMigrationSpec {
+		return RoleMigrationSpec{Type: NodeMigrationTypeRecreate}
 	}
 
-	vmotionRole := func(mode VMotionMode) *RoleMigrationSpec {
-		return &RoleMigrationSpec{
-			Type:    NodeMigrationTypeVMotion,
-			VMotion: &VMotionSpec{Mode: mode},
-		}
+	vmotionRole := func(mode VMotionMode) RoleMigrationSpec {
+		return RoleMigrationSpec{Type: NodeMigrationTypeVMotion, VMotion: &VMotionSpec{Mode: mode}}
+	}
+
+	vmotionConfig := func(mode VMotionMode) *NodeMigrationSpec {
+		return &NodeMigrationSpec{Workers: vmotionRole(mode), ControlPlane: vmotionRole(mode)}
+	}
+
+	withoutTemplate := func(resource *VmwareCloudFoundationMigration) {
+		resource.Spec.FailureDomains[0].Topology.Template = ""
+	}
+
+	addFailureDomain := func(resource *VmwareCloudFoundationMigration) {
+		fd := resource.Spec.FailureDomains[0]
+		fd.Name = "target-fd-2"
+		fd.Zone = "target-zone-2"
+		resource.Spec.FailureDomains = append(resource.Spec.FailureDomains, fd)
 	}
 
 	uniqueName := func() string {
@@ -94,303 +94,438 @@ var _ = Describe("NodeMigration API validation", func() {
 		}
 	})
 
-	// ── nodeMigration omitted ───────────────────────────────────────────
-
-	It("accepts spec without nodeMigration (defaults to MachineSet/CPMS replacement)", func() {
+	It("preserves legacy omission and accepts multiple templated failure domains", func() {
 		resource := baseResource(uniqueName())
+		addFailureDomain(resource)
 		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 	})
 
-	// ── Both roles required ─────────────────────────────────────────────
-
-	It("rejects nodeMigration with only workers", func() {
+	It("requires a template for legacy and Recreate configurations", func() {
 		resource := baseResource(uniqueName())
-		resource.Spec.NodeMigration = &NodeMigrationSpec{
-			Workers: recreateRole(),
-		}
-		err := k8sClient.Create(ctx, resource)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("spec.nodeMigration.controlPlane"))
+		withoutTemplate(resource)
+		Expect(k8sClient.Create(ctx, resource)).To(HaveOccurred())
+
+		resource = baseResource(uniqueName())
+		resource.Spec.NodeMigration = &NodeMigrationSpec{Workers: recreateRole(), ControlPlane: recreateRole()}
+		withoutTemplate(resource)
+		Expect(k8sClient.Create(ctx, resource)).To(HaveOccurred())
 	})
 
-	It("rejects nodeMigration with only controlPlane", func() {
+	It("requires both roles when nodeMigration is set", func() {
 		resource := baseResource(uniqueName())
-		resource.Spec.NodeMigration = &NodeMigrationSpec{
-			ControlPlane: recreateRole(),
-		}
-		err := k8sClient.Create(ctx, resource)
+		resource.Spec.NodeMigration = &NodeMigrationSpec{Workers: recreateRole(), ControlPlane: recreateRole()}
+		object, err := runtime.DefaultUnstructuredConverter.ToUnstructured(resource)
+		Expect(err).NotTo(HaveOccurred())
+		unstructuredResource := &unstructured.Unstructured{Object: object}
+		unstructuredResource.SetGroupVersionKind(schema.GroupVersionKind{
+			Group: "migration.openshift.io", Version: "v1alpha1", Kind: "VmwareCloudFoundationMigration",
+		})
+		unstructured.RemoveNestedField(unstructuredResource.Object, "spec", "nodeMigration", "controlPlane")
+		err = k8sClient.Create(ctx, unstructuredResource)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("spec.nodeMigration.controlPlane"))
+
+		resource = baseResource(uniqueName())
+		resource.Spec.NodeMigration = &NodeMigrationSpec{Workers: recreateRole(), ControlPlane: recreateRole()}
+		object, err = runtime.DefaultUnstructuredConverter.ToUnstructured(resource)
+		Expect(err).NotTo(HaveOccurred())
+		unstructuredResource = &unstructured.Unstructured{Object: object}
+		unstructuredResource.SetGroupVersionKind(schema.GroupVersionKind{
+			Group: "migration.openshift.io", Version: "v1alpha1", Kind: "VmwareCloudFoundationMigration",
+		})
+		unstructured.RemoveNestedField(unstructuredResource.Object, "spec", "nodeMigration", "workers")
+		err = k8sClient.Create(ctx, unstructuredResource)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("spec.nodeMigration.workers"))
 	})
 
-	// ── RoleMigrationSpec type defaults ─────────────────────────────────
-
-	It("defaults type to Recreate when set without explicit type", func() {
+	It("requires an explicit role type and defaults maxUnavailable to one", func() {
+		maxWorkers := int32(3)
 		resource := baseResource(uniqueName())
-		maxU := int32(2)
 		resource.Spec.NodeMigration = &NodeMigrationSpec{
-			Workers: &RoleMigrationSpec{
-				MaxUnavailable: &maxU,
-			},
-			ControlPlane: recreateRole(),
+			Workers:      RoleMigrationSpec{Type: NodeMigrationTypeRecreate, MaxUnavailable: maxWorkers},
+			ControlPlane: RoleMigrationSpec{Type: NodeMigrationTypeRecreate},
 		}
 		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 
 		created := &VmwareCloudFoundationMigration{}
 		Expect(k8sClient.Get(ctx, clientKey(resource), created)).To(Succeed())
 		Expect(created.Spec.NodeMigration.Workers.Type).To(Equal(NodeMigrationTypeRecreate))
-	})
+		Expect(created.Spec.NodeMigration.ControlPlane.Type).To(Equal(NodeMigrationTypeRecreate))
+		Expect(created.Spec.NodeMigration.Workers.MaxUnavailable).To(Equal(int32(3)))
+		Expect(created.Spec.NodeMigration.ControlPlane.MaxUnavailable).To(Equal(int32(1)))
 
-	// ── VMotion requires vmotion field ──────────────────────────────────
-
-	It("rejects workers type VMotion without vmotion field", func() {
-		resource := baseResource(uniqueName())
-		resource.Spec.NodeMigration = &NodeMigrationSpec{
-			Workers: &RoleMigrationSpec{
-				Type: NodeMigrationTypeVMotion,
-			},
-			ControlPlane: recreateRole(),
-		}
-		err := k8sClient.Create(ctx, resource)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("vmotion is required when type is VMotion"))
-	})
-
-	It("rejects controlPlane type VMotion without vmotion field", func() {
-		resource := baseResource(uniqueName())
-		resource.Spec.NodeMigration = &NodeMigrationSpec{
-			Workers: recreateRole(),
-			ControlPlane: &RoleMigrationSpec{
-				Type: NodeMigrationTypeVMotion,
-			},
-		}
-		err := k8sClient.Create(ctx, resource)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("vmotion is required when type is VMotion"))
-	})
-
-	It("accepts type VMotion with vmotion field", func() {
-		resource := baseResource(uniqueName())
-		resource.Spec.NodeMigration = &NodeMigrationSpec{
-			Workers:      vmotionRole(VMotionModeAuto),
-			ControlPlane: vmotionRole(VMotionModeAuto),
-		}
-		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-	})
-
-	// ── Recreate forbids vmotion field ──────────────────────────────────
-
-	It("rejects workers type Recreate with vmotion field", func() {
-		resource := baseResource(uniqueName())
-		resource.Spec.NodeMigration = &NodeMigrationSpec{
-			Workers: &RoleMigrationSpec{
-				Type:    NodeMigrationTypeRecreate,
-				VMotion: &VMotionSpec{Mode: VMotionModeCold},
-			},
-			ControlPlane: recreateRole(),
-		}
-		err := k8sClient.Create(ctx, resource)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("vmotion is only valid when type is VMotion"))
-	})
-
-	It("rejects controlPlane type Recreate with vmotion field", func() {
-		resource := baseResource(uniqueName())
-		resource.Spec.NodeMigration = &NodeMigrationSpec{
-			Workers: recreateRole(),
-			ControlPlane: &RoleMigrationSpec{
-				Type:    NodeMigrationTypeRecreate,
-				VMotion: &VMotionSpec{Mode: VMotionModeHot},
-			},
-		}
-		err := k8sClient.Create(ctx, resource)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("vmotion is only valid when type is VMotion"))
-	})
-
-	It("accepts type Recreate without vmotion field", func() {
-		resource := baseResource(uniqueName())
-		resource.Spec.NodeMigration = &NodeMigrationSpec{
-			Workers:      recreateRole(),
-			ControlPlane: recreateRole(),
-		}
-		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-	})
-
-	// ── VMotion modes ───────────────────────────────────────────────────
-
-	DescribeTable("accepts valid VMotion modes",
-		func(mode VMotionMode) {
-			resource := baseResource(uniqueName())
-			resource.Spec.NodeMigration = &NodeMigrationSpec{
-				Workers:      vmotionRole(mode),
-				ControlPlane: recreateRole(),
-			}
-			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-		},
-		Entry("Auto", VMotionModeAuto),
-		Entry("Hot", VMotionModeHot),
-		Entry("Cold", VMotionModeCold),
-	)
-
-	// ── Per-role independence ───────────────────────────────────────────
-
-	It("accepts workers VMotion and controlPlane Recreate", func() {
-		resource := baseResource(uniqueName())
-		resource.Spec.NodeMigration = &NodeMigrationSpec{
-			Workers:      vmotionRole(VMotionModeCold),
-			ControlPlane: recreateRole(),
-		}
-		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-	})
-
-	It("accepts workers Recreate and controlPlane VMotion", func() {
-		resource := baseResource(uniqueName())
-		resource.Spec.NodeMigration = &NodeMigrationSpec{
-			Workers:      recreateRole(),
-			ControlPlane: vmotionRole(VMotionModeHot),
-		}
-		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-	})
-
-	It("accepts both roles as VMotion with different modes", func() {
-		resource := baseResource(uniqueName())
-		resource.Spec.NodeMigration = &NodeMigrationSpec{
-			Workers:      vmotionRole(VMotionModeCold),
-			ControlPlane: vmotionRole(VMotionModeHot),
-		}
-		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-	})
-
-	// ── maxUnavailable validation ───────────────────────────────────────
-
-	It("accepts maxUnavailable as a positive integer", func() {
-		resource := baseResource(uniqueName())
-		maxU := int32(3)
-		resource.Spec.NodeMigration = &NodeMigrationSpec{
-			Workers: &RoleMigrationSpec{
-				Type:           NodeMigrationTypeRecreate,
-				MaxUnavailable: &maxU,
-			},
-			ControlPlane: recreateRole(),
-		}
-		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-	})
-
-	It("rejects maxUnavailable as a percentage", func() {
-		resource := baseResource(uniqueName())
-		resource.Spec.NodeMigration = &NodeMigrationSpec{
-			Workers:      recreateRole(),
-			ControlPlane: recreateRole(),
-		}
-
+		resource = baseResource(uniqueName())
+		resource.Spec.NodeMigration = &NodeMigrationSpec{Workers: recreateRole(), ControlPlane: recreateRole()}
 		object, err := runtime.DefaultUnstructuredConverter.ToUnstructured(resource)
 		Expect(err).NotTo(HaveOccurred())
 		unstructuredResource := &unstructured.Unstructured{Object: object}
 		unstructuredResource.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   "migration.openshift.io",
-			Version: "v1alpha1",
-			Kind:    "VmwareCloudFoundationMigration",
+			Group: "migration.openshift.io", Version: "v1alpha1", Kind: "VmwareCloudFoundationMigration",
 		})
-		Expect(unstructured.SetNestedField(unstructuredResource.Object, "25%", "spec", "nodeMigration", "workers", "maxUnavailable")).To(Succeed())
-
-		Expect(k8sClient.Create(ctx, unstructuredResource)).To(HaveOccurred())
+		unstructured.RemoveNestedField(unstructuredResource.Object, "spec", "nodeMigration", "workers", "type")
+		Expect(k8sClient.Create(ctx, unstructuredResource)).To(HaveOccurred(), "the type discriminator must not default to Recreate")
 	})
 
-	It("rejects maxUnavailable of 0", func() {
+	It("accepts both-role Recreate with its template requirement", func() {
 		resource := baseResource(uniqueName())
-		maxU := int32(0)
+		resource.Spec.NodeMigration = &NodeMigrationSpec{Workers: recreateRole(), ControlPlane: recreateRole()}
+		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+	})
+
+	It("rejects a vmotion block on a Recreate role", func() {
+		resource := baseResource(uniqueName())
 		resource.Spec.NodeMigration = &NodeMigrationSpec{
-			Workers: &RoleMigrationSpec{
-				Type:           NodeMigrationTypeRecreate,
-				MaxUnavailable: &maxU,
-			},
+			Workers:      RoleMigrationSpec{Type: NodeMigrationTypeRecreate, VMotion: &VMotionSpec{Mode: VMotionModeCold}},
 			ControlPlane: recreateRole(),
+		}
+		Expect(k8sClient.Create(ctx, resource)).To(HaveOccurred())
+	})
+
+	It("requires vmotion settings and explicit mode for each VMotion role", func() {
+		resource := baseResource(uniqueName())
+		resource.Spec.NodeMigration = &NodeMigrationSpec{
+			Workers:      RoleMigrationSpec{Type: NodeMigrationTypeVMotion},
+			ControlPlane: vmotionRole(VMotionModeHot),
 		}
 		err := k8sClient.Create(ctx, resource)
 		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("vmotion is required when type is VMotion"))
+
+		resource = baseResource(uniqueName())
+		resource.Spec.NodeMigration = &NodeMigrationSpec{
+			Workers:      RoleMigrationSpec{Type: NodeMigrationTypeVMotion, VMotion: &VMotionSpec{}},
+			ControlPlane: RoleMigrationSpec{Type: NodeMigrationTypeVMotion, VMotion: &VMotionSpec{}},
+		}
+		Expect(k8sClient.Create(ctx, resource)).To(HaveOccurred())
 	})
 
-	It("rejects control-plane maxUnavailable greater than 1", func() {
+	DescribeTable("accepts same-mode VMotion without a template",
+		func(mode VMotionMode) {
+			resource := baseResource(uniqueName())
+			resource.Spec.NodeMigration = vmotionConfig(mode)
+			withoutTemplate(resource)
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		},
+		Entry("Hot", VMotionModeHot),
+		Entry("Cold", VMotionModeCold),
+	)
+
+	It("rejects Auto rather than defaulting or falling back", func() {
 		resource := baseResource(uniqueName())
-		maxU := int32(2)
+		resource.Spec.NodeMigration = vmotionConfig(VMotionMode("Auto"))
+		object, err := runtime.DefaultUnstructuredConverter.ToUnstructured(resource)
+		Expect(err).NotTo(HaveOccurred())
+		unstructuredResource := &unstructured.Unstructured{Object: object}
+		unstructuredResource.SetGroupVersionKind(schema.GroupVersionKind{
+			Group: "migration.openshift.io", Version: "v1alpha1", Kind: "VmwareCloudFoundationMigration",
+		})
+		Expect(k8sClient.Create(ctx, unstructuredResource)).To(HaveOccurred())
+	})
+
+	It("rejects malformed recovery request identifiers", func() {
+		resource := baseResource(uniqueName())
+		resource.Spec.NodeMigration = vmotionConfig(VMotionModeCold)
+		resource.Spec.NodeMigration.RecoveryRequest = &NodeMigrationRecoveryRequest{
+			RequestID: "not-a-uuid", ExecutionID: "22222222-2222-4222-8222-222222222222",
+			ActionID: "33333333-3333-4333-8333-333333333333",
+		}
+		Expect(k8sClient.Create(ctx, resource)).To(HaveOccurred())
+	})
+
+	It("rejects mixed VMotion and Recreate role selections", func() {
+		resource := baseResource(uniqueName())
+		resource.Spec.NodeMigration = &NodeMigrationSpec{Workers: vmotionRole(VMotionModeCold), ControlPlane: recreateRole()}
+		Expect(k8sClient.Create(ctx, resource)).To(HaveOccurred())
+
+		resource = baseResource(uniqueName())
+		resource.Spec.NodeMigration = &NodeMigrationSpec{Workers: recreateRole(), ControlPlane: vmotionRole(VMotionModeHot)}
+		Expect(k8sClient.Create(ctx, resource)).To(HaveOccurred())
+	})
+
+	It("rejects different VMotion modes across roles", func() {
+		resource := baseResource(uniqueName())
+		resource.Spec.NodeMigration = &NodeMigrationSpec{Workers: vmotionRole(VMotionModeCold), ControlPlane: vmotionRole(VMotionModeHot)}
+		Expect(k8sClient.Create(ctx, resource)).To(HaveOccurred())
+	})
+
+	It("accepts multiple failure domains for VMotion", func() {
+		resource := baseResource(uniqueName())
+		resource.Spec.NodeMigration = vmotionConfig(VMotionModeHot)
+		addFailureDomain(resource)
+		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+	})
+
+	It("rejects worker concurrency greater than one for VMotion", func() {
+		resource := baseResource(uniqueName())
+		maxWorkers := int32(2)
+		resource.Spec.NodeMigration = vmotionConfig(VMotionModeCold)
+		resource.Spec.NodeMigration.Workers.MaxUnavailable = maxWorkers
+		Expect(k8sClient.Create(ctx, resource)).To(HaveOccurred())
+	})
+
+	It("encodes target placement per node rather than globally", func() {
+		frozenPlan, err := json.Marshal(NodeMigrationFrozenPlan{
+			SourceVCenter: "vc-source.example.com", SourceDatacenter: "SourceDC",
+			DestinationVCenter: "vc-target.example.com", Mode: VMotionModeHot,
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(frozenPlan)).NotTo(ContainSubstring(`"targetFailureDomain"`))
+
+		nodeProgress, err := json.Marshal(NodeMigrationProgress{Name: "worker-1", TargetFailureDomain: "target-fd-2"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(nodeProgress)).To(ContainSubstring(`"targetFailureDomain":"target-fd-2"`))
+	})
+
+	It("rejects percentage and explicitly supplied zero maxUnavailable", func() {
+		resource := baseResource(uniqueName())
+		resource.Spec.NodeMigration = &NodeMigrationSpec{Workers: recreateRole(), ControlPlane: recreateRole()}
+		object, err := runtime.DefaultUnstructuredConverter.ToUnstructured(resource)
+		Expect(err).NotTo(HaveOccurred())
+		unstructuredResource := &unstructured.Unstructured{Object: object}
+		unstructuredResource.SetGroupVersionKind(schema.GroupVersionKind{
+			Group: "migration.openshift.io", Version: "v1alpha1", Kind: "VmwareCloudFoundationMigration",
+		})
+		Expect(unstructured.SetNestedField(unstructuredResource.Object, "25%", "spec", "nodeMigration", "workers", "maxUnavailable")).To(Succeed())
+		Expect(k8sClient.Create(ctx, unstructuredResource)).To(HaveOccurred())
+
+		resource = baseResource(uniqueName())
+		resource.Spec.NodeMigration = &NodeMigrationSpec{Workers: recreateRole(), ControlPlane: recreateRole()}
+		object, err = runtime.DefaultUnstructuredConverter.ToUnstructured(resource)
+		Expect(err).NotTo(HaveOccurred())
+		unstructuredResource = &unstructured.Unstructured{Object: object}
+		unstructuredResource.SetGroupVersionKind(schema.GroupVersionKind{
+			Group: "migration.openshift.io", Version: "v1alpha1", Kind: "VmwareCloudFoundationMigration",
+		})
+		Expect(unstructured.SetNestedField(unstructuredResource.Object, int64(0), "spec", "nodeMigration", "workers", "maxUnavailable")).To(Succeed())
+		Expect(k8sClient.Create(ctx, unstructuredResource)).To(HaveOccurred())
+	})
+
+	It("continues to enforce control-plane maxUnavailable of one", func() {
+		two := int32(2)
+		resource := baseResource(uniqueName())
 		resource.Spec.NodeMigration = &NodeMigrationSpec{
-			Workers: recreateRole(),
-			ControlPlane: &RoleMigrationSpec{
-				Type:           NodeMigrationTypeRecreate,
-				MaxUnavailable: &maxU,
-			},
+			Workers: recreateRole(), ControlPlane: RoleMigrationSpec{Type: NodeMigrationTypeRecreate, MaxUnavailable: two},
 		}
 		err := k8sClient.Create(ctx, resource)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("controlPlane.maxUnavailable must be 1"))
 	})
 
-	// ── maxUnavailable default ──────────────────────────────────────────
-
-	It("defaults maxUnavailable to 1 when omitted", func() {
+	It("rejects maxUnavailable values above the supported maximum", func() {
 		resource := baseResource(uniqueName())
 		resource.Spec.NodeMigration = &NodeMigrationSpec{
-			Workers:      recreateRole(),
+			Workers:      RoleMigrationSpec{Type: NodeMigrationTypeRecreate, MaxUnavailable: 32768},
 			ControlPlane: recreateRole(),
+		}
+		Expect(k8sClient.Create(ctx, resource)).To(HaveOccurred())
+	})
+
+	It("validates bounded action status and rejects empty identifiers", func() {
+		resource := baseResource(uniqueName())
+		resource.Spec.State = MigrationStatePaused
+		resource.Spec.NodeMigration = vmotionConfig(VMotionModeCold)
+		resource.Spec.NodeMigration.RecoveryRequest = &NodeMigrationRecoveryRequest{
+			RequestID:   "11111111-1111-4111-8111-111111111111",
+			ExecutionID: "22222222-2222-4222-8222-222222222222",
+			ActionID:    "33333333-3333-4333-8333-333333333333",
 		}
 		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 
 		created := &VmwareCloudFoundationMigration{}
 		Expect(k8sClient.Get(ctx, clientKey(resource), created)).To(Succeed())
-		Expect(created.Spec.NodeMigration.Workers.MaxUnavailable).NotTo(BeNil())
-		Expect(*created.Spec.NodeMigration.Workers.MaxUnavailable).To(Equal(int32(1)))
-		Expect(created.Spec.NodeMigration.ControlPlane.MaxUnavailable).NotTo(BeNil())
-		Expect(*created.Spec.NodeMigration.ControlPlane.MaxUnavailable).To(Equal(int32(1)))
-	})
-
-	// ── VMotion mode default ────────────────────────────────────────────
-
-	It("defaults vmotion.mode to Auto when omitted", func() {
-		resource := baseResource(uniqueName())
-		resource.Spec.NodeMigration = &NodeMigrationSpec{
-			Workers: &RoleMigrationSpec{
-				Type:    NodeMigrationTypeVMotion,
-				VMotion: &VMotionSpec{},
+		migrationUID := created.UID
+		now := metav1.Now()
+		created.Status.NodeMigration = &NodeMigrationStatus{
+			Type: NodeMigrationTypeVMotion, Progress: "workers 0/1, control plane 0/3",
+			ExecutionID: "22222222-2222-4222-8222-222222222222", MigrationUID: migrationUID,
+			PlanFingerprint: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			FrozenPlan: &NodeMigrationFrozenPlan{
+				SourceVCenter: "vc-source.example.com", SourceDatacenter: "SourceDC",
+				DestinationVCenter: "vc-target.example.com", Mode: VMotionModeCold,
 			},
-			ControlPlane: recreateRole(),
+			ActiveAction: &NodeMigrationAction{
+				ActionID:    "44444444-4444-4444-8444-444444444444",
+				ExecutionID: "22222222-2222-4222-8222-222222222222",
+				Kind:        NodeMigrationActionRelocateVM, NodeName: "worker-1", NodeUID: types.UID("node-uid-1"),
+				VMBIOSUUID: "420e5e2e-c9eb-4a76-9623-725885785001", OwnerVCenter: "vc-source.example.com",
+				OperationIdentity: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+				SubmissionState:   NodeMigrationSubmissionClaimed, ObservationState: NodeMigrationObservationNotObserved,
+				ClaimedAt: now,
+			},
+			Intervention: &NodeMigrationIntervention{
+				ExecutionID: "22222222-2222-4222-8222-222222222222", ActionID: "33333333-3333-4333-8333-333333333333",
+				NodeName: "worker-1", Reason: "action outcome requires recheck", Since: now,
+			},
+			RecoveryAcknowledgement: &NodeMigrationRecoveryAcknowledgement{
+				RequestID:   "11111111-1111-4111-8111-111111111111",
+				ExecutionID: "22222222-2222-4222-8222-222222222222",
+				ActionID:    "33333333-3333-4333-8333-333333333333", ConsumedAt: now,
+			},
+			Cleanup: &NodeMigrationCleanupProgress{Phase: NodeMigrationCleanupPending},
+			Workers: &RoleMigrationStatus{RequestedMode: VMotionModeCold, Nodes: []NodeMigrationProgress{{
+				Name: "worker-1", State: NodeMigrationStateMigrating, RequestedMode: VMotionModeCold,
+				NodeUID: types.UID("node-uid-1"), ProviderID: "vsphere://420e5e2e-c9eb-4a76-9623-725885785001",
+				VMBIOSUUID: "420e5e2e-c9eb-4a76-9623-725885785001", OriginalSchedulingState: NodeMigrationSchedulingStateSchedulable,
+				TargetFailureDomain: "target-fd-1", TargetHost: "/TargetDC/host/esx-1",
+				TargetResourcePool: "/TargetDC/host/esx-1/Resources", TargetDatastore: "/TargetDC/datastore/TargetDS",
+				TargetNetwork: "VM Network",
+				ShutdownOutcome: &NodeMigrationOperationOutcome{
+					ActionID: "55555555-5555-4555-8555-555555555555", Kind: NodeMigrationActionShutdownGuest,
+					State: NodeMigrationOutcomeSucceeded, OwnerVCenter: "vc-source.example.com", ObservedAt: &now,
+				},
+				RelocationOutcome: &NodeMigrationOperationOutcome{
+					ActionID: "66666666-6666-4666-8666-666666666666", Kind: NodeMigrationActionRelocateVM,
+					State: NodeMigrationOutcomeSucceeded, OwnerVCenter: "vc-source.example.com",
+					TaskReference: &NodeMigrationTaskReference{OwnerVCenter: "vc-source.example.com", TaskID: "task-101"},
+				},
+				PowerOnOutcome: &NodeMigrationOperationOutcome{
+					ActionID: "77777777-7777-4777-8777-777777777777", Kind: NodeMigrationActionPowerOnVM,
+					State: NodeMigrationOutcomeFailed, OwnerVCenter: "vc-target.example.com",
+					TaskReference: &NodeMigrationTaskReference{OwnerVCenter: "vc-target.example.com", TaskID: "task-202"},
+					Reason:        "power-on observation failed", CompletedAt: &now,
+				},
+			}}},
 		}
-		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		Expect(k8sClient.Status().Update(ctx, created)).To(Succeed())
 
-		created := &VmwareCloudFoundationMigration{}
+		// The old request remains while status advances to another action. Schema
+		// validation checks request shape, not live ownership or action authorization.
 		Expect(k8sClient.Get(ctx, clientKey(resource), created)).To(Succeed())
-		Expect(created.Spec.NodeMigration.Workers.VMotion.Mode).To(Equal(VMotionModeAuto))
-	})
+		created.Status.NodeMigration.ActiveAction.ActionID = "88888888-8888-4888-8888-888888888888"
+		created.Status.NodeMigration.ActiveAction.Kind = NodeMigrationActionPowerOnVM
+		created.Status.NodeMigration.ActiveAction.OwnerVCenter = "vc-target.example.com"
+		Expect(k8sClient.Status().Update(ctx, created)).To(Succeed())
 
-	// ── UPI typical config (both roles VMotion) ─────────────────────────
-
-	It("accepts a full UPI configuration", func() {
-		resource := baseResource(uniqueName())
-		maxWorkers := int32(2)
-		maxCP := int32(1)
-		resource.Spec.NodeMigration = &NodeMigrationSpec{
-			Workers: &RoleMigrationSpec{
-				Type:           NodeMigrationTypeVMotion,
-				VMotion:        &VMotionSpec{Mode: VMotionModeCold},
-				MaxUnavailable: &maxWorkers,
-			},
-			ControlPlane: &RoleMigrationSpec{
-				Type:           NodeMigrationTypeVMotion,
-				VMotion:        &VMotionSpec{Mode: VMotionModeHot},
-				MaxUnavailable: &maxCP,
-			},
+		got := &VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, clientKey(resource), got)).To(Succeed())
+		invalidIdentifiers := []struct {
+			name  string
+			field string
+		}{
+			{name: "action node UID", field: "actionNodeUID"},
+			{name: "source vCenter", field: "sourceVCenter"},
+			{name: "source datacenter", field: "sourceDatacenter"},
+			{name: "destination vCenter", field: "destinationVCenter"},
+			{name: "action VM BIOS UUID", field: "actionVMBIOSUUID"},
+			{name: "action owner vCenter", field: "actionOwnerVCenter"},
+			{name: "task owner vCenter", field: "taskOwnerVCenter"},
+			{name: "task ID", field: "taskID"},
+			{name: "outcome owner vCenter", field: "outcomeOwnerVCenter"},
+			{name: "intervention reason", field: "interventionReason"},
+			{name: "progress node name", field: "progressName"},
 		}
-		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-	})
-
-	// ── IPI typical config (both roles Recreate) ────────────────────────
-
-	It("accepts a full IPI configuration", func() {
-		resource := baseResource(uniqueName())
-		resource.Spec.NodeMigration = &NodeMigrationSpec{
-			Workers:      recreateRole(),
-			ControlPlane: recreateRole(),
+		clearIdentifier := func(m *VmwareCloudFoundationMigration, field string) {
+			node := &m.Status.NodeMigration.Workers.Nodes[0]
+			switch field {
+			case "actionNodeUID":
+				m.Status.NodeMigration.ActiveAction.NodeUID = ""
+			case "sourceVCenter":
+				m.Status.NodeMigration.FrozenPlan.SourceVCenter = ""
+			case "sourceDatacenter":
+				m.Status.NodeMigration.FrozenPlan.SourceDatacenter = ""
+			case "destinationVCenter":
+				m.Status.NodeMigration.FrozenPlan.DestinationVCenter = ""
+			case "actionVMBIOSUUID":
+				m.Status.NodeMigration.ActiveAction.VMBIOSUUID = ""
+			case "actionOwnerVCenter":
+				m.Status.NodeMigration.ActiveAction.OwnerVCenter = ""
+			case "taskOwnerVCenter":
+				m.Status.NodeMigration.ActiveAction.OwnerVCenter = ""
+				m.Status.NodeMigration.ActiveAction.TaskReference = &NodeMigrationTaskReference{TaskID: "task-303"}
+			case "taskID":
+				m.Status.NodeMigration.ActiveAction.TaskReference = &NodeMigrationTaskReference{OwnerVCenter: "vc-target.example.com"}
+			case "outcomeOwnerVCenter":
+				node.RelocationOutcome.OwnerVCenter = ""
+				node.RelocationOutcome.TaskReference = nil
+			case "interventionReason":
+				m.Status.NodeMigration.Intervention.Reason = ""
+			case "progressName":
+				node.Name = ""
+			}
 		}
-		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		for _, tt := range invalidIdentifiers {
+			invalid := got.DeepCopy()
+			clearIdentifier(invalid, tt.field)
+			Expect(k8sClient.Status().Update(ctx, invalid)).To(HaveOccurred(), tt.name)
+		}
+
+		validStatus, err := runtime.DefaultUnstructuredConverter.ToUnstructured(got)
+		Expect(err).NotTo(HaveOccurred())
+		invalidMigrationUID := &unstructured.Unstructured{Object: runtime.DeepCopyJSON(validStatus)}
+		invalidMigrationUID.SetGroupVersionKind(schema.GroupVersionKind{
+			Group: "migration.openshift.io", Version: "v1alpha1", Kind: "VmwareCloudFoundationMigration",
+		})
+		Expect(unstructured.SetNestedField(invalidMigrationUID.Object, "", "status", "nodeMigration", "migrationUID")).To(Succeed())
+		Expect(k8sClient.Status().Update(ctx, invalidMigrationUID)).To(HaveOccurred(), "migration UID must be non-empty when set")
+
+		invalidNodeIdentifiers := []struct {
+			name  string
+			field string
+		}{
+			{name: "progress node UID", field: "nodeUID"},
+			{name: "progress VM BIOS UUID", field: "vmBIOSUUID"},
+			{name: "progress provider ID", field: "providerID"},
+			{name: "progress target failure domain", field: "targetFailureDomain"},
+			{name: "progress target host", field: "targetHost"},
+			{name: "progress target resource pool", field: "targetResourcePool"},
+			{name: "progress target datastore", field: "targetDatastore"},
+			{name: "progress target network", field: "targetNetwork"},
+			{name: "progress source inventory path", field: "sourceInventoryPath"},
+			{name: "progress target inventory path", field: "targetInventoryPath"},
+		}
+		for _, tt := range invalidNodeIdentifiers {
+			invalid := &unstructured.Unstructured{Object: runtime.DeepCopyJSON(validStatus)}
+			invalid.SetGroupVersionKind(schema.GroupVersionKind{
+				Group: "migration.openshift.io", Version: "v1alpha1", Kind: "VmwareCloudFoundationMigration",
+			})
+			nodes, found, err := unstructured.NestedSlice(invalid.Object, "status", "nodeMigration", "workers", "nodes")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeTrue())
+			node := nodes[0].(map[string]interface{})
+			node[tt.field] = ""
+			nodes[0] = node
+			Expect(unstructured.SetNestedSlice(invalid.Object, nodes, "status", "nodeMigration", "workers", "nodes")).To(Succeed())
+			Expect(k8sClient.Status().Update(ctx, invalid)).To(HaveOccurred(), tt.name)
+		}
+
+		progress := got.Status.NodeMigration.Workers.Nodes[0]
+		Expect(progress.ShutdownOutcome.State).To(Equal(NodeMigrationOutcomeSucceeded))
+		Expect(progress.RelocationOutcome.State).To(Equal(NodeMigrationOutcomeSucceeded))
+		Expect(progress.PowerOnOutcome.State).To(Equal(NodeMigrationOutcomeFailed))
+		Expect(progress.RelocationOutcome.TaskReference.OwnerVCenter).To(Equal("vc-source.example.com"))
+		Expect(progress.PowerOnOutcome.TaskReference.OwnerVCenter).To(Equal("vc-target.example.com"))
+		Expect(got.Status.NodeMigration.ActiveAction.TaskReference).To(BeNil(), "a durable claim without a task reference is valid")
+
+		deepCopy := got.DeepCopy()
+		deepCopy.Status.NodeMigration.Workers.Nodes[0].ProviderID = "mutated"
+		Expect(got.Status.NodeMigration.Workers.Nodes[0].ProviderID).NotTo(Equal("mutated"))
+		deepCopy.Status.NodeMigration.Workers.Nodes[0].OriginalSchedulingState = NodeMigrationSchedulingStateUnschedulable
+		Expect(got.Status.NodeMigration.Workers.Nodes[0].OriginalSchedulingState).To(Equal(NodeMigrationSchedulingStateSchedulable))
+		deepCopy.Status.NodeMigration.Workers.Nodes[0].RelocationOutcome.TaskReference.TaskID = "mutated-task"
+		Expect(got.Status.NodeMigration.Workers.Nodes[0].RelocationOutcome.TaskReference.TaskID).To(Equal("task-101"))
+
+		invalid := got.DeepCopy()
+		invalid.Status.NodeMigration.ActiveAction.Kind = NodeMigrationActionShutdownGuest
+		invalid.Status.NodeMigration.ActiveAction.TaskReference = &NodeMigrationTaskReference{
+			OwnerVCenter: "vc-target.example.com", TaskID: "task-shutdown",
+		}
+		Expect(k8sClient.Status().Update(ctx, invalid)).To(HaveOccurred(), "ShutdownGuest has no task reference")
+
+		invalid.Status.NodeMigration.ActiveAction.Kind = NodeMigrationActionRelocateVM
+		invalid.Status.NodeMigration.ActiveAction.TaskReference.OwnerVCenter = "vc-other.example.com"
+		Expect(k8sClient.Status().Update(ctx, invalid)).To(HaveOccurred(), "task reference must be vCenter-scoped")
+
+		invalid = got.DeepCopy()
+		invalid.Status.NodeMigration.Workers.Nodes[0].State = NodeMigrationState("Unknown")
+		Expect(k8sClient.Status().Update(ctx, invalid)).To(HaveOccurred(), "node state must use the declared enum")
+
+		invalid = got.DeepCopy()
+		invalid.Status.NodeMigration.Workers.Nodes[0].OriginalSchedulingState = NodeMigrationSchedulingState("Unknown")
+		Expect(k8sClient.Status().Update(ctx, invalid)).To(HaveOccurred(), "scheduling state must use the declared enum")
+
+		invalid = got.DeepCopy()
+		invalid.Status.NodeMigration.Intervention.NodeName = ""
+		Expect(k8sClient.Status().Update(ctx, invalid)).To(HaveOccurred(), "intervention nodeName must not be empty")
 	})
 })

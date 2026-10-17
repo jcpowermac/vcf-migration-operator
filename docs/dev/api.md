@@ -12,8 +12,8 @@
 |-------|------|----------|---------|-------------|
 | `state` | `MigrationState` | No | `Pending` | `Pending`, `Running`, or `Paused`. Reconciler only acts when `Running`. |
 | `targetVCenterCredentialsSecret` | `SecretReference` | Yes | | Secret with target vCenter credentials. |
-| `failureDomains` | `[]VSpherePlatformFailureDomainSpec` | Yes (min 1) | | Target failure domains. Uses the OpenShift `configv1` type. |
-| `nodeMigration` | `NodeMigrationSpec` | No | | Controls how nodes move to the target vCenter. When omitted, uses MachineSet/CPMS replacement. See [Node Migration API](node-migration-api.md). |
+| `failureDomains` | `[]VSpherePlatformFailureDomainSpec` | Yes (min 1) | | Target failure domains. Uses the OpenShift `configv1` type. Preflight resolves the effective source-to-destination mapping; VMotion adds no single-FD or one-to-one restriction. Template is required for legacy/Recreate, not VMotion. |
+| `nodeMigration` | `NodeMigrationSpec` | No | | Selects Recreate or the VMotion API shape. When omitted, retains MachineSet/CPMS replacement. VMotion requires both roles, explicit matching Hot/Cold modes, and serial worker availability. API shape does not mean controller execution is implemented. See [Node Migration API](node-migration-api.md). |
 
 ### MigrationState Enum
 
@@ -89,7 +89,7 @@ stops new probe VM cleanup requests; any remaining probes must be handled during
 | `topology.networks` | `[]string` | Yes (min 1) | Port group network names |
 | `topology.resourcePool` | `string` | No | Path: `/<dc>/host/<cluster>/Resources/<pool>` |
 | `topology.folder` | `string` | No | Path: `/<dc>/vm/<folder>` |
-| `topology.template` | `string` | Yes | Existing VM/template inventory path on the target vCenter; required for every failure domain at admission and verified during preflight |
+| `topology.template` | `string` | Conditional | Existing VM/template inventory path on the target vCenter; required for legacy and Recreate configurations, not VMotion |
 
 ## Status
 

@@ -47,11 +47,11 @@ The invariants are:
 
 ### Failure-domain mapping interaction
 
-Preflight resolves, validates and records the effective FD mapping and binds each planned VM to its selected destination before Infrastructure/configuration changes or node disruption. Execution and retries reuse those choices and revalidate the destination without selecting new placement. Unresolved or ambiguous placement blocks execution. Preserve frozen Node/VM and source cleanup identities rather than rediscovering them from changed Infrastructure.
+The shared pre-processing step resolves, validates and records the effective source-to-destination FD mapping in `status.failureDomainMappings` before Infrastructure/configuration changes or node disruption. UPI VMotion consumes that recorded result; it does not independently infer a mapping from FD counts/names or MachineSet names, add a second mapping API, or impose its own mapping-cardinality rule. PR #219 currently proposes a complete one-to-one mapping for multi-domain migrations; that is the mapping behavior of that pre-processing implementation, not a VMotion requirement. VMotion should remain compatible with other mapping cardinalities if the pre-processing result unambiguously selects a destination for each planned node.
 
-Existing legacy and explicit `Recreate` mapping behavior described in [PR #219](https://github.com/openshift/vcf-migration-operator/pull/219) remains unchanged. Its `status.workerMachineSetNames` records destination MachineSet names, not VMotion identity or completion.
+Before mutation, bind every planned VM to the target FD selected by the effective mapping and freeze that per-node placement, along with Node/VM and source-cleanup identities. Execution and retries reuse those choices and revalidate the destination without selecting new placement. If the mapping result cannot unambiguously select a target for a planned node, block before side effects. Do not treat `status.workerMachineSetNames` as VMotion identity or completion evidence; that field belongs to the worker MachineSet replacement path.
 
-No VMotion-specific single-FD or one-to-one restriction is introduced. API validation and mapping integration in PR #105 and PR #219 must be reconciled with this policy; this enhancement does not implement those changes or establish topology qualification.
+Existing legacy and explicit `Recreate` mapping behavior described in [PR #219](https://github.com/openshift/vcf-migration-operator/pull/219) remains unchanged. No VMotion-specific single-FD or one-to-one restriction is introduced. Coordinate API/schema integration with PR #105 and PR #219 so the VMotion API accepts the FD sets supported by pre-processing and consumes its effective mapping result; do not duplicate or override the pre-processing mapping contract. This does not establish topology qualification.
 
 ## 3. Existing phases and UPI dispatch
 
