@@ -34,9 +34,7 @@ func NewMachineConfigPoolManager(client machineconfigclient.Interface) *MachineC
 // CheckPoolsConverged reports whether every MachineConfigPool has fully
 // converged on its current configuration: the Updated condition is True, the
 // pool is not degraded (aggregate Degraded or NodeDegraded condition), and
-// updatedMachineCount equals machineCount. The controller must have observed
-// the current generation and applied the desired rendered configuration.
-// Convergence is the signal that
+// updatedMachineCount equals machineCount. Convergence is the signal that
 // node configuration rollouts (including control plane revision rotations)
 // have finished.
 func (m *MachineConfigPoolManager) CheckPoolsConverged(ctx context.Context) (bool, PoolConvergenceSummary, error) {
@@ -63,8 +61,7 @@ func (m *MachineConfigPoolManager) CheckPoolsConverged(ctx context.Context) (boo
 		}
 
 		updated, hasUpdated := poolConditionStatus(pool, machineconfigurationv1.MachineConfigPoolUpdated)
-		if !hasUpdated || updated != corev1.ConditionTrue || pool.Status.UpdatedMachineCount != pool.Status.MachineCount ||
-			pool.Status.ObservedGeneration < pool.Generation || pool.Status.Configuration.Name != pool.Spec.Configuration.Name {
+		if !hasUpdated || updated != corev1.ConditionTrue || pool.Status.UpdatedMachineCount != pool.Status.MachineCount {
 			summary.NotUpdatedPools = append(summary.NotUpdatedPools, pool.Name)
 		}
 	}
