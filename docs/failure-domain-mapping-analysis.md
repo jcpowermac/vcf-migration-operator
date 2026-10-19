@@ -40,12 +40,16 @@ destination.
 
 But with no source→destination mapping, three concrete gaps:
 
-1. **Name collision = silent stall.** MachineSet identity is name-only
-   (`<infraID>-worker-<sanitized-fdName>`). If a destination FD has the same name as an
-   existing source FD, `GetMachineSet(msName)` finds the *source* MachineSet, creation
-   is skipped ("already exists, skipping"), and the operator then waits forever for
-   machines on the target that were never created. Nothing validates destination FD
-   names against source FD names — only destination-vs-destination uniqueness.
+1. **Name collision = source/target identity confusion.** MachineSet identity is
+   name-only (`<infraID>-worker-<sanitized-fdName>`). If a destination FD has the same
+   name as an existing source FD, `GetMachineSet(msName)` finds the *source*
+   MachineSet and creation is skipped ("already exists, skipping"). Readiness checks
+   use MachineSet labels, phase, and NodeRef, not destination vCenter, so healthy
+   source Machines can satisfy the gate even though no target workers were created.
+   If CPMS already targets the same failure-domain names, migration can reach source
+   scale-down without destination workers, risking workload loss rather than merely
+   a readiness stall. Nothing validates destination FD names against source FD names
+   — only destination-vs-destination uniqueness.
 2. **Arbitrary template.** All destination MachineSets are cloned from
    `existingMachineSets[0]` — whichever source MachineSet the API returns first. If
    source FDs had different VM sizes, every destination FD gets one arbitrary size. No
@@ -171,7 +175,7 @@ Validated with `api_lint_types`: 0 errors, 0 warnings.
 The mapping fixes the three destination-side gaps identified above:
 
 1. **Identity** — MachineSet correspondence is derived from the mapping, never from
-   name collision or `[0]`-indexing. The destination FD-name collision stall becomes
+   name collision or `[0]`-indexing. The destination FD-name identity confusion becomes
    impossible because the operator never guesses which source machineset a
    destination machineset replaces.
 2. **Template inheritance** — each destination worker MachineSet is copied from one source MachineSet in the mapped source FD (one destination MachineSet per source MachineSet), inheriting its provider spec (VM size, etc.). The VM template itself always comes from the destination failure domain's `topology.template`; it is never inherited from the source.
