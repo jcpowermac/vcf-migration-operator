@@ -98,6 +98,9 @@ FD, the mapping is omitted entirely and inferred.
 
 ### Chosen design: additive `spec.failureDomainMappings`
 
+> **Status: implemented** on branch `failure-domain-mapping` (Tasks 1–4 of
+> `docs/superpowers/plans/2026-10-15-failure-domain-mapping.md`).
+
 A separate, optional list of name pairs referencing existing failure domains by name.
 It is purely additive — `spec.failureDomains` keeps its current shape
 (`configv1.VSpherePlatformFailureDomainSpec` entries), so existing CRs and manifests

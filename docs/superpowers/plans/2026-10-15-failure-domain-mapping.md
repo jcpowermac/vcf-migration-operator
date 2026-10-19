@@ -373,12 +373,12 @@ git commit -m "Create worker MachineSets from failure domain mappings"
 **Interfaces:**
 - Consumes: everything above.
 
-- [ ] **Step 1: Verify the whole repo**
+- [x] **Step 1: Verify the whole repo**
 
 Run: `make fmt vet lint` then `make test`
 Expected: all PASS, no lint errors.
 
-- [ ] **Step 2: Note implementation in the analysis doc and commit**
+- [x] **Step 2: Note implementation in the analysis doc and commit**
 
 ```bash
 git add docs/failure-domain-mapping-analysis.md
