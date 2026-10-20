@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -1051,6 +1052,78 @@ var _ = Describe("Deletion finalizer", func() {
 		Eventually(func() error {
 			return k8sClient.Get(ctx, typeNamespacedName, &migrationv1alpha1.VmwareCloudFoundationMigration{})
 		}).ShouldNot(Succeed())
+	})
+
+	It("keeps committed workflow progress while reporting deletion as blocked", func() {
+		typeNamespacedName := types.NamespacedName{
+			Name:      migrationv1alpha1.SingletonName,
+			Namespace: migrationv1alpha1.SingletonNamespace,
+		}
+		resource := newSingletonSpecResource(migrationv1alpha1.SingletonNamespace, migrationv1alpha1.MigrationStateRunning)
+		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		DeferCleanup(func() {
+			leftover := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, leftover); err != nil {
+				return
+			}
+			Expect(k8sClient.Delete(ctx, leftover)).To(Succeed())
+			releaseMigrationFinalizer(ctx, leftover)
+		})
+
+		fakeRecorder := events.NewFakeRecorder(10)
+		controllerReconciler := &VmwareCloudFoundationMigrationReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: fakeRecorder,
+		}
+
+		By("adding the record-retention finalizer on the first reconcile")
+		_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
+		Expect(controllerutil.ContainsFinalizer(resource, migrationv1alpha1.FinalizerName)).To(BeTrue())
+
+		By("committing a workflow condition for the running migration")
+		// The object's generation advances between the seed write and the
+		// deletion reconcile; capture the generation the condition is committed
+		// against so retention is compared to the commit-time value.
+		seedGeneration := resource.Generation
+		// Truncate to whole seconds: the apiserver persists timestamps at
+		// second precision, so the retained value must compare equal exactly.
+		startTime := metav1.NewTime(time.Now().Truncate(time.Second))
+		resource.Status.StartTime = &startTime
+		apimeta.SetStatusCondition(&resource.Status.Conditions, metav1.Condition{
+			Type:               migrationv1alpha1.ConditionInfrastructurePrepared,
+			Status:             metav1.ConditionTrue,
+			Reason:             migrationv1alpha1.ReasonCompleted,
+			Message:            "Preflight validation passed",
+			ObservedGeneration: seedGeneration,
+			LastTransitionTime: startTime,
+		})
+		Expect(k8sClient.Status().Update(ctx, resource)).To(Succeed())
+
+		By("deleting the running migration while work is outstanding")
+		Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+		_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
+		Expect(resource.DeletionTimestamp).NotTo(BeNil())
+		cond := apimeta.FindStatusCondition(resource.Status.Conditions, migrationv1alpha1.ConditionAccepted)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(cond.Reason).To(Equal(migrationv1alpha1.ReasonDeletionBlocked))
+		Expect(cond.ObservedGeneration).To(Equal(resource.Generation))
+
+		By("keeping the committed progress record")
+		kept := apimeta.FindStatusCondition(resource.Status.Conditions, migrationv1alpha1.ConditionInfrastructurePrepared)
+		Expect(kept).NotTo(BeNil())
+		Expect(kept.Status).To(Equal(metav1.ConditionTrue))
+		Expect(kept.Reason).To(Equal(migrationv1alpha1.ReasonCompleted))
+		Expect(kept.ObservedGeneration).To(Equal(seedGeneration))
+		Expect(resource.Status.StartTime).NotTo(BeNil())
+		Expect(resource.Status.StartTime.Equal(&startTime)).To(BeTrue())
+		Expect(controllerutil.ContainsFinalizer(resource, migrationv1alpha1.FinalizerName)).To(BeTrue())
 	})
 })
 
