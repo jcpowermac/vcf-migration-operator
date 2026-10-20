@@ -2,6 +2,9 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	configfake "github.com/openshift/client-go/config/clientset/versioned/fake"
@@ -9,13 +12,16 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	fakekube "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
+	"github.com/openshift/vcf-migration-operator/internal/execution"
 	"github.com/openshift/vcf-migration-operator/internal/openshift"
 )
 
@@ -112,6 +118,123 @@ func TestReconcileStopsAtUncachedHandlerBoundary(t *testing.T) {
 		if cond.Reason == migrationv1alpha1.ReasonFailed {
 			t.Fatal("deletion reported as migration failure")
 		}
+	}
+}
+
+// TestExecutionContextCheckOutcomes verifies each permission outcome of the
+// execution context check: identity or state drift stops execution without
+// surfacing an error, while a permission read failure is reported.
+func TestExecutionContextCheckOutcomes(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutateLive func(*migrationv1alpha1.VmwareCloudFoundationMigration)
+		dropLive   bool
+		readErr    error
+	}{
+		{name: "live object missing", dropLive: true},
+		{name: "live UID differs", mutateLive: func(live *migrationv1alpha1.VmwareCloudFoundationMigration) {
+			live.UID = types.UID("replacement-live-uid")
+		}},
+		{name: "live generation bumped", mutateLive: func(live *migrationv1alpha1.VmwareCloudFoundationMigration) {
+			live.Generation++
+		}},
+		{name: "live state pending", mutateLive: func(live *migrationv1alpha1.VmwareCloudFoundationMigration) {
+			live.Spec.State = migrationv1alpha1.MigrationStatePending
+		}},
+		{name: "live state paused", mutateLive: func(live *migrationv1alpha1.VmwareCloudFoundationMigration) {
+			live.Spec.State = migrationv1alpha1.MigrationStatePaused
+		}},
+		{name: "permission read fails", readErr: fmt.Errorf("api server unreachable")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			stale := newSingletonSpecResource(migrationv1alpha1.SingletonNamespace, migrationv1alpha1.MigrationStateRunning)
+			stale.UID = types.UID("stale-uid")
+			liveClient := retentionTestClient(t, stale.DeepCopy())
+			if tt.mutateLive != nil {
+				mutated := stale.DeepCopy()
+				tt.mutateLive(mutated)
+				liveClient = retentionTestClient(t, mutated)
+			}
+			if tt.dropLive {
+				if err := liveClient.Delete(ctx, stale.DeepCopy()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.readErr != nil {
+				liveClient = interceptor.NewClient(liveClient, interceptor.Funcs{Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+					return tt.readErr
+				}})
+			}
+			r := &VmwareCloudFoundationMigrationReconciler{Client: liveClient, APIReader: liveClient}
+			err := execution.Check(r.executionContext(ctx, stale))
+			if tt.readErr == nil {
+				// Drift stops execution silently; no error is surfaced.
+				if !errors.Is(err, errExecutionStopped) {
+					t.Fatalf("Check error = %v, want errExecutionStopped", err)
+				}
+				return
+			}
+			if err == nil || errors.Is(err, errExecutionStopped) {
+				t.Fatalf("Check error = %v, want wrapped read error", err)
+			}
+			if !errors.Is(err, tt.readErr) {
+				t.Fatalf("Check error = %v, want it wrapping %v", err, tt.readErr)
+			}
+			if !strings.Contains(err.Error(), "reading migration execution permission") {
+				t.Fatalf("Check error = %v, want read-failure context", err)
+			}
+		})
+	}
+}
+
+// TestReconcileDeniedFromStartWritesNothing runs a full reconcile whose
+// permission check denies from the start and asserts no write is submitted to
+// the kube client, not even a status update.
+func TestReconcileDeniedFromStartWritesNothing(t *testing.T) {
+	ctx := context.Background()
+	m := newSingletonSpecResource(migrationv1alpha1.SingletonNamespace, migrationv1alpha1.MigrationStateRunning)
+	m.Finalizers = []string{migrationv1alpha1.FinalizerName}
+	now := metav1.Now()
+	m.Status.StartTime = &now
+	writes := 0
+	counting := interceptor.NewClient(retentionTestClient(t, m), interceptor.Funcs{
+		Create: func(ctx context.Context, underlying client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			writes++
+			return underlying.Create(ctx, obj, opts...)
+		},
+		Update: func(ctx context.Context, underlying client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			writes++
+			return underlying.Update(ctx, obj, opts...)
+		},
+		Patch: func(ctx context.Context, underlying client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			writes++
+			return underlying.Patch(ctx, obj, patch, opts...)
+		},
+		Delete: func(ctx context.Context, underlying client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			writes++
+			return underlying.Delete(ctx, obj, opts...)
+		},
+		SubResourceUpdate: func(ctx context.Context, underlying client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			writes++
+			return underlying.Status().Update(ctx, obj, opts...)
+		},
+		SubResourcePatch: func(ctx context.Context, underlying client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			writes++
+			return underlying.Status().Patch(ctx, obj, patch, opts...)
+		},
+	})
+	live := retentionTestClient(t, m.DeepCopy())
+	if err := live.Delete(ctx, m); err != nil {
+		t.Fatal(err)
+	}
+	r := &VmwareCloudFoundationMigrationReconciler{Client: counting, APIReader: live, Recorder: events.NewFakeRecorder(10)}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(m)}); err != nil {
+		t.Fatal(err)
+	}
+	if writes != 0 {
+		t.Fatalf("reconcile submitted %d writes while execution was denied from the start", writes)
 	}
 }
 
