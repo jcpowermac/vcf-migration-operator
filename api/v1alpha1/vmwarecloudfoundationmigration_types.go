@@ -113,7 +113,29 @@ type SecretReference struct {
 	Namespace string `json:"namespace,omitempty"`
 }
 
+// FailureDomainMapping maps one source failure domain to one destination failure domain.
+type FailureDomainMapping struct {
+	// source is the name of the failure domain in the cluster's Infrastructure
+	// resource that this entry migrates workloads from.
+	// This field is required and must be a non-empty string.
+	// Must be between 1 and 256 characters in length.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	Source string `json:"source"`
+
+	// destination is the name of the entry in spec.failureDomains that receives
+	// the workloads migrated from source.
+	// This field is required and must be a non-empty string.
+	// Must be between 1 and 256 characters in length.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	Destination string `json:"destination"`
+}
+
 // VmwareCloudFoundationMigrationSpec defines the desired state of VmwareCloudFoundationMigration.
+// +kubebuilder:validation:XValidation:rule="!has(self.failureDomainMappings) || self.failureDomainMappings.all(m, m.destination in self.failureDomains.map(fd, fd.name))",message="every failureDomainMappings.destination must match a failureDomains[].name"
 type VmwareCloudFoundationMigrationSpec struct {
 	// state controls the workflow: Pending, Running, Paused.
 	// The migration workflow only executes when state is Running.
@@ -132,12 +154,26 @@ type VmwareCloudFoundationMigrationSpec struct {
 	// element type intentionally tracks config.openshift.io/v1 VSpherePlatformFailureDomainSpec
 	// (including Name, Region, Zone, Server, and Topology) to align with OpenShift API
 	// failure domain semantics; the schema is re-inlined on "make manifests" after
-	// dependency bumps.
+	// dependency bumps.  At most 64 failure domains are allowed.
 	// +required
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=64
 	// +kubebuilder:validation:XValidation:rule="self.all(fd, has(fd.topology.template) && fd.topology.template != '')",message="topology.template is required for every failure domain"
 	// +listType=atomic
 	FailureDomains []configv1.VSpherePlatformFailureDomainSpec `json:"failureDomains"`
+
+	// failureDomainMappings maps source failure domains to destination failure domains by name.
+	// When omitted, exactly one source failure domain and one destination failure domain must exist, and they are mapped to each other implicitly.
+	// When used, must contain between 1 and 64 items.
+	// Each source and each destination must be unique; duplicate sources are also
+	// rejected by the list's map semantics.
+	// +optional
+	// +listType=map
+	// +listMapKey=source
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:XValidation:rule="self.all(m, self.exists_one(n, n.destination == m.destination))",message="destination must be unique across mappings"
+	FailureDomainMappings []FailureDomainMapping `json:"failureDomainMappings,omitempty"`
 }
 
 // VmwareCloudFoundationMigrationStatus defines the observed state of VmwareCloudFoundationMigration.
@@ -163,6 +199,27 @@ type VmwareCloudFoundationMigrationStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// failureDomainMappings is the effective source-to-destination failure domain
+	// mapping resolved at preflight. When spec.failureDomainMappings is omitted it
+	// holds the single inferred pair. The controller treats this field as
+	// write-once: after preflight resolves the mappings it does not rewrite them.
+	// +optional
+	// +listType=atomic
+	FailureDomainMappings []FailureDomainMapping `json:"failureDomainMappings,omitempty"`
+
+	// workerMachineSetNames records the destination worker MachineSet names
+	// generated for the recorded mappings. Persisted before source cleanup so
+	// retries that re-enter workload migration after the source MachineSets
+	// were deleted still require these MachineSets to exist and be ready;
+	// mappings whose source failure domain had no MachineSets contribute no
+	// names and intentionally stay empty.
+	//
+	// Maximum items: 256.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=256
+	WorkerMachineSetNames []string `json:"workerMachineSetNames,omitempty"`
 
 	// sourceVCenter records the vCenter server removed during source cleanup.
 	// It is captured before any cleanup side effects so retries stay bound to
@@ -232,6 +289,11 @@ const (
 	ReasonProgressing = "Progressing"
 	ReasonCompleted   = "Completed"
 	ReasonFailed      = "Failed"
+	// ReasonMappingRejected indicates spec.failureDomainMappings was changed
+	// after preflight recorded the effective mapping. It is distinct from
+	// ReasonFailed so condition handling does not have to guess which entries a
+	// generic failure left behind.
+	ReasonMappingRejected = "MappingRejected"
 	// ReasonPaused indicates migration has been paused because spec.state is set to Paused.
 	ReasonPaused = "Paused"
 
@@ -263,6 +325,7 @@ const (
 
 // VmwareCloudFoundationMigration is the Schema for the vmwarecloudfoundationmigrations API.
 // It orchestrates migration of an OpenShift cluster from one vCenter to another.
+// +kubebuilder:validation:XValidation:rule="has(self.spec.failureDomainMappings) || size(self.spec.failureDomains) == 1 || (has(self.status) && has(self.status.failureDomainMappings) && size(self.status.failureDomainMappings) > 0)",message="failureDomainMappings is required when more than one failureDomain is defined until effective mappings are recorded"
 type VmwareCloudFoundationMigration struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
