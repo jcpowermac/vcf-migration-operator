@@ -39,6 +39,12 @@ spec:
 
 ## Multiple Target Failure Domains
 
+With more than one source or destination failure domain,
+`failureDomainMappings` is required and must cover every source and
+destination failure domain exactly once, and each destination failure domain must be
+hosted on a vCenter other than the source. Source names come from the cluster's
+`Infrastructure` resource.
+
 ```yaml
 apiVersion: migration.openshift.io/v1alpha1
 kind: VmwareCloudFoundationMigration
@@ -77,6 +83,11 @@ spec:
         resourcePool: /TargetDC/host/TargetCluster2/Resources
         template: /TargetDC/vm/rhcos-template-2
         folder: /TargetDC/vm/my-cluster-infra-id
+  failureDomainMappings:
+    - source: source-fd-1
+      destination: target-fd-1
+    - source: source-fd-2
+      destination: target-fd-2
 ```
 
 Multiple failure domains can share the same `region` while using different `zone` values. Region/zone are mirrored as OpenShift topology tags on the destination vCenter.
