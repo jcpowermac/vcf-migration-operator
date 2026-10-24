@@ -13,6 +13,7 @@
 | `state` | `MigrationState` | No | `Pending` | `Pending`, `Running`, or `Paused`. Reconciler only acts when `Running`. |
 | `targetVCenterCredentialsSecret` | `SecretReference` | Yes | | Secret with target vCenter credentials. |
 | `failureDomains` | `[]VSpherePlatformFailureDomainSpec` | Yes (min 1) | | Target failure domains. Uses the OpenShift `configv1` type. |
+| `failureDomainMappings` | `[]FailureDomainMapping` | No | | Maps source failure domain names (from `Infrastructure`) to destination `failureDomains` entries. Required unless exactly one source and one destination failure domain exist; must cover every failure domain exactly once. |
 
 ### MigrationState Enum
 
@@ -30,6 +31,45 @@
 | `namespace` | `string` | No | Secret namespace (defaults to migration namespace) |
 
 The secret must contain keys in the format `<vcenter-fqdn>.username` and `<vcenter-fqdn>.password`.
+
+### FailureDomainMapping
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `source` | `string` | Yes | Source failure domain name, from the cluster's `Infrastructure` resource |
+| `destination` | `string` | Yes | Destination failure domain name, matching an entry in `spec.failureDomains` |
+
+### Failure Domain Mapping Behavior
+
+The effective mapping is resolved once at preflight and recorded in
+`status.failureDomainMappings`; every later phase uses the recorded value. After
+preflight, `spec.failureDomainMappings` is only checked for equivalence with the recorded
+mapping: reordering the same source→destination pairs is accepted (the comparison ignores
+order), and clearing the field is tolerated (the recorded mapping keeps driving every
+later phase, and an empty recorded list short-circuits the check too). Changing an
+association, or adding or removing mappings, no longer matches the recorded mapping and is
+rejected with `Accepted=False` and reason `MappingRejected`, and no phase work runs until
+the spec matches the recorded mapping again. A migration created before the field existed
+(in-flight operator upgrade) recovers the mapping preflight would have recorded, so
+preflight does not need to re-run.
+
+A mapped source failure domain with no source MachineSets is valid and stays empty: no
+destination MachineSets are created for it. A mapped failure domain that does carry
+capacity but has no verified replacement fails closed before any source MachineSet is
+scaled down. Source MachineSets are matched to a failure domain by datacenter and
+resource pool, where an empty `topology.resourcePool` means the compute cluster's
+`<computeCluster>/Resources` pool, not any pool in the datacenter.
+
+Destination failure domains must not use the source vCenter server. The rollout resolves
+the source server from the recorded mapping (never from `Infrastructure.vCenters[0]`) and
+refuses to create, scale down, or delete MachineSets on a server configured as a
+destination. A generated worker MachineSet name is
+`<infrastructureID>-worker-<sanitized destination failure domain name>`, capped at 59
+characters (the 63-character Kubernetes label limit less a 4-character reserve for the
+`-2`, `-3`, … suffixed copies), so whether the cap is reached depends on the
+infrastructure ID length as well as the destination failure domain name. Because the
+capped name is derived from the destination failure domain, renaming a destination
+failure domain across an operator upgrade can change the generated names.
 
 ## Singleton Enforcement
 
@@ -95,6 +135,8 @@ stops new probe VM cleanup requests; any remaining probes must be handled during
 | Field | Type | Description |
 |-------|------|-------------|
 | `conditions` | `[]metav1.Condition` | Ordered migration phase conditions |
+| `failureDomainMappings` | `[]FailureDomainMapping` | Effective source-to-destination failure domain mapping, recorded once at preflight and immutable afterwards; it drives every later phase |
+| `workerMachineSetNames` | `[]string` | Append-only inventory of destination worker MachineSet names (max 256), used to require the replacements after the source MachineSets are deleted |
 | `startTime` | `*metav1.Time` | When migration entered `Running` |
 | `completionTime` | `*metav1.Time` | When migration reached `Ready` |
 
@@ -112,7 +154,7 @@ stops new probe VM cleanup requests; any remaining probes must be handled during
 
 ### Condition Reasons
 
-`Progressing`, `Completed`, `Failed`, `Paused`, `UnsupportedName`, `UnsupportedNamespace`, `DeletionBlocked`
+`Progressing`, `Completed`, `Failed`, `Paused`, `UnsupportedName`, `UnsupportedNamespace`, `DeletionBlocked`, `MappingRejected`
 
 `Paused` is applied to the `Ready` condition while `spec.state` is `Paused` (message explains how to resume); it is cleared and replaced with `Progressing` when the migration is resumed.
 
