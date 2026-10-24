@@ -67,6 +67,28 @@ func (m *InfrastructureManager) GetSourceFailureDomain(ctx context.Context) (*co
 	return &infra.Spec.PlatformSpec.VSphere.FailureDomains[0], nil
 }
 
+// GetVCenterByServer returns the VCenters entry whose server matches the
+// argument. Unlike GetSourceVCenter's VCenters[0], this lookup remains valid
+// after the destination vCenter has been appended to the Infrastructure.
+func (m *InfrastructureManager) GetVCenterByServer(ctx context.Context, server string) (*configv1.VSpherePlatformVCenterSpec, error) {
+	infra, err := m.Get(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if infra.Spec.PlatformSpec.VSphere == nil {
+		return nil, fmt.Errorf("no vCenters configured in infrastructure spec")
+	}
+
+	for i := range infra.Spec.PlatformSpec.VSphere.VCenters {
+		vc := &infra.Spec.PlatformSpec.VSphere.VCenters[i]
+		if vc.Server == server {
+			return vc, nil
+		}
+	}
+	return nil, fmt.Errorf("no vCenter entry for server %q in infrastructure spec", server)
+}
+
 // AddTargetVCenter adds target vCenter entries and failure domains to the Infrastructure
 // resource. VCenter entries are derived from the failure domains and are only added if
 // not already present. The updated Infrastructure is persisted and returned.

@@ -29,6 +29,17 @@ import (
 const (
 	// MachineAPINamespace is the namespace used by the Machine API components.
 	MachineAPINamespace = "openshift-machine-api"
+	// SourceMachineSetAnnotation records the source MachineSet identity on a
+	// generated destination MachineSet so later reconciles can verify the copy
+	// still maps to the same source.
+	SourceMachineSetAnnotation = "migration.openshift.io/source-machineset"
+	// LegacyAggregateAnnotation records that this replacement is the released
+	// operator's per-failure-domain aggregate, so layout classification survives
+	// the source MachineSet scale-down that follows.
+	LegacyAggregateAnnotation = "migration.openshift.io/legacy-aggregate"
+	// LegacyAggregateAnnotationValue is the LegacyAggregateAnnotation value that
+	// marks a replacement as the released operator's aggregate.
+	LegacyAggregateAnnotationValue = "true"
 	// machineSetLabelKey is the Machine API label binding a Machine (or MachineSet
 	// template) to its owning MachineSet.
 	machineSetLabelKey = "machine.openshift.io/cluster-api-machineset"
@@ -40,6 +51,11 @@ const (
 	// control plane and will not proceed without intervention.
 	cpmsConditionDegraded = "Degraded"
 	cpmsConditionError    = "Error"
+	// cpmsReasonUnmanagedNodes is the Degraded reason set when a control plane
+	// node has no associated machine. It is transient during a rollout: a newly
+	// registered node is linked to its machine by the machine controller a few
+	// seconds later, and the CPMS clears the condition by itself.
+	cpmsReasonUnmanagedNodes = "UnmanagedNodes"
 )
 
 // MachineManager manages Machine API resources including MachineSets and
@@ -80,6 +96,14 @@ func (m *MachineManager) CreateWorkerMachineSet(ctx context.Context, name string
 	newMS.CreationTimestamp = metav1.Time{}
 	newMS.Status = machinev1beta1.MachineSetStatus{}
 	newMS.Spec.Replicas = &replicas
+	// Record the source identity so a later reconcile can tell that a generated
+	// name still stands for the same source MachineSet. The template's own
+	// annotations are copied, so overwrite any stale value.
+	if newMS.Annotations == nil {
+		newMS.Annotations = make(map[string]string)
+	}
+	newMS.Annotations[SourceMachineSetAnnotation] = template.Name
+	delete(newMS.Annotations, LegacyAggregateAnnotation)
 
 	// Update labels and selectors. Use the MachineSet name as the cluster-api-machineset
 	// label value so listing Machines by this label (in CheckMachinesReady, etc.) finds them.
@@ -119,6 +143,19 @@ func (m *MachineManager) GetMachineSet(ctx context.Context, name string) (*machi
 	return ms, nil
 }
 
+// ListMachineSets returns all MachineSets in the openshift-machine-api namespace.
+func (m *MachineManager) ListMachineSets(ctx context.Context) ([]*machinev1beta1.MachineSet, error) {
+	msList, err := m.machineClient.MachineV1beta1().MachineSets(MachineAPINamespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("listing machinesets: %w", err)
+	}
+	result := make([]*machinev1beta1.MachineSet, 0, len(msList.Items))
+	for i := range msList.Items {
+		result = append(result, &msList.Items[i])
+	}
+	return result, nil
+}
+
 // GetMachineSetsByVCenter returns all MachineSets whose provider spec references
 // the given vCenter server. An empty vcenterServer is rejected so callers cannot
 // accidentally match every MachineSet (for example before scaling source workers).
@@ -139,7 +176,7 @@ func (m *MachineManager) GetMachineSetsByVCenter(ctx context.Context, vcenterSer
 	for i := range msList.Items {
 		ms := &msList.Items[i]
 
-		providerSpec, err := extractVSphereProviderSpec(ms)
+		providerSpec, err := ExtractVSphereProviderSpec(ms)
 		if err != nil {
 			log.V(3).Info("skipping machineset, cannot extract provider spec", "name", ms.Name, "err", err)
 			continue
@@ -150,6 +187,60 @@ func (m *MachineManager) GetMachineSetsByVCenter(ctx context.Context, vcenterSer
 		}
 	}
 
+	return result, nil
+}
+
+// EffectiveResourcePool returns the resource pool a vSphere failure domain
+// resolves to. An empty topology.resourcePool means the compute cluster's root
+// pool, which inventory names "<computeCluster>/Resources"; it is not a wildcard
+// over the datacenter. It returns "" when neither field is set, so the failure
+// domain's pool cannot be determined.
+func EffectiveResourcePool(fd configv1.VSpherePlatformFailureDomainSpec) string {
+	if fd.Topology.ResourcePool != "" {
+		return fd.Topology.ResourcePool
+	}
+	if fd.Topology.ComputeCluster != "" {
+		// path.Join normalizes trailing/repeated slashes so a compute cluster
+		// written as /DC/host/C/ still yields /DC/host/C/Resources.
+		return path.Join(fd.Topology.ComputeCluster, "Resources")
+	}
+	return ""
+}
+
+// GetMachineSetsByFailureDomain returns all MachineSets on the given vCenter
+// server whose provider spec workspace matches the failure domain's datacenter
+// and resource pool. Machine and MachineSet specs carry no FailureDomain field,
+// so the provider spec workspace is the only linkage to a failure domain. The
+// failure domain's pool is resolved with EffectiveResourcePool; only a failure
+// domain with no determinable pool matches every pool in that datacenter.
+func (m *MachineManager) GetMachineSetsByFailureDomain(ctx context.Context, vcenterServer string, fd *configv1.VSpherePlatformFailureDomainSpec) ([]*machinev1beta1.MachineSet, error) {
+	if fd == nil {
+		return nil, fmt.Errorf("failure domain must not be nil")
+	}
+
+	log := klog.FromContext(ctx)
+	byServer, err := m.GetMachineSetsByVCenter(ctx, vcenterServer)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]*machinev1beta1.MachineSet, 0, len(byServer))
+	for _, ms := range byServer {
+		providerSpec, err := ExtractVSphereProviderSpec(ms)
+		if err != nil {
+			log.V(3).Info("skipping machineset, cannot extract provider spec", "name", ms.Name, "err", err)
+			continue
+		}
+		if providerSpec.Workspace == nil || providerSpec.Workspace.Datacenter != fd.Topology.Datacenter {
+			continue
+		}
+		if pool := EffectiveResourcePool(*fd); pool != "" && providerSpec.Workspace.ResourcePool != pool {
+			continue
+		}
+		result = append(result, ms)
+	}
+
+	log.V(2).Info("matched machinesets for failure domain", "failureDomain", fd.Name, "vcenterServer", vcenterServer, "machinesets", len(result))
 	return result, nil
 }
 
@@ -172,6 +263,36 @@ func (m *MachineManager) ScaleMachineSet(ctx context.Context, name string, repli
 	}
 
 	log.V(2).Info("scaled machineset", "name", name, "replicas", replicas)
+	return nil
+}
+
+// AnnotateMachineSetLegacyAggregate records on the named destination MachineSet
+// that it is the released operator's per-failure-domain aggregate. Detection by
+// replica arithmetic stops matching once the source MachineSets are scaled to 0,
+// so the provenance has to be durable rather than re-derived on every reconcile.
+// An already annotated MachineSet is left untouched.
+func (m *MachineManager) AnnotateMachineSetLegacyAggregate(ctx context.Context, name string) error {
+	log := klog.FromContext(ctx)
+
+	ms, err := m.GetMachineSet(ctx, name)
+	if err != nil {
+		return err
+	}
+	if ms.Annotations[LegacyAggregateAnnotation] == LegacyAggregateAnnotationValue {
+		return nil
+	}
+	if ms.Annotations == nil {
+		ms.Annotations = make(map[string]string)
+	}
+	ms.Annotations[LegacyAggregateAnnotation] = LegacyAggregateAnnotationValue
+	if err := execution.Check(ctx); err != nil {
+		return err
+	}
+	if _, err := m.machineClient.MachineV1beta1().MachineSets(MachineAPINamespace).Update(ctx, ms, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("annotating machineset %q as legacy aggregate: %w", name, err)
+	}
+
+	log.V(1).Info("annotated legacy aggregate machineset", "name", name)
 	return nil
 }
 
@@ -300,40 +421,76 @@ func (m *MachineManager) UpdateCPMSFailureDomain(ctx context.Context, failureDom
 	return nil
 }
 
+// ControlPlaneRolloutStatus reports the ControlPlaneMachineSet rollout state.
+type ControlPlaneRolloutStatus struct {
+	// Complete is true when the rollout has finished and no CPMS condition holds
+	// it back.
+	Complete bool
+	// Replicas, UpdatedReplicas and ReadyReplicas are the CPMS status counts.
+	Replicas        int32
+	UpdatedReplicas int32
+	ReadyReplicas   int32
+	// HoldReason and HoldMessage describe the CPMS condition that keeps the
+	// rollout incomplete, and are empty when no condition holds it. They explain
+	// why the counts may already look complete while scale-down must still wait.
+	HoldReason  string
+	HoldMessage string
+}
+
 // CheckControlPlaneRolloutStatus checks the rollout status of the ControlPlaneMachineSet.
-// It returns whether the rollout is complete and the replica counts.
+// It returns whether the rollout is complete, the replica counts, and the CPMS
+// condition holding the rollout when one applies.
 // It returns an error when the ControlPlaneMachineSet reports a Degraded or
 // Error condition, which means the rollout is stuck and will not proceed
-// without intervention.
-func (m *MachineManager) CheckControlPlaneRolloutStatus(ctx context.Context) (complete bool, replicas, updatedReplicas, readyReplicas int32, err error) {
+// without intervention. The transient Degraded reason UnmanagedNodes returns
+// incomplete with the hold reason instead of an error: a control plane node
+// without its machine must still hold back scale-down even when the counts look
+// complete.
+func (m *MachineManager) CheckControlPlaneRolloutStatus(ctx context.Context) (ControlPlaneRolloutStatus, error) {
 	log := klog.FromContext(ctx)
 
 	cpms, err := m.GetControlPlaneMachineSet(ctx)
 	if err != nil {
-		return false, 0, 0, 0, err
+		return ControlPlaneRolloutStatus{}, err
 	}
 
-	replicas = cpms.Status.Replicas
-	updatedReplicas = cpms.Status.UpdatedReplicas
-	readyReplicas = cpms.Status.ReadyReplicas
+	status := ControlPlaneRolloutStatus{
+		Replicas:        cpms.Status.Replicas,
+		UpdatedReplicas: cpms.Status.UpdatedReplicas,
+		ReadyReplicas:   cpms.Status.ReadyReplicas,
+	}
 
 	// The CPMS operator sets Degraded (e.g. FailedReplacement,
 	// MachinesAlreadyOwned) or Error (ContinuousErrors) when it has stopped
 	// rolling the control plane. Waiting further would never complete the
 	// rollout, so fail the migration instead of requeueing forever.
+	holdRollout := false
 	for _, condType := range []string{cpmsConditionDegraded, cpmsConditionError} {
 		cond := meta.FindStatusCondition(cpms.Status.Conditions, condType)
 		if cond == nil || cond.Status != metav1.ConditionTrue {
 			continue
 		}
-		return false, replicas, updatedReplicas, readyReplicas,
+		// Waiting is correct for UnmanagedNodes: a control plane node that just
+		// registered has no machine association yet, so failing here would turn
+		// a seconds-wide race into a dead migration.
+		if cond.Reason == cpmsReasonUnmanagedNodes {
+			log.V(1).Info("CPMS reports unmanaged control plane nodes, waiting for machine association", "message", cond.Message)
+			holdRollout = true
+			status.HoldReason = cond.Reason
+			status.HoldMessage = cond.Message
+			continue
+		}
+		return status,
 			fmt.Errorf("waiting for control plane rollout: CPMS condition %s=%s (%s): %s", cond.Type, cond.Status, cond.Reason, cond.Message)
 	}
 
-	complete = replicas > 0 && updatedReplicas == replicas && readyReplicas == replicas
-	log.V(2).Info("CPMS rollout status", "complete", complete, "replicas", replicas, "updatedReplicas", updatedReplicas, "readyReplicas", readyReplicas)
+	// Equal counts are not proof of a finished rollout while a control plane
+	// node has no machine: the caller would scale down the source MachineSets
+	// and delete the machines that node still needs.
+	status.Complete = !holdRollout && status.Replicas > 0 && status.UpdatedReplicas == status.Replicas && status.ReadyReplicas == status.Replicas
+	log.V(2).Info("CPMS rollout status", "complete", status.Complete, "replicas", status.Replicas, "updatedReplicas", status.UpdatedReplicas, "readyReplicas", status.ReadyReplicas)
 
-	return complete, replicas, updatedReplicas, readyReplicas, nil
+	return status, nil
 }
 
 // IsCPMSUpdatedForFailureDomains reports whether the ControlPlaneMachineSet's spec
@@ -643,8 +800,8 @@ func updateMachineSetProviderSpec(ctx context.Context, ms *machinev1beta1.Machin
 	return nil
 }
 
-// extractVSphereProviderSpec extracts the VSphereMachineProviderSpec from a MachineSet.
-func extractVSphereProviderSpec(ms *machinev1beta1.MachineSet) (*machinev1beta1.VSphereMachineProviderSpec, error) {
+// ExtractVSphereProviderSpec extracts the VSphereMachineProviderSpec from a MachineSet.
+func ExtractVSphereProviderSpec(ms *machinev1beta1.MachineSet) (*machinev1beta1.VSphereMachineProviderSpec, error) {
 	if ms == nil {
 		return nil, fmt.Errorf("machineset must not be nil")
 	}
