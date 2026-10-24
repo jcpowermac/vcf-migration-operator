@@ -35,11 +35,21 @@ func TestExecutionStopsAfterDeletionDuringPreparation(t *testing.T) {
 			ctx := context.Background()
 			m := newSingletonSpecResource(migrationv1alpha1.SingletonNamespace, migrationv1alpha1.MigrationStateRunning)
 			m.Finalizers = []string{migrationv1alpha1.FinalizerName}
+			// The scale-down coverage gate requires the preflight mapping and
+			// recorded worker MachineSets on any migration reaching Step 6.
+			m.Status.FailureDomainMappings = []migrationv1alpha1.FailureDomainMapping{
+				{Source: "source-fd-1", Destination: "target-fd-1"},
+			}
+			m.Status.WorkerMachineSetNames = []string{workerMachineSetName("test-infra", "target-fd-1")}
 			c := retentionTestClient(t, m)
 			staleCache := retentionTestClient(t, m.DeepCopy())
 			second := newSourceMachineSetForRollout(2)
-			second.Name = "source-worker-b"
-			machines := machinefake.NewClientset(newCPMSForRollout(true, true), newSourceMachineSetForRollout(2), second)
+			second.Name = sourceMSB
+			// Name recovery before scale-down requires every derived destination
+			// MachineSet to exist, which the real flow guarantees via Step 1.
+			destBase2 := newTargetMachineSetForRollout(workerMachineSetName("test-infra", "target-fd-1")+"-2", "vcenter-target.example.com", 2)
+			destBase := newTargetMachineSetForRollout(m.Status.WorkerMachineSetNames[0], "vcenter-target.example.com", 2)
+			machines := machinefake.NewClientset(newCPMSForRollout(true, true), newSourceMachineSetForRollout(2), second, destBase, destBase2)
 			r := &VmwareCloudFoundationMigrationReconciler{Client: staleCache, APIReader: c, KubeClient: fakekube.NewClientset(), ConfigClient: configfake.NewClientset(newInfrastructureForRollout()), MachineClient: machines, Recorder: events.NewFakeRecorder(20)}
 			blocked, resume := make(chan struct{}), make(chan struct{})
 			updates := 0

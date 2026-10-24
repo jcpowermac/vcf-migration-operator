@@ -161,7 +161,14 @@ func TestDeniedExecutionBlocksHandlerMutations(t *testing.T) {
 			setup: func(t *testing.T) (*VmwareCloudFoundationMigrationReconciler, *migrationv1alpha1.VmwareCloudFoundationMigration, *[]k8stesting.Action, *int, func(*testing.T)) {
 				m := newSingletonSpecResource(migrationv1alpha1.SingletonNamespace, migrationv1alpha1.MigrationStateRunning)
 				m.Finalizers = []string{migrationv1alpha1.FinalizerName}
-				machines := machinefake.NewClientset(newCPMSForRollout(true, true), newSourceMachineSetForRollout(2))
+				// The scale-down coverage gate requires the preflight mapping and
+				// recorded worker MachineSets on any migration reaching Step 6.
+				m.Status.FailureDomainMappings = []migrationv1alpha1.FailureDomainMapping{
+					{Source: "source-fd-1", Destination: "target-fd-1"},
+				}
+				m.Status.WorkerMachineSetNames = []string{workerMachineSetName("test-infra", "target-fd-1")}
+				destination := newTargetMachineSetForRollout(m.Status.WorkerMachineSetNames[0], "vcenter-target.example.com", 2)
+				machines := machinefake.NewClientset(newCPMSForRollout(true, true), newSourceMachineSetForRollout(2), destination)
 				kubeClient := fakekube.NewClientset()
 				counting, crWrites := crWriteCountingClient(retentionTestClient(t, m))
 				r := &VmwareCloudFoundationMigrationReconciler{

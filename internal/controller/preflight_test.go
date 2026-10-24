@@ -10,7 +10,9 @@ import (
 	"testing"
 
 	configv1 "github.com/openshift/api/config/v1"
+	machinev1beta1 "github.com/openshift/api/machine/v1beta1"
 	configfake "github.com/openshift/client-go/config/clientset/versioned/fake"
+	machinefake "github.com/openshift/client-go/machine/clientset/versioned/fake"
 	"github.com/vmware/govmomi"
 	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/simulator"
@@ -478,6 +480,7 @@ func TestRunPreflightChecks(t *testing.T) {
 		dynamicObjects            []runtime.Object
 		omitDefaultStorageOps     bool
 		extraConfigObjects        []runtime.Object
+		machineObjects            []runtime.Object
 		mutateInfrastructure      func(*configv1.Infrastructure)
 		mutateMigration           func(*migrationv1alpha1.VmwareCloudFoundationMigration)
 		wantMessageContains       string
@@ -671,6 +674,81 @@ func TestRunPreflightChecks(t *testing.T) {
 			wantErrContains:           `spec.failureDomains[1].topology.template is required (failure domain "fd-b")`,
 			wantTargetSecretReadCount: 0,
 		},
+		{
+			name:        "rejects destination failure domains spanning two vCenter servers",
+			version:     "5.0.0",
+			gateEnabled: true,
+			mutateMigration: func(m *migrationv1alpha1.VmwareCloudFoundationMigration) {
+				m.Spec.FailureDomains[1].Server = "second-target.example.com"
+			},
+			wantErrContains:           "must use a single vCenter server",
+			wantTargetSecretReadCount: 0,
+		},
+		{
+			name:        "rejects more than one source vCenter",
+			version:     "5.0.0",
+			gateEnabled: true,
+			mutateInfrastructure: func(infra *configv1.Infrastructure) {
+				infra.Spec.PlatformSpec.VSphere.VCenters = append(infra.Spec.PlatformSpec.VSphere.VCenters, configv1.VSpherePlatformVCenterSpec{Server: "second-source.example.com"})
+			},
+			wantErrContains:           "source infrastructure must have exactly one vCenter, found 2",
+			wantTargetSecretReadCount: 1,
+		},
+		{
+			name:        "rejects overlapping source failure domain topology",
+			version:     "5.0.0",
+			gateEnabled: true,
+			mutateInfrastructure: func(infra *configv1.Infrastructure) {
+				fds := infra.Spec.PlatformSpec.VSphere.FailureDomains
+				fds[1].Topology.ResourcePool = fds[0].Topology.ResourcePool
+			},
+			wantErrContains:           "overlapping topology in datacenter",
+			wantTargetSecretReadCount: 1,
+		},
+		{
+			name:        "rejects omitted mappings when source and destination are not one-to-one",
+			version:     "5.0.0",
+			gateEnabled: true,
+			mutateMigration: func(m *migrationv1alpha1.VmwareCloudFoundationMigration) {
+				m.Spec.FailureDomainMappings = nil
+			},
+			wantErrContains:           "provide mappings",
+			wantTargetSecretReadCount: 1,
+		},
+		{
+			name:        "rejects unknown source failure domain in mappings",
+			version:     "5.0.0",
+			gateEnabled: true,
+			mutateMigration: func(m *migrationv1alpha1.VmwareCloudFoundationMigration) {
+				m.Spec.FailureDomainMappings[0].Source = "nope"
+			},
+			wantErrContains:           `unknown source failure domain "nope"`,
+			wantTargetSecretReadCount: 1,
+		},
+		{
+			name:        "fails preflight when a destination MachineSet name collides with an existing MachineSet",
+			version:     "5.0.0",
+			gateEnabled: true,
+			machineObjects: []runtime.Object{
+				&machinev1beta1.MachineSet{ObjectMeta: metav1.ObjectMeta{Namespace: openshift.MachineAPINamespace, Name: workerMachineSetName("test-infra", "fd-a")}},
+			},
+			wantErrContains:           "collides with existing MachineSet; rename the destination failure domain",
+			wantTargetSecretReadCount: 1,
+		},
+		{
+			name:        "passes preflight after the destination failure domain is renamed",
+			version:     "5.0.0",
+			gateEnabled: true,
+			machineObjects: []runtime.Object{
+				&machinev1beta1.MachineSet{ObjectMeta: metav1.ObjectMeta{Namespace: openshift.MachineAPINamespace, Name: workerMachineSetName("test-infra", "fd-a")}},
+			},
+			mutateMigration: func(m *migrationv1alpha1.VmwareCloudFoundationMigration) {
+				m.Spec.FailureDomains[0].Name = "fd-renamed"
+				m.Spec.FailureDomainMappings[0].Destination = "fd-renamed"
+			},
+			wantMessageContains:       "Preflight validation passed",
+			wantTargetSecretReadCount: 2,
+		},
 	}
 
 	for _, tt := range tests {
@@ -727,6 +805,7 @@ func TestRunPreflightChecks(t *testing.T) {
 				KubeClient:    kubeClient,
 				ConfigClient:  configClient,
 				DynamicClient: dynamicClient,
+				MachineClient: machinefake.NewSimpleClientset(tt.machineObjects...),
 				checkNetworkingViaProbeVMsFunc: func(context.Context, *migrationv1alpha1.VmwareCloudFoundationMigration, *configv1.VSpherePlatformVCenterSpec) error {
 					return nil
 				},
@@ -1014,6 +1093,10 @@ func newMigrationForPreflight(server string, inventory preflightTestInventory) *
 				Name:      "target-vcenter-creds",
 				Namespace: "default",
 			},
+			FailureDomainMappings: []migrationv1alpha1.FailureDomainMapping{
+				{Source: "source-fd-a", Destination: "fd-a"},
+				{Source: "source-fd-b", Destination: "fd-b"},
+			},
 			FailureDomains: []configv1.VSpherePlatformFailureDomainSpec{
 				{
 					Name:   "fd-a",
@@ -1075,9 +1158,28 @@ func newInfrastructureForPreflight(server, datacenter string) *configv1.Infrastr
 							Datacenters: []string{datacenter},
 						},
 					},
+					FailureDomains: []configv1.VSpherePlatformFailureDomainSpec{
+						{
+							Name:   "source-fd-a",
+							Server: server,
+							Topology: configv1.VSpherePlatformTopology{
+								Datacenter:   datacenter,
+								ResourcePool: "/" + datacenter + "/host/cluster-a/Resources/pool-a",
+							},
+						},
+						{
+							Name:   "source-fd-b",
+							Server: server,
+							Topology: configv1.VSpherePlatformTopology{
+								Datacenter:   datacenter,
+								ResourcePool: "/" + datacenter + "/host/cluster-b/Resources/pool-b",
+							},
+						},
+					},
 				},
 			},
 		},
+		Status: configv1.InfrastructureStatus{InfrastructureName: "test-infra"},
 	}
 }
 
@@ -1172,5 +1274,195 @@ func TestDCVMFolderMissingVMPFolder(t *testing.T) {
 		t.Fatal("dcVMFolder: expected error for datacenter without vmFolder property")
 	} else if !strings.Contains(err.Error(), "has no VM folder") {
 		t.Fatalf("dcVMFolder: unexpected error: %v", err)
+	}
+}
+
+// TestValidatePreflightSourceCoverage covers the preflight source MachineSet
+// coverage gate: worker capacity on the source vCenter that no mapped source
+// failure domain covers must be rejected before the mapping is published and
+// the control plane is retargeted, while zero-replica and empty cases pass.
+func TestValidateMigrationFailureDomainsStatusCardinality(t *testing.T) {
+	ctx := context.Background()
+	sourceFD := newSourceFailureDomainForMapping("source-fd-1", "dc-source", "rp-a")
+	destFD := newTargetFailureDomain("target-fd-1")
+	mappings := []migrationv1alpha1.FailureDomainMapping{{Source: sourceFD.Name, Destination: destFD.Name}}
+
+	tests := []struct {
+		name              string
+		sourceMachineSets int
+		wantErr           string
+	}{
+		{
+			name:              "generated names at the status limit pass",
+			sourceMachineSets: maxDestinationWorkerMachineSets,
+		},
+		{
+			name:              "generated names above the status limit fail",
+			sourceMachineSets: maxDestinationWorkerMachineSets + 1,
+			wantErr:           fmt.Sprintf("failure domain mapping would generate %d destination MachineSets, exceeding the %d supported by status.workerMachineSetNames", maxDestinationWorkerMachineSets+1, maxDestinationWorkerMachineSets),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Preflight resolves the source failure domains from an Infrastructure
+			// that still has a single vCenter.
+			infra := newInfrastructureForMapping(sourceFD)
+			infra.Spec.PlatformSpec.VSphere.VCenters = []configv1.VSpherePlatformVCenterSpec{{Server: sourceFD.Server}}
+			objects := []runtime.Object{infra}
+			for i := 0; i < tt.sourceMachineSets; i++ {
+				objects = append(objects, newSourceMachineSetForMapping(fmt.Sprintf("source-worker-%03d", i), "dc-source", "rp-a", 1, 4))
+			}
+			reconciler := newRolloutReconciler(t, objects)
+			migration := newMappingTestMigration([]configv1.VSpherePlatformFailureDomainSpec{destFD}, mappings)
+
+			_, err := reconciler.validateMigrationFailureDomains(ctx, migration)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateMigrationFailureDomains: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validateMigrationFailureDomains error = %v, want containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestValidateMigrationFailureDomainsStatusCardinalityAcrossMappings covers the
+// aggregate limit: status.workerMachineSetNames holds every destination name of
+// the whole migration, so two mappings that each fit must still be rejected
+// together before any destination MachineSet is created.
+func TestValidateMigrationFailureDomainsStatusCardinalityAcrossMappings(t *testing.T) {
+	ctx := context.Background()
+	sourceFDs := []configv1.VSpherePlatformFailureDomainSpec{
+		newSourceFailureDomainForMapping("source-fd-1", "dc-source-1", "rp-a"),
+		newSourceFailureDomainForMapping("source-fd-2", "dc-source-2", "rp-b"),
+	}
+	destFDs := []configv1.VSpherePlatformFailureDomainSpec{
+		newTargetFailureDomain("target-fd-1"),
+		newTargetFailureDomain("target-fd-2"),
+	}
+	mappings := []migrationv1alpha1.FailureDomainMapping{
+		{Source: "source-fd-1", Destination: "target-fd-1"},
+		{Source: "source-fd-2", Destination: "target-fd-2"},
+	}
+
+	tests := []struct {
+		name    string
+		counts  [2]int
+		wantErr string
+	}{
+		{
+			name:    "generated names summed across mappings above the limit fail",
+			counts:  [2]int{129, 128},
+			wantErr: fmt.Sprintf("failure domain mapping would generate %d destination MachineSets, exceeding the %d supported by status.workerMachineSetNames", 257, maxDestinationWorkerMachineSets),
+		},
+		{
+			name:   "generated names summed across mappings at the limit pass",
+			counts: [2]int{128, 128},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Preflight resolves the source failure domains from an Infrastructure
+			// that still has a single vCenter.
+			infra := newInfrastructureForMapping(sourceFDs...)
+			infra.Spec.PlatformSpec.VSphere.VCenters = []configv1.VSpherePlatformVCenterSpec{{Server: "source.example.com"}}
+			objects := []runtime.Object{infra}
+			for i := 0; i < tt.counts[0]; i++ {
+				objects = append(objects, newSourceMachineSetForMapping(fmt.Sprintf("source-a-%03d", i), "dc-source-1", "rp-a", 1, 4))
+			}
+			for i := 0; i < tt.counts[1]; i++ {
+				objects = append(objects, newSourceMachineSetForMapping(fmt.Sprintf("source-b-%03d", i), "dc-source-2", "rp-b", 1, 4))
+			}
+			reconciler := newRolloutReconciler(t, objects)
+			creates := 0
+			reconciler.MachineClient.(*machinefake.Clientset).PrependReactor("create", "machinesets",
+				func(ktesting.Action) (bool, runtime.Object, error) {
+					creates++
+					return false, nil, nil
+				})
+			migration := newMappingTestMigration(destFDs, nil)
+			migration.Spec.FailureDomainMappings = mappings
+
+			got, err := reconciler.validateMigrationFailureDomains(ctx, migration)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateMigrationFailureDomains: %v", err)
+				}
+				if !reflect.DeepEqual(got, mappings) {
+					t.Fatalf("resolved mappings = %+v, want %+v", got, mappings)
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("validateMigrationFailureDomains error = %v, want containing %q", err, tt.wantErr)
+				}
+				if got != nil {
+					t.Fatalf("mappings published alongside the rejection: %+v", got)
+				}
+			}
+			if creates != 0 {
+				t.Fatalf("destination MachineSet creates = %d, want 0 (the count is checked before creation)", creates)
+			}
+		})
+	}
+}
+
+func TestValidatePreflightSourceCoverage(t *testing.T) {
+	ctx := context.Background()
+	mappings := []migrationv1alpha1.FailureDomainMapping{{Source: "source-fd-1", Destination: "target-fd-1"}}
+
+	tests := []struct {
+		name    string
+		objects []runtime.Object
+		wantErr string
+	}{
+		{
+			name: "mapped source MachineSet passes",
+			objects: []runtime.Object{
+				newInfrastructureForRollout(),
+				newSourceMachineSetForRollout(1),
+			},
+		},
+		{
+			name: "no source MachineSets passes",
+			objects: []runtime.Object{
+				newInfrastructureForRollout(),
+			},
+		},
+		{
+			name: "zero-replica out-of-topology MachineSet passes",
+			objects: []runtime.Object{
+				newInfrastructureForRollout(),
+				newOutOfTopologySourceMachineSetForRollout("source-worker-other", 0),
+			},
+		},
+		{
+			name: "positive-replica out-of-topology MachineSet fails",
+			objects: []runtime.Object{
+				newInfrastructureForRollout(),
+				newOutOfTopologySourceMachineSetForRollout("source-worker-other", 1),
+			},
+			wantErr: "does not match any source failure domain",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newRolloutReconciler(t, tt.objects)
+			err := r.validatePreflightSourceCoverage(ctx, mappings)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validatePreflightSourceCoverage: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("validatePreflightSourceCoverage: nil error, want containing %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validatePreflightSourceCoverage: %v, want containing %q", err, tt.wantErr)
+			}
+		})
 	}
 }

@@ -74,6 +74,54 @@ func TestGetSourceVCenter(t *testing.T) {
 	}
 }
 
+func TestGetVCenterByServer(t *testing.T) {
+	tests := []struct {
+		name       string
+		infra      *configv1.Infrastructure
+		server     string
+		wantServer string
+		wantErr    bool
+	}{
+		{
+			name: "found by server",
+			infra: newTestInfrastructure(
+				[]configv1.VSpherePlatformVCenterSpec{
+					{Server: "source.example.com", Port: 443, Datacenters: []string{"DC0"}},
+					{Server: "target.example.com", Port: 443, Datacenters: []string{"DC1"}},
+				},
+				nil,
+			),
+			server:     "target.example.com",
+			wantServer: "target.example.com",
+		},
+		{
+			name: "server not found",
+			infra: newTestInfrastructure(
+				[]configv1.VSpherePlatformVCenterSpec{
+					{Server: "source.example.com", Port: 443, Datacenters: []string{"DC0"}},
+				},
+				nil,
+			),
+			server:  "missing.example.com",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := configfake.NewClientset(tt.infra)
+			mgr := NewInfrastructureManager(client)
+			vc, err := mgr.GetVCenterByServer(context.Background(), tt.server)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("GetVCenterByServer error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err == nil && vc.Server != tt.wantServer {
+				t.Fatalf("GetVCenterByServer server = %q, want %q", vc.Server, tt.wantServer)
+			}
+		})
+	}
+}
+
 func TestGetSourceFailureDomain(t *testing.T) {
 	tests := []struct {
 		name     string

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -183,13 +185,15 @@ func TestUpdateCPMSFailureDomain(t *testing.T) {
 
 func TestCheckControlPlaneRolloutStatus(t *testing.T) {
 	tests := []struct {
-		name         string
-		replicas     int32
-		updated      int32
-		ready        int32
-		conditions   []metav1.Condition
-		wantComplete bool
-		wantErrSub   string
+		name            string
+		replicas        int32
+		updated         int32
+		ready           int32
+		conditions      []metav1.Condition
+		wantComplete    bool
+		wantHoldReason  string
+		wantHoldMessage string
+		wantErrSub      string
 	}{
 		{
 			name:         "complete when all counts match",
@@ -234,6 +238,40 @@ func TestCheckControlPlaneRolloutStatus(t *testing.T) {
 			wantErrSub:   "FailedReplacement",
 		},
 		{
+			name:     "wait when CPMS reports unmanaged control plane nodes",
+			replicas: 4,
+			updated:  2,
+			ready:    3,
+			conditions: []metav1.Condition{{
+				Type:    "Degraded",
+				Status:  metav1.ConditionTrue,
+				Reason:  "UnmanagedNodes",
+				Message: "Found 1 unmanaged node(s)",
+			}},
+			wantComplete:    false,
+			wantHoldReason:  "UnmanagedNodes",
+			wantHoldMessage: "Found 1 unmanaged node(s)",
+		},
+		{
+			// Regression: UnmanagedNodes must hold the gate even when the counts
+			// look complete, otherwise scale-down deletes the machines a control
+			// plane node still needs. The hold reason and message are what tell the
+			// caller why an apparently complete rollout is still held.
+			name:     "not complete when unmanaged nodes are reported with equal counts",
+			replicas: 3,
+			updated:  3,
+			ready:    3,
+			conditions: []metav1.Condition{{
+				Type:    "Degraded",
+				Status:  metav1.ConditionTrue,
+				Reason:  "UnmanagedNodes",
+				Message: "Found 1 unmanaged node(s)",
+			}},
+			wantComplete:    false,
+			wantHoldReason:  "UnmanagedNodes",
+			wantHoldMessage: "Found 1 unmanaged node(s)",
+		},
+		{
 			name:     "error when CPMS reports continuous errors",
 			replicas: 3,
 			updated:  1,
@@ -272,12 +310,12 @@ func TestCheckControlPlaneRolloutStatus(t *testing.T) {
 			machineClient := fakemachineclient.NewClientset(cpms)
 			mgr := NewMachineManager(fakekube.NewClientset(), machineClient, nil)
 
-			complete, replicas, updated, ready, err := mgr.CheckControlPlaneRolloutStatus(context.Background())
+			got, err := mgr.CheckControlPlaneRolloutStatus(context.Background())
 			if tt.wantErrSub != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
 					t.Fatalf("CheckControlPlaneRolloutStatus error = %v, want containing %q", err, tt.wantErrSub)
 				}
-				if complete {
+				if got.Complete {
 					t.Errorf("complete = true, want false when rollout is stuck")
 				}
 				return
@@ -285,17 +323,23 @@ func TestCheckControlPlaneRolloutStatus(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CheckControlPlaneRolloutStatus: %v", err)
 			}
-			if complete != tt.wantComplete {
-				t.Errorf("complete = %v, want %v", complete, tt.wantComplete)
+			if got.Complete != tt.wantComplete {
+				t.Errorf("complete = %v, want %v", got.Complete, tt.wantComplete)
 			}
-			if replicas != tt.replicas {
-				t.Errorf("replicas = %d, want %d", replicas, tt.replicas)
+			if got.Replicas != tt.replicas {
+				t.Errorf("replicas = %d, want %d", got.Replicas, tt.replicas)
 			}
-			if updated != tt.updated {
-				t.Errorf("updated = %d, want %d", updated, tt.updated)
+			if got.UpdatedReplicas != tt.updated {
+				t.Errorf("updated = %d, want %d", got.UpdatedReplicas, tt.updated)
 			}
-			if ready != tt.ready {
-				t.Errorf("ready = %d, want %d", ready, tt.ready)
+			if got.ReadyReplicas != tt.ready {
+				t.Errorf("ready = %d, want %d", got.ReadyReplicas, tt.ready)
+			}
+			if got.HoldReason != tt.wantHoldReason {
+				t.Errorf("holdReason = %q, want %q", got.HoldReason, tt.wantHoldReason)
+			}
+			if got.HoldMessage != tt.wantHoldMessage {
+				t.Errorf("holdMessage = %q, want %q", got.HoldMessage, tt.wantHoldMessage)
 			}
 		})
 	}
@@ -359,6 +403,83 @@ func newTestMachineSet(name string, replicas int32) *machinev1beta1.MachineSet {
 	}
 }
 
+// TestCreateWorkerMachineSetSourceAnnotation covers the annotation stamped on a
+// generated destination MachineSet: it records which source MachineSet the copy
+// was created from, so a later reconcile can tell that the generated name still
+// stands for the same source.
+func TestCreateWorkerMachineSetSourceAnnotation(t *testing.T) {
+	ctx := context.Background()
+	source := newTestMachineSetForFailureDomain("source-worker-a", "source.example.com", "dc-source", "rp-source", 2)
+	source.Annotations = map[string]string{LegacyAggregateAnnotation: "true", "user-note": "keep"}
+	fd := &configv1.VSpherePlatformFailureDomainSpec{
+		Name:   "target-fd-1",
+		Server: "target.example.com",
+		Topology: configv1.VSpherePlatformTopology{
+			Template:     "/dc-target/vm/target-template",
+			Datacenter:   "dc-target",
+			Datastore:    "ds-target",
+			ResourcePool: "rp-target",
+		},
+	}
+	mgr := NewMachineManager(fakekube.NewClientset(), fakemachineclient.NewClientset(), nil)
+
+	created, err := mgr.CreateWorkerMachineSet(ctx, "test-infra-worker-target-fd-1", 2, fd, source, "test-infra")
+	if err != nil {
+		t.Fatalf("CreateWorkerMachineSet: %v", err)
+	}
+	if got := created.Annotations[SourceMachineSetAnnotation]; got != source.Name {
+		t.Fatalf("created machineset annotation %q = %q, want %q", SourceMachineSetAnnotation, got, source.Name)
+	}
+	if _, ok := created.Annotations[LegacyAggregateAnnotation]; ok {
+		t.Fatal("new per-source copy inherited legacy aggregate provenance")
+	}
+	if created.Annotations["user-note"] != "keep" || source.Annotations[LegacyAggregateAnnotation] != "true" {
+		t.Fatal("unrelated annotation or source mutated")
+	}
+
+	stored, err := mgr.GetMachineSet(ctx, created.Name)
+	if err != nil {
+		t.Fatalf("GetMachineSet(%q): %v", created.Name, err)
+	}
+	if got := stored.Annotations[SourceMachineSetAnnotation]; got != source.Name {
+		t.Fatalf("stored machineset annotation %q = %q, want %q", SourceMachineSetAnnotation, got, source.Name)
+	}
+	if _, ok := source.Annotations[SourceMachineSetAnnotation]; ok {
+		t.Fatal("template MachineSet was mutated, want a deep copy to be annotated")
+	}
+}
+
+// TestAnnotateMachineSetLegacyAggregate covers the durable provenance marker: the
+// released operator's aggregate is detected by replica arithmetic once, then
+// annotated so classification survives the source scale-down that follows.
+func TestAnnotateMachineSetLegacyAggregate(t *testing.T) {
+	ctx := context.Background()
+	aggregate := newTestMachineSetForFailureDomain("test-infra-worker-target-fd-1", "target.example.com", "dc-target", "rp-target", 5)
+	mgr := NewMachineManager(fakekube.NewClientset(), fakemachineclient.NewClientset(aggregate), nil)
+
+	if err := mgr.AnnotateMachineSetLegacyAggregate(ctx, aggregate.Name); err != nil {
+		t.Fatalf("AnnotateMachineSetLegacyAggregate: %v", err)
+	}
+	stored, err := mgr.GetMachineSet(ctx, aggregate.Name)
+	if err != nil {
+		t.Fatalf("GetMachineSet(%q): %v", aggregate.Name, err)
+	}
+	if got := stored.Annotations[LegacyAggregateAnnotation]; got != LegacyAggregateAnnotationValue {
+		t.Fatalf("machineset annotation %q = %q, want %q", LegacyAggregateAnnotation, got, LegacyAggregateAnnotationValue)
+	}
+	if stored.Spec.Replicas == nil || *stored.Spec.Replicas != 5 {
+		t.Fatalf("machineset replicas = %v, want 5 (annotating must not change capacity)", stored.Spec.Replicas)
+	}
+
+	// Idempotent, and the caller's object is left alone.
+	if err := mgr.AnnotateMachineSetLegacyAggregate(ctx, aggregate.Name); err != nil {
+		t.Fatalf("second AnnotateMachineSetLegacyAggregate: %v", err)
+	}
+	if _, ok := aggregate.Annotations[LegacyAggregateAnnotation]; ok {
+		t.Fatal("input MachineSet was mutated, want the annotation written to the stored object only")
+	}
+}
+
 func TestGetMachineSetsByVCenter_emptyServerCausesNoMachineSetUpdates(t *testing.T) {
 	ctx := context.Background()
 	source := newTestMachineSetForVCenter("source-worker", "source.example.com", 3)
@@ -384,6 +505,166 @@ func TestGetMachineSetsByVCenter_emptyServerCausesNoMachineSetUpdates(t *testing
 		if got.Spec.Replicas == nil || *got.Spec.Replicas != 3 {
 			t.Fatalf("machineset %q replicas = %v, want 3 (unchanged)", name, got.Spec.Replicas)
 		}
+	}
+}
+
+func TestListMachineSets(t *testing.T) {
+	ctx := context.Background()
+	msA := newTestMachineSetForVCenter("source-worker", "source.example.com", 3)
+	msB := newTestMachineSetForVCenter("target-worker", "target.example.com", 1)
+	mgr := NewMachineManager(fakekube.NewClientset(), fakemachineclient.NewClientset(msA, msB), nil)
+
+	got, err := mgr.ListMachineSets(ctx)
+	if err != nil {
+		t.Fatalf("ListMachineSets: %v", err)
+	}
+	gotNames := make([]string, 0, len(got))
+	for _, ms := range got {
+		gotNames = append(gotNames, ms.Name)
+	}
+	sort.Strings(gotNames)
+	if !slices.Equal(gotNames, []string{"source-worker", "target-worker"}) {
+		t.Fatalf("ListMachineSets = %v, want [source-worker target-worker]", gotNames)
+	}
+}
+
+func newTestMachineSetForFailureDomain(name, server, datacenter, resourcePool string, replicas int32) *machinev1beta1.MachineSet {
+	ms := newTestMachineSet(name, replicas)
+	raw := []byte(fmt.Sprintf(
+		`{"kind":"VSphereMachineProviderSpec","apiVersion":"machine.openshift.io/v1beta1","workspace":{"server":%q,"datacenter":%q,"resourcePool":%q}}`,
+		server, datacenter, resourcePool,
+	))
+	ms.Spec.Template.Spec.ProviderSpec.Value = &runtime.RawExtension{Raw: raw}
+	return ms
+}
+
+func TestEffectiveResourcePool(t *testing.T) {
+	tests := []struct {
+		name           string
+		resourcePool   string
+		computeCluster string
+		want           string
+	}{
+		{
+			name:           "explicit pool wins",
+			resourcePool:   "/dc/host/cluster/Resources/rp",
+			computeCluster: "/dc/host/cluster",
+			want:           "/dc/host/cluster/Resources/rp",
+		},
+		{
+			name:           "empty pool defaults to the cluster resources pool",
+			computeCluster: "/dc/host/cluster",
+			want:           "/dc/host/cluster/Resources",
+		},
+		{
+			name:           "trailing slash on the compute cluster is normalized",
+			computeCluster: "/dc/host/cluster/",
+			want:           "/dc/host/cluster/Resources",
+		},
+		{
+			name: "no pool and no compute cluster is undeterminable",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fd := configv1.VSpherePlatformFailureDomainSpec{}
+			fd.Topology.ResourcePool = tt.resourcePool
+			fd.Topology.ComputeCluster = tt.computeCluster
+			if got := EffectiveResourcePool(fd); got != tt.want {
+				t.Errorf("EffectiveResourcePool() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetMachineSetsByFailureDomain(t *testing.T) {
+	ctx := context.Background()
+	msA := newTestMachineSetForFailureDomain("source-worker-a", "source.example.com", "dc1", "rp1", 3)
+	msB := newTestMachineSetForFailureDomain("source-worker-b", "source.example.com", "dc1", "rp2", 2)
+	msOtherDC := newTestMachineSetForFailureDomain("source-worker-c", "source.example.com", "dc2", "rp1", 1)
+	msOtherServer := newTestMachineSetForFailureDomain("target-worker", "target.example.com", "dc1", "rp1", 1)
+	// Two compute clusters in dc1, each running the cluster's own default pool,
+	// plus a custom pool inside cluster-a: an empty topology.resourcePool must
+	// resolve to "<computeCluster>/Resources", not match every pool in dc1.
+	msClusterADefaultPool := newTestMachineSetForFailureDomain("source-worker-da", "source.example.com", "dc1", "/dc1/host/cluster-a/Resources", 1)
+	msClusterACustomPool := newTestMachineSetForFailureDomain("source-worker-dap", "source.example.com", "dc1", "/dc1/host/cluster-a/Resources/pool-1", 1)
+	msClusterBDefaultPool := newTestMachineSetForFailureDomain("source-worker-db", "source.example.com", "dc1", "/dc1/host/cluster-b/Resources", 1)
+
+	tests := []struct {
+		name      string
+		fd        *configv1.VSpherePlatformFailureDomainSpec
+		wantNames []string
+	}{
+		{
+			name: "matches datacenter and resource pool",
+			fd: &configv1.VSpherePlatformFailureDomainSpec{
+				Name:     "source-fd-1",
+				Server:   "source.example.com",
+				Topology: configv1.VSpherePlatformTopology{Datacenter: "dc1", ResourcePool: "rp1"},
+			},
+			wantNames: []string{"source-worker-a"},
+		},
+		{
+			name: "explicit resource pool still matches only that pool",
+			fd: &configv1.VSpherePlatformFailureDomainSpec{
+				Name:     "source-fd-1",
+				Server:   "source.example.com",
+				Topology: configv1.VSpherePlatformTopology{Datacenter: "dc1", ResourcePool: "/dc1/host/cluster-a/Resources/pool-1", ComputeCluster: "/dc1/host/cluster-a"},
+			},
+			wantNames: []string{"source-worker-dap"},
+		},
+		{
+			// Control: with no compute cluster the failure domain resolves to no
+			// pool at all, so the datacenter-wide match is unchanged.
+			name: "empty resource pool without a compute cluster matches every pool in the datacenter",
+			fd: &configv1.VSpherePlatformFailureDomainSpec{
+				Name:     "source-fd-1",
+				Server:   "source.example.com",
+				Topology: configv1.VSpherePlatformTopology{Datacenter: "dc1"},
+			},
+			wantNames: []string{"source-worker-a", "source-worker-b", "source-worker-da", "source-worker-dap", "source-worker-db"},
+		},
+		{
+			// An empty topology.resourcePool means the compute cluster's default
+			// pool, so a MachineSet in another cluster's default pool belongs to
+			// another failure domain.
+			name: "empty resource pool with a compute cluster matches only that cluster's default pool",
+			fd: &configv1.VSpherePlatformFailureDomainSpec{
+				Name:     "source-fd-1",
+				Server:   "source.example.com",
+				Topology: configv1.VSpherePlatformTopology{Datacenter: "dc1", ComputeCluster: "/dc1/host/cluster-a"},
+			},
+			wantNames: []string{"source-worker-da"},
+		},
+		{
+			name: "no match returns empty result without error",
+			fd: &configv1.VSpherePlatformFailureDomainSpec{
+				Name:     "source-fd-1",
+				Server:   "source.example.com",
+				Topology: configv1.VSpherePlatformTopology{Datacenter: "dc3", ResourcePool: "rp1"},
+			},
+			wantNames: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			machineClient := fakemachineclient.NewClientset(msA, msB, msOtherDC, msOtherServer, msClusterADefaultPool, msClusterACustomPool, msClusterBDefaultPool)
+			mgr := NewMachineManager(fakekube.NewClientset(), machineClient, nil)
+
+			got, err := mgr.GetMachineSetsByFailureDomain(ctx, tt.fd.Server, tt.fd)
+			if err != nil {
+				t.Fatalf("GetMachineSetsByFailureDomain: %v", err)
+			}
+			var gotNames []string
+			for _, ms := range got {
+				gotNames = append(gotNames, ms.Name)
+			}
+			sort.Strings(gotNames)
+			sort.Strings(tt.wantNames)
+			if !slices.Equal(gotNames, tt.wantNames) {
+				t.Fatalf("GetMachineSetsByFailureDomain(%q) = %v, want %v", tt.fd.Name, gotNames, tt.wantNames)
+			}
+		})
 	}
 }
 
@@ -1068,9 +1349,9 @@ func TestUpdateMachineSetProviderSpecNetworks(t *testing.T) {
 				t.Fatalf("updateMachineSetProviderSpec: %v", err)
 			}
 
-			providerSpec, err := extractVSphereProviderSpec(ms)
+			providerSpec, err := ExtractVSphereProviderSpec(ms)
 			if err != nil {
-				t.Fatalf("extractVSphereProviderSpec: %v", err)
+				t.Fatalf("ExtractVSphereProviderSpec: %v", err)
 			}
 			if len(providerSpec.Network.Devices) != 1 {
 				t.Fatalf("network devices = %d, want 1", len(providerSpec.Network.Devices))
