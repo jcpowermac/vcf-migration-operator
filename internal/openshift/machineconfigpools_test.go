@@ -121,6 +121,31 @@ func TestCheckPoolsConverged(t *testing.T) {
 	}
 }
 
+func TestCheckPoolsConvergedRejectsStaleStatus(t *testing.T) {
+	for _, name := range []string{"unobserved generation", "configuration mismatch"} {
+		t.Run(name, func(t *testing.T) {
+			pool := newTestPool("master", true, false, 3, 3)
+			pool.Generation = 2
+			pool.Status.ObservedGeneration = 2
+			pool.Spec.Configuration.Name = "rendered-master-new"
+			pool.Status.Configuration.Name = "rendered-master-new"
+			if name == "unobserved generation" {
+				pool.Status.ObservedGeneration = 1
+			} else {
+				pool.Status.Configuration.Name = "rendered-master-old"
+			}
+			mgr := NewMachineConfigPoolManager(machineconfigfake.NewClientset(pool))
+			got, summary, err := mgr.CheckPoolsConverged(context.Background())
+			if err != nil {
+				t.Fatalf("CheckPoolsConverged: %v", err)
+			}
+			if got || !stringSliceEqual(summary.NotUpdatedPools, []string{"master"}) {
+				t.Fatalf("CheckPoolsConverged = %v, %+v; want master not updated", got, summary)
+			}
+		})
+	}
+}
+
 func TestCheckPoolsConvergedReturnsListError(t *testing.T) {
 	client := machineconfigfake.NewClientset()
 	client.PrependReactor("list", "machineconfigpools", func(action k8stesting.Action) (bool, runtime.Object, error) {

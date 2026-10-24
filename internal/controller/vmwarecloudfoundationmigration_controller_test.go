@@ -727,6 +727,39 @@ var _ = Describe("updateStatus", func() {
 		Expect(destCond.Reason).To(Equal(migrationv1alpha1.ReasonCompleted))
 	})
 
+	It("persists newly recorded worker MachineSet names across the status update", func() {
+		resource := newStatusTestResource()
+		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+		reconciler := &VmwareCloudFoundationMigrationReconciler{
+			Client: k8sClient,
+			Scheme: k8sClient.Scheme(),
+		}
+
+		migration := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, migration)).To(Succeed())
+		base := *migration.Status.DeepCopy()
+
+		// Names recorded during the rollout reconcile must be persisted
+		// before cleanup can delete the source MachineSets they came from.
+		migration.Status.WorkerMachineSetNames = []string{"test-infra-target-fd-1", "test-infra-target-fd-1-2"}
+		Expect(reconciler.updateStatus(ctx, migration, base)).To(Succeed())
+
+		first := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, first)).To(Succeed())
+		Expect(first.Status.WorkerMachineSetNames).To(ConsistOf("test-infra-target-fd-1", "test-infra-target-fd-1-2"))
+
+		// A later update merges one overlapping and one new name without
+		// duplicates.
+		base = *first.Status.DeepCopy()
+		first.Status.WorkerMachineSetNames = append(first.Status.WorkerMachineSetNames, "test-infra-target-fd-1", "test-infra-target-fd-1-3")
+		Expect(reconciler.updateStatus(ctx, first, base)).To(Succeed())
+
+		final := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, final)).To(Succeed())
+		Expect(final.Status.WorkerMachineSetNames).To(ConsistOf("test-infra-target-fd-1", "test-infra-target-fd-1-2", "test-infra-target-fd-1-3"))
+	})
+
 	It("persists Progress and updates LastUpdateTime", func() {
 		resource := newStatusTestResource()
 		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -799,6 +832,40 @@ var _ = Describe("updateStatus", func() {
 		readyCond := apimeta.FindStatusCondition(final.Status.Conditions, migrationv1alpha1.ConditionReady)
 		Expect(readyCond).NotTo(BeNil())
 		Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
+	})
+
+	It("persists FailureDomainMappings recorded at preflight", func() {
+		resource := newStatusTestResource()
+		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+		reconciler := &VmwareCloudFoundationMigrationReconciler{
+			Client: k8sClient,
+			Scheme: k8sClient.Scheme(),
+		}
+
+		migration := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, migration)).To(Succeed())
+		base := *migration.Status.DeepCopy()
+
+		// Simulate runPreflightChecks recording the effective mapping.
+		migration.Status.FailureDomainMappings = []migrationv1alpha1.FailureDomainMapping{
+			{Source: "source-fd-a", Destination: "target-fd-1"},
+		}
+		reconciler.setCondition(migration, migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, "Preflight validation passed")
+		Expect(reconciler.updateStatus(ctx, migration, base)).To(Succeed())
+
+		// A later reconcile holding no mappings must not clear the recorded ones.
+		later := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, later)).To(Succeed())
+		laterBase := *later.Status.DeepCopy()
+		Expect(reconciler.updateStatus(ctx, later, laterBase)).To(Succeed())
+
+		final := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+		Expect(k8sClient.Get(ctx, typeNamespacedName, final)).To(Succeed())
+
+		Expect(final.Status.FailureDomainMappings).To(HaveLen(1))
+		Expect(final.Status.FailureDomainMappings[0].Source).To(Equal("source-fd-a"))
+		Expect(final.Status.FailureDomainMappings[0].Destination).To(Equal("target-fd-1"))
 	})
 })
 
@@ -1173,5 +1240,86 @@ func TestReconcileAddsRecordRetentionFinalizer(t *testing.T) {
 	}
 	if persisted.Status.StartTime != nil {
 		t.Fatalf("startTime = %v, want nil for a Pending migration", persisted.Status.StartTime)
+	}
+}
+
+// TestUpdateStatusSkipsStaleMappingPublication covers the generation/identity
+// race: a spec edit (or delete/recreate) that lands between this reconcile's
+// fetch and its status write must not receive the mapping validated for the
+// older generation, which would lock the newer valid spec out via
+// ensureMappingImmutable.
+func TestUpdateStatusSkipsStaleMappingPublication(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := migrationv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("building scheme: %v", err)
+	}
+
+	mappings := []migrationv1alpha1.FailureDomainMapping{{Source: "source-fd-1", Destination: "target-fd-1"}}
+	// inFlight is the copy this reconcile fetched and validated: generation 1.
+	inFlight := &migrationv1alpha1.VmwareCloudFoundationMigration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       migrationv1alpha1.SingletonName,
+			Namespace:  migrationv1alpha1.SingletonNamespace,
+			Generation: 1,
+		},
+	}
+	baseStatus := inFlight.Status.DeepCopy()
+
+	tests := []struct {
+		name           string
+		latestGen      int64
+		latestMappings []migrationv1alpha1.FailureDomainMapping
+		wantPublished  bool
+	}{
+		{
+			name:          "same generation publishes mapping",
+			latestGen:     1,
+			wantPublished: true,
+		},
+		{
+			name:          "newer generation does not receive stale mapping",
+			latestGen:     2,
+			wantPublished: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			latest := &migrationv1alpha1.VmwareCloudFoundationMigration{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       migrationv1alpha1.SingletonName,
+					Namespace:  migrationv1alpha1.SingletonNamespace,
+					Generation: tt.latestGen,
+				},
+				Status: migrationv1alpha1.VmwareCloudFoundationMigrationStatus{
+					FailureDomainMappings: tt.latestMappings,
+				},
+			}
+			fakeClient := clientfake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(latest).
+				WithStatusSubresource(&migrationv1alpha1.VmwareCloudFoundationMigration{}).
+				Build()
+			r := &VmwareCloudFoundationMigrationReconciler{
+				Client:   fakeClient,
+				Scheme:   scheme,
+				Recorder: events.NewFakeRecorder(10),
+			}
+
+			// Simulate preflight resolving the mapping on the in-flight copy.
+			inFlight.Status.FailureDomainMappings = mappings
+			if err := r.updateStatus(ctx, inFlight, *baseStatus); err != nil {
+				t.Fatalf("updateStatus: %v", err)
+			}
+
+			persisted := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+			if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(latest), persisted); err != nil {
+				t.Fatalf("getting persisted migration: %v", err)
+			}
+			got := len(persisted.Status.FailureDomainMappings) > 0
+			if got != tt.wantPublished {
+				t.Fatalf("mapping published = %v, want %v (persisted status %+v)", got, tt.wantPublished, persisted.Status)
+			}
+		})
 	}
 }
