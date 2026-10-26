@@ -95,10 +95,10 @@ func TestUpdateCPMSFailureDomain(t *testing.T) {
 			name:          "sets multiple failure domains",
 			initialState:  machinev1.ControlPlaneMachineSetStateInactive,
 			initialFDs:    nil,
-			targetFDNames: []string{"fd-1", "fd-2", "fd-3"},
+			targetFDNames: []string{testFailureDomain, "fd-2", "fd-3"},
 			wantState:     machinev1.ControlPlaneMachineSetStateActive,
 			wantPlatform:  configv1.VSpherePlatformType,
-			wantFDNames:   []string{"fd-1", "fd-2", "fd-3"},
+			wantFDNames:   []string{testFailureDomain, "fd-2", "fd-3"},
 		},
 		{
 			name:          "preserves explicit RollingUpdate strategy",
@@ -1056,7 +1056,7 @@ func TestListMachinesForMachineSet(t *testing.T) {
 
 // testSelectorMachineSet creates a MachineSet whose selector carries the
 // cluster-api-machineset label, matching how real worker MachineSets are labeled.
-func testSelectorMachineSet(name string) *machinev1beta1.MachineSet {
+func testSelectorMachineSet(name string) *machinev1beta1.MachineSet { //nolint:unparam
 	replicas := int32(1)
 	return &machinev1beta1.MachineSet{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: MachineAPINamespace},

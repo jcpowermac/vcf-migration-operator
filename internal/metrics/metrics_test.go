@@ -205,3 +205,30 @@ func TestResetMetrics(t *testing.T) {
 		t.Errorf("expected workers total gauge to be 0 after reset, got %f", val)
 	}
 }
+
+func TestPhaseFromConditionsCompleted(t *testing.T) {
+	cond := func(name string) metav1.Condition {
+		return metav1.Condition{Type: name, Status: metav1.ConditionTrue, Reason: migrationv1alpha1.ReasonCompleted}
+	}
+	// All workflow conditions True and no Ready condition: the phase is
+	// derived from the completed workflow, not from a Ready condition.
+	status := &migrationv1alpha1.VmwareCloudFoundationMigrationStatus{
+		Conditions: []metav1.Condition{
+			cond(migrationv1alpha1.ConditionInfrastructurePrepared),
+			cond(migrationv1alpha1.ConditionDestinationInitialized),
+			cond(migrationv1alpha1.ConditionMultiSiteConfigured),
+			cond(migrationv1alpha1.ConditionWorkloadMigrated),
+			cond(migrationv1alpha1.ConditionSourceCleaned),
+		},
+	}
+	const completedPhase = "Completed"
+	if got := PhaseFromConditions(status); got != completedPhase {
+		t.Errorf("PhaseFromConditions() = %q, want %q", got, completedPhase)
+	}
+}
+
+func TestUpdateMigrationMetricsNilStatus(t *testing.T) {
+	InitMetrics()
+	defer ResetMetrics()
+	UpdateMigrationMetrics(nil) // must not panic
+}

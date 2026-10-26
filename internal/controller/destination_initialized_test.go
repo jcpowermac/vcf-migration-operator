@@ -45,7 +45,7 @@ func newDestinationInitializedReconciler(server, username, password, infraID str
 			newTargetCredentialsSecret("default", "target-vcenter-creds", server, username, password),
 		),
 		ConfigClient: configfake.NewClientset(&configv1.Infrastructure{
-			ObjectMeta: metav1.ObjectMeta{Name: "cluster"},
+			ObjectMeta: metav1.ObjectMeta{Name: testInfraName},
 			Status:     configv1.InfrastructureStatus{InfrastructureName: infraID},
 		}),
 		Recorder: events.NewFakeRecorder(10),
@@ -54,7 +54,7 @@ func newDestinationInitializedReconciler(server, username, password, infraID str
 
 func newDestinationInitializedMigration(server string, inventory preflightTestInventory) *migrationv1alpha1.VmwareCloudFoundationMigration {
 	return &migrationv1alpha1.VmwareCloudFoundationMigration{
-		ObjectMeta: metav1.ObjectMeta{Name: "cluster", Namespace: migrationv1alpha1.SingletonNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: testInfraName, Namespace: migrationv1alpha1.SingletonNamespace},
 		Spec: migrationv1alpha1.VmwareCloudFoundationMigrationSpec{
 			TargetVCenterCredentialsSecret: migrationv1alpha1.SecretReference{
 				Name:      "target-vcenter-creds",

@@ -135,7 +135,10 @@ func (e *probeTestEnv) seedGuest(t *testing.T, ref types.ManagedObjectReference,
 	if !ok {
 		t.Fatalf("finding simulator VM %s: got %T", ref.Value, e.model.Service.Context.Map.Get(ref))
 	}
-	simVM.Guest = guest
+	// Same per-object lock as the controller test env's copy of this helper.
+	e.model.Service.Context.WithLock(simVM, func() {
+		simVM.Guest = guest
+	})
 }
 
 // readyGuest returns a guest info snapshot with one IPv4 address, a /24 prefix,
@@ -156,7 +159,7 @@ func readyGuest() *types.GuestInfo {
 		IpStack: []types.GuestStackInfo{{
 			IpRouteConfig: &types.NetIpRouteConfigInfo{
 				IpRoute: []types.NetIpRouteConfigInfoIpRoute{{
-					Network: "0.0.0.0",
+					Network: defaultRouteNetwork,
 					Gateway: types.NetIpRouteConfigInfoGateway{IpAddress: "10.0.1.1"},
 				}},
 			},
@@ -498,7 +501,7 @@ func TestGetVMNetworks(t *testing.T) {
 		t.Error("GetVMNetworks: expected error for empty name")
 	}
 	stopped := *readyGuest()
-	stopped.ToolsRunningStatus = "guestToolsNotRunning"
+	stopped.ToolsRunningStatus = toolsNotRunning
 	e.seedGuest(t, vm.Reference(), &stopped)
 	if _, err := e.session.GetVMNetworks(e.ctx, e.template); err == nil {
 		t.Error("GetVMNetworks: expected error when guest tools are not running")
@@ -593,13 +596,13 @@ func TestNetworkInfoMatchesAny(t *testing.T) {
 	}{
 		{
 			name: "same subnet and gateway matches",
-			n:    NetworkInfo{IP: "192.168.5.42", Prefix: 24, Gateway: "192.168.5.1"},
+			n:    NetworkInfo{IP: probeGuestIP, Prefix: 24, Gateway: "192.168.5.1"},
 			srcs: []NetworkInfo{{IP: "192.168.5.10", Prefix: 24, Gateway: "192.168.5.1"}},
 			want: true,
 		},
 		{
 			name: "same subnet different gateway does not match",
-			n:    NetworkInfo{IP: "192.168.5.42", Prefix: 24, Gateway: "192.168.5.2"},
+			n:    NetworkInfo{IP: probeGuestIP, Prefix: 24, Gateway: "192.168.5.2"},
 			srcs: []NetworkInfo{{IP: "192.168.5.10", Prefix: 24, Gateway: "192.168.5.1"}},
 		},
 		{
@@ -609,36 +612,36 @@ func TestNetworkInfoMatchesAny(t *testing.T) {
 		},
 		{
 			name: "different prefix length does not match",
-			n:    NetworkInfo{IP: "192.168.5.42", Prefix: 26, Gateway: "192.168.5.1"},
+			n:    NetworkInfo{IP: probeGuestIP, Prefix: 26, Gateway: "192.168.5.1"},
 			srcs: []NetworkInfo{{IP: "192.168.5.10", Prefix: 24, Gateway: "192.168.5.1"}},
 		},
 		{
 			name: "empty sources does not match",
-			n:    NetworkInfo{IP: "192.168.5.42", Prefix: 24, Gateway: "192.168.5.1"},
+			n:    NetworkInfo{IP: probeGuestIP, Prefix: 24, Gateway: "192.168.5.1"},
 		},
 		{
 			name: "unknown probe prefix does not match",
-			n:    NetworkInfo{IP: "192.168.5.42", Prefix: 0, Gateway: "192.168.5.1"},
+			n:    NetworkInfo{IP: probeGuestIP, Prefix: 0, Gateway: "192.168.5.1"},
 			srcs: []NetworkInfo{{IP: "192.168.5.10", Prefix: 24, Gateway: "192.168.5.1"}},
 		},
 		{
 			name: "unknown source prefix does not match",
-			n:    NetworkInfo{IP: "192.168.5.42", Prefix: 24, Gateway: "192.168.5.1"},
+			n:    NetworkInfo{IP: probeGuestIP, Prefix: 24, Gateway: "192.168.5.1"},
 			srcs: []NetworkInfo{{IP: "192.168.5.10", Prefix: 0, Gateway: "192.168.5.1"}},
 		},
 		{
 			name: "identical malformed gateways do not match",
-			n:    NetworkInfo{IP: "192.168.5.42", Prefix: 24, Gateway: "not-an-ip"},
+			n:    NetworkInfo{IP: probeGuestIP, Prefix: 24, Gateway: "not-an-ip"},
 			srcs: []NetworkInfo{{IP: "192.168.5.10", Prefix: 24, Gateway: "not-an-ip"}},
 		},
 		{
 			name: "identical ipv6 gateways do not match",
-			n:    NetworkInfo{IP: "192.168.5.42", Prefix: 24, Gateway: "fe80::1"},
+			n:    NetworkInfo{IP: probeGuestIP, Prefix: 24, Gateway: "fe80::1"},
 			srcs: []NetworkInfo{{IP: "192.168.5.10", Prefix: 24, Gateway: "fe80::1"}},
 		},
 		{
 			name: "empty gateways do not match",
-			n:    NetworkInfo{IP: "192.168.5.42", Prefix: 24, Gateway: ""},
+			n:    NetworkInfo{IP: probeGuestIP, Prefix: 24, Gateway: ""},
 			srcs: []NetworkInfo{{IP: "192.168.5.10", Prefix: 24, Gateway: ""}},
 		},
 	}
@@ -657,7 +660,7 @@ func TestNetworksFromGuest(t *testing.T) {
 		return types.GuestStackInfo{
 			IpRouteConfig: &types.NetIpRouteConfigInfo{
 				IpRoute: []types.NetIpRouteConfigInfoIpRoute{{
-					Network: "0.0.0.0",
+					Network: defaultRouteNetwork,
 					Gateway: types.NetIpRouteConfigInfoGateway{IpAddress: gw},
 				}},
 			},
@@ -691,9 +694,9 @@ func TestNetworksFromGuest(t *testing.T) {
 					Connected: true,
 					IpAddress: []string{"10.0.2.7"},
 				}},
-				IpStack: []types.GuestStackInfo{gatewayStack("10.0.2.1")},
+				IpStack: []types.GuestStackInfo{gatewayStack(otherGateway)},
 			},
-			want: []NetworkInfo{{IP: "10.0.2.7", Prefix: 0, Gateway: "10.0.2.1"}},
+			want: []NetworkInfo{{IP: "10.0.2.7", Prefix: 0, Gateway: otherGateway}},
 		},
 		{
 			name: "duplicate address between ipconfig and flat list reported once",
@@ -803,22 +806,22 @@ func TestDefaultGateway(t *testing.T) {
 	}{
 		{
 			name:   "single default gateway",
-			stacks: []types.GuestStackInfo{stack(route("0.0.0.0", "10.0.1.1"))},
+			stacks: []types.GuestStackInfo{stack(route(defaultRouteNetwork, "10.0.1.1"))},
 			want:   "10.0.1.1",
 		},
 		{
 			name:   "identical default gateways across stacks are unambiguous",
-			stacks: []types.GuestStackInfo{stack(route("0.0.0.0", "10.0.2.1")), stack(route("0.0.0.0", "10.0.2.1"))},
-			want:   "10.0.2.1",
+			stacks: []types.GuestStackInfo{stack(route(defaultRouteNetwork, otherGateway)), stack(route(defaultRouteNetwork, otherGateway))},
+			want:   otherGateway,
 		},
 		{
 			name:    "two distinct default gateways are rejected",
-			stacks:  []types.GuestStackInfo{stack(route("0.0.0.0", "10.0.3.1"), route("0.0.0.0", "10.0.3.254"))},
+			stacks:  []types.GuestStackInfo{stack(route(defaultRouteNetwork, "10.0.3.1"), route(defaultRouteNetwork, "10.0.3.254"))},
 			wantErr: true,
 		},
 		{
 			name:    "two distinct default gateways are rejected in reverse order",
-			stacks:  []types.GuestStackInfo{stack(route("0.0.0.0", "10.0.4.254"), route("0.0.0.0", "10.0.4.1"))},
+			stacks:  []types.GuestStackInfo{stack(route(defaultRouteNetwork, "10.0.4.254"), route(defaultRouteNetwork, "10.0.4.1"))},
 			wantErr: true,
 		},
 		{

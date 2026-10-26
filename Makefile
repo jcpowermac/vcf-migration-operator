@@ -149,13 +149,17 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
+# Toolchain version from go.mod — golangci-lint can only read export data produced
+# by the Go version it was built for, so keep lint on the module's toolchain.
+MOD_GO_VERSION := $(shell awk '/^go /{print $$2}' go.mod)
+
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
-	GOLANGCI_LINT_CACHE=$(LOCALBIN)/golangci-lint-cache $(GOLANGCI_LINT) run
+	GOTOOLCHAIN=go$(MOD_GO_VERSION) GOLANGCI_LINT_CACHE=$(LOCALBIN)/golangci-lint-cache $(GOLANGCI_LINT) run
 
 .PHONY: lint-fix
 lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
-	GOLANGCI_LINT_CACHE=$(LOCALBIN)/golangci-lint-cache $(GOLANGCI_LINT) run --fix
+	GOTOOLCHAIN=go$(MOD_GO_VERSION) GOLANGCI_LINT_CACHE=$(LOCALBIN)/golangci-lint-cache $(GOLANGCI_LINT) run --fix
 
 .PHONY: lint-config
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
@@ -232,7 +236,7 @@ KUSTOMIZE_INSTALL_SCRIPT ?= "https://raw.githubusercontent.com/kubernetes-sigs/k
 # ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries.
 # Keep this on a supported envtest release line rather than deriving it from k8s.io/api.
 ENVTEST_K8S_VERSION ?= 1.35.0
-GOLANGCI_LINT_VERSION ?= v2.1.0
+GOLANGCI_LINT_VERSION ?= v2.11.4
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
@@ -258,8 +262,7 @@ setup-envtest: envtest ## Download the binaries required for ENVTEST in the loca
 envtest:
 
 .PHONY: golangci-lint
-golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
-$(GOLANGCI_LINT): $(LOCALBIN)
+golangci-lint: | $(LOCALBIN) ## Download golangci-lint locally if necessary.
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist

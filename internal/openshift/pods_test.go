@@ -44,18 +44,18 @@ func TestIsPodReady(t *testing.T) {
 	}{
 		{
 			name: "ready pod",
-			pod:  newTestPod("pod-1", "ns", nil, true),
+			pod:  newTestPod(testPodName, "ns", nil, true),
 			want: true,
 		},
 		{
 			name: "not ready pod",
-			pod:  newTestPod("pod-1", "ns", nil, false),
+			pod:  newTestPod(testPodName, "ns", nil, false),
 			want: false,
 		},
 		{
 			name: "no conditions",
 			pod: &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Name: "pod-1", Namespace: "ns"},
+				ObjectMeta: metav1.ObjectMeta{Name: testPodName, Namespace: "ns"},
 				Status:     corev1.PodStatus{Phase: corev1.PodRunning},
 			},
 			want: false,
@@ -83,7 +83,7 @@ func TestDeletePodsByLabel(t *testing.T) {
 		{
 			name: "deletes matching pods",
 			pods: []*corev1.Pod{
-				newTestPod("pod-1", "test-ns", map[string]string{"app": "test"}, true),
+				newTestPod(testPodName, "test-ns", map[string]string{"app": "test"}, true),
 				newTestPod("pod-2", "test-ns", map[string]string{"app": "test"}, true),
 				newTestPod("pod-3", "test-ns", map[string]string{"app": "other"}, true),
 			},
@@ -94,7 +94,7 @@ func TestDeletePodsByLabel(t *testing.T) {
 		{
 			name: "returns zero when no pods match",
 			pods: []*corev1.Pod{
-				newTestPod("pod-1", "test-ns", map[string]string{"app": "other"}, true),
+				newTestPod(testPodName, "test-ns", map[string]string{"app": "other"}, true),
 			},
 			namespace:   "test-ns",
 			selector:    map[string]string{"app": "test"},

@@ -64,7 +64,7 @@ func TestGenerateMetadata(t *testing.T) {
 				Status:     configv1.InfrastructureStatus{InfrastructureName: "my-cluster-abc"},
 			},
 			credentials: map[string]string{
-				"vcenter.example.com": "admin:secret",
+				"vcenter.example.com": adminCreds,
 			},
 			wantInfraID: "my-cluster-abc",
 			wantVCCount: 1,
@@ -132,8 +132,8 @@ func TestGenerateMetadata(t *testing.T) {
 			if got.VSphere.VCenter != tt.wantPrimary {
 				t.Errorf("VCenter = %q, want %q", got.VSphere.VCenter, tt.wantPrimary)
 			}
-			if got.VSphere.TerraformPlatform != "vsphere" {
-				t.Errorf("TerraformPlatform = %q, want %q", got.VSphere.TerraformPlatform, "vsphere")
+			if got.VSphere.TerraformPlatform != terraformVSphere {
+				t.Errorf("TerraformPlatform = %q, want %q", got.VSphere.TerraformPlatform, terraformVSphere)
 			}
 		})
 	}
@@ -267,7 +267,7 @@ func TestSaveToSecretAndGet(t *testing.T) {
 			VCenter:           "vc.example.com",
 			Username:          "admin",
 			Password:          "secret",
-			TerraformPlatform: "vsphere",
+			TerraformPlatform: terraformVSphere,
 			VCenters: []VCenter{
 				{VCenter: "vc.example.com", Username: "admin", Password: "secret"},
 			},
@@ -391,7 +391,7 @@ func TestParseCredentials(t *testing.T) {
 		wantUser string
 		wantPass string
 	}{
-		{"admin:secret", "admin", "secret"},
+		{adminCreds, "admin", "secret"},
 		{"user:pass:with:colons", "user", "pass:with:colons"},
 		{"", "", ""},
 		{"nocolon", "", ""},

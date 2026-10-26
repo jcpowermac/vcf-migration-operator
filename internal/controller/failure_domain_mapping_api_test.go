@@ -36,11 +36,11 @@ func newMappingResource(generateName string, mappings []interface{}, singleFD bo
 	fds := []configv1.VSpherePlatformFailureDomainSpec{
 		{
 			Name: "dst-a", Region: "region-a", Zone: "zone-a", Server: "vcenter.example.com",
-			Topology: configv1.VSpherePlatformTopology{Datacenter: "DC1", ComputeCluster: "/DC1/host/Cluster1", Datastore: "/DC1/datastore/DS1", Networks: []string{"VM Network"}, Template: "/DC1/vm/template-a"},
+			Topology: configv1.VSpherePlatformTopology{Datacenter: testTargetDC, ComputeCluster: "/DC1/host/Cluster1", Datastore: "/DC1/datastore/DS1", Networks: []string{"VM Network"}, Template: "/DC1/vm/template-a"},
 		},
 		{
 			Name: "dst-b", Region: "region-b", Zone: "zone-b", Server: "vcenter.example.com",
-			Topology: configv1.VSpherePlatformTopology{Datacenter: "DC1", ComputeCluster: "/DC1/host/Cluster1", Datastore: "/DC1/datastore/DS1", Networks: []string{"VM Network"}, Template: "/DC1/vm/template-b"},
+			Topology: configv1.VSpherePlatformTopology{Datacenter: testTargetDC, ComputeCluster: "/DC1/host/Cluster1", Datastore: "/DC1/datastore/DS1", Networks: []string{"VM Network"}, Template: "/DC1/vm/template-b"},
 		},
 	}
 	if singleFD {
