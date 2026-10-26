@@ -1,0 +1,40 @@
+# Allow cluster DNS so the operator can resolve vCenter FQDNs. The OpenShift
+# DNS operator places DNS pods in the openshift-dns, openshift-dns-2 and
+# openshift-dns-3 namespaces, listening on port 5353; the DNS service
+# ClusterIP serves port 53, which matters if the CNI applies the policy
+# before service DNAT. (Kind clusters use kube-system:53, but kindnet does
+# not enforce NetworkPolicy, so the e2e suite is unaffected either way.)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: vcf-migration-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: allow-dns-egress
+  namespace: system
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: vcf-migration-operator
+  egress:
+    - to:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values:
+                  - openshift-dns
+                  - openshift-dns-2
+                  - openshift-dns-3
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 5353
+        - protocol: TCP
+          port: 5353
+  policyTypes:
+    - Egress

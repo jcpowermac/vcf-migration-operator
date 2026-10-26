@@ -1,6 +1,8 @@
-# Make the operator pod's ingress and egress restrictions explicit. Ingress is
-# limited to metrics scraping; egress is allow-all (see allow-all-egress.yaml).
-# Policy rules are additive, so allow-all-egress is the effective egress policy.
+# Make the operator pod's ingress and egress restrictions explicit. The allow
+# policies in this directory add what the operator needs: metrics ingress,
+# DNS resolution, and TCP/443 to vCenter and the API server.
+# Policy rules are additive, so egress is limited to the union of the allow
+# rules' ports and DNS destinations.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

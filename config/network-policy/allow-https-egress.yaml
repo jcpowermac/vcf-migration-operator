@@ -1,0 +1,27 @@
+# vCenter hosts are configured at runtime in the migration CR, so egress
+# destinations cannot be listed statically; restrict by port instead. TCP/443
+# covers vCenter (govmomi) and the in-cluster API service
+# (kubernetes.default.svc:443). TCP/6443 covers the API server listening on
+# node hosts, in case the CNI applies the policy after service DNAT to the
+# host-networked endpoints.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: vcf-migration-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: allow-https-egress
+  namespace: system
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: vcf-migration-operator
+  egress:
+    - ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+  policyTypes:
+    - Egress
