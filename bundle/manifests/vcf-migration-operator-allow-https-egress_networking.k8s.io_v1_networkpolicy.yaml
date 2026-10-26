@@ -4,10 +4,14 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: vcf-migration-operator
-  name: vcf-migration-operator-allow-all-egress
+  name: vcf-migration-operator-allow-https-egress
 spec:
   egress:
-  - {}
+  - ports:
+    - port: 443
+      protocol: TCP
+    - port: 6443
+      protocol: TCP
   podSelector:
     matchLabels:
       app.kubernetes.io/name: vcf-migration-operator
