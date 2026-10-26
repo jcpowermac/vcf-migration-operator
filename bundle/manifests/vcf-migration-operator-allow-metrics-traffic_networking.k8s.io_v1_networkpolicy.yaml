@@ -10,6 +10,9 @@ spec:
   - from:
     - namespaceSelector:
         matchLabels:
+          openshift.io/cluster-monitoring: "true"
+    - namespaceSelector:
+        matchLabels:
           metrics: enabled
     ports:
     - port: 8443

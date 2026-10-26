@@ -1,6 +1,4 @@
 resources:
 - default-deny-operator-traffic.yaml
-- allow-api-server-egress.yaml
-- allow-dns-egress.yaml
-- allow-https-egress.yaml
+- allow-all-egress.yaml
 - allow-metrics-traffic.yaml
