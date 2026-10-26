@@ -32,7 +32,7 @@ func TestProbeName(t *testing.T) {
 }
 
 func TestDescribeFDMismatch(t *testing.T) {
-	probe := []vsphere.NetworkInfo{{IP: "10.0.1.5", Prefix: 24, Gateway: "10.0.1.1"}}
+	probe := []vsphere.NetworkInfo{{IP: netcheckGuestIP, Prefix: 24, Gateway: netcheckGuestGateway}}
 	sources := []vsphere.NetworkInfo{
 		{IP: "192.168.5.10", Prefix: 24, Gateway: "192.168.5.1"},
 		{IP: "192.168.5.11", Prefix: 24, Gateway: "192.168.5.1"},

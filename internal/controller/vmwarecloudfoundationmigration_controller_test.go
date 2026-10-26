@@ -75,11 +75,11 @@ var _ = Describe("required failure-domain template admission", func() {
 					FailureDomains: []configv1.VSpherePlatformFailureDomainSpec{
 						{
 							Name: "fd-a", Region: "region-a", Zone: "zone-a", Server: "vcenter.example.com",
-							Topology: configv1.VSpherePlatformTopology{Datacenter: "DC1", ComputeCluster: "/DC1/host/Cluster1", Datastore: "/DC1/datastore/DS1", Networks: []string{"VM Network"}, Template: "/DC1/vm/template-a"},
+							Topology: configv1.VSpherePlatformTopology{Datacenter: testTargetDC, ComputeCluster: "/DC1/host/Cluster1", Datastore: "/DC1/datastore/DS1", Networks: []string{"VM Network"}, Template: "/DC1/vm/template-a"},
 						},
 						{
 							Name: "fd-b", Region: "region-b", Zone: "zone-b", Server: "vcenter.example.com",
-							Topology: configv1.VSpherePlatformTopology{Datacenter: "DC1", ComputeCluster: "/DC1/host/Cluster1", Datastore: "/DC1/datastore/DS1", Networks: []string{"VM Network"}, Template: "/DC1/vm/template-b"},
+							Topology: configv1.VSpherePlatformTopology{Datacenter: testTargetDC, ComputeCluster: "/DC1/host/Cluster1", Datastore: "/DC1/datastore/DS1", Networks: []string{"VM Network"}, Template: "/DC1/vm/template-b"},
 						},
 					},
 				},
@@ -108,7 +108,7 @@ var _ = Describe("required failure-domain template admission", func() {
 				TargetVCenterCredentialsSecret: migrationv1alpha1.SecretReference{Name: "target-vcenter-creds"},
 				FailureDomains: []configv1.VSpherePlatformFailureDomainSpec{{
 					Name: "fd-a", Region: "region-a", Zone: "zone-a", Server: "vcenter.example.com",
-					Topology: configv1.VSpherePlatformTopology{Datacenter: "DC1", ComputeCluster: "/DC1/host/Cluster1", Datastore: "/DC1/datastore/DS1", Networks: []string{"VM Network"}, Template: "/DC1/vm/template-a"},
+					Topology: configv1.VSpherePlatformTopology{Datacenter: testTargetDC, ComputeCluster: "/DC1/host/Cluster1", Datastore: "/DC1/datastore/DS1", Networks: []string{"VM Network"}, Template: "/DC1/vm/template-a"},
 				}},
 			},
 		}
@@ -129,8 +129,8 @@ func TestSanitizeRFC1123(t *testing.T) {
 		{name: "uppercase", input: "Zone-A", want: "zone-a"},
 		{name: "spaces", input: "zone a", want: "zone-a"},
 		{name: "consecutive invalid chars", input: "a__b", want: "a-b"},
-		{name: "leading invalid", input: "_zone", want: "zone"},
-		{name: "trailing invalid", input: "zone_", want: "zone"},
+		{name: "leading invalid", input: "_zone", want: zoneName},
+		{name: "trailing invalid", input: "zone_", want: zoneName},
 		{name: "mixed invalid", input: "My Zone!@#1", want: "my-zone-1"},
 		{name: "empty string", input: "", want: ""},
 		{name: "all invalid", input: "___", want: ""},

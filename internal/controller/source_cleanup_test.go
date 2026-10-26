@@ -53,7 +53,7 @@ func newCleanupTestMigration() *migrationv1alpha1.VmwareCloudFoundationMigration
 				Name:   "fd-dest",
 				Server: cleanupTestDest,
 				Topology: configv1.VSpherePlatformTopology{
-					Datacenter: "DC1",
+					Datacenter: testTargetDC,
 				},
 			}},
 		},
@@ -518,7 +518,7 @@ func TestEnsureSourceCleanedPodRestartFailureRetried(t *testing.T) {
 	ccmPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "vsphere-cloud-controller-manager-1",
-			Namespace: "openshift-cloud-controller-manager",
+			Namespace: ccoNamespace,
 			Labels:    map[string]string{"k8s-app": "vsphere-cloud-controller-manager"},
 		},
 	}
@@ -676,7 +676,7 @@ func TestReconcileSourceCleanedFailureRetried(t *testing.T) {
 			Type:               condType,
 			Status:             metav1.ConditionTrue,
 			Reason:             migrationv1alpha1.ReasonCompleted,
-			Message:            "done",
+			Message:            doneMsg,
 			ObservedGeneration: migration.Generation,
 		})
 	}

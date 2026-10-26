@@ -361,15 +361,15 @@ func TestValidateSourceFDTopologyDisjoint(t *testing.T) {
 		{
 			name: "same datacenter, distinct pools",
 			fds: []configv1.VSpherePlatformFailureDomainSpec{
-				fd("fd-a", "DC0", "/DC0/host/c1/Resources/pool-a"),
-				fd("fd-b", "DC0", "/DC0/host/c1/Resources/pool-b"),
+				fd("fd-a", testSourceDC, "/DC0/host/c1/Resources/pool-a"),
+				fd("fd-b", testSourceDC, "/DC0/host/c1/Resources/pool-b"),
 			},
 		},
 		{
 			name: "same datacenter, one pool empty",
 			fds: []configv1.VSpherePlatformFailureDomainSpec{
-				fd("fd-a", "DC0", "/DC0/host/c1/Resources/pool-a"),
-				fd("fd-b", "DC0", ""),
+				fd("fd-a", testSourceDC, "/DC0/host/c1/Resources/pool-a"),
+				fd("fd-b", testSourceDC, ""),
 			},
 			wantErr:    true,
 			wantSubstr: "overlapping",
@@ -377,8 +377,8 @@ func TestValidateSourceFDTopologyDisjoint(t *testing.T) {
 		{
 			name: "same datacenter, same pool",
 			fds: []configv1.VSpherePlatformFailureDomainSpec{
-				fd("fd-a", "DC0", "/DC0/host/c1/Resources/pool-a"),
-				fd("fd-b", "DC0", "/DC0/host/c1/Resources/pool-a"),
+				fd("fd-a", testSourceDC, "/DC0/host/c1/Resources/pool-a"),
+				fd("fd-b", testSourceDC, "/DC0/host/c1/Resources/pool-a"),
 			},
 			wantErr:    true,
 			wantSubstr: "overlapping",
@@ -386,8 +386,8 @@ func TestValidateSourceFDTopologyDisjoint(t *testing.T) {
 		{
 			name: "different datacenters",
 			fds: []configv1.VSpherePlatformFailureDomainSpec{
-				fd("fd-a", "DC0", ""),
-				fd("fd-b", "DC1", ""),
+				fd("fd-a", testSourceDC, ""),
+				fd("fd-b", testTargetDC, ""),
 			},
 		},
 		{
@@ -396,15 +396,15 @@ func TestValidateSourceFDTopologyDisjoint(t *testing.T) {
 			// MachineSet can match at most one of them.
 			name: "same datacenter, empty pools in distinct compute clusters",
 			fds: []configv1.VSpherePlatformFailureDomainSpec{
-				fdInCluster("fd-a", "DC0", "/DC0/host/c1"),
-				fdInCluster("fd-b", "DC0", "/DC0/host/c2"),
+				fdInCluster("fd-a", testSourceDC, "/DC0/host/c1"),
+				fdInCluster("fd-b", testSourceDC, "/DC0/host/c2"),
 			},
 		},
 		{
 			name: "same datacenter, empty pools in the same compute cluster",
 			fds: []configv1.VSpherePlatformFailureDomainSpec{
-				fdInCluster("fd-a", "DC0", "/DC0/host/c1"),
-				fdInCluster("fd-b", "DC0", "/DC0/host/c1"),
+				fdInCluster("fd-a", testSourceDC, "/DC0/host/c1"),
+				fdInCluster("fd-b", testSourceDC, "/DC0/host/c1"),
 			},
 			wantErr:    true,
 			wantSubstr: "overlapping",
@@ -412,8 +412,8 @@ func TestValidateSourceFDTopologyDisjoint(t *testing.T) {
 		{
 			name: "same datacenter, explicit pool equal to another failure domain's default pool",
 			fds: []configv1.VSpherePlatformFailureDomainSpec{
-				fd("fd-a", "DC0", "/DC0/host/c1/Resources"),
-				fdInCluster("fd-b", "DC0", "/DC0/host/c1"),
+				fd("fd-a", testSourceDC, "/DC0/host/c1/Resources"),
+				fdInCluster("fd-b", testSourceDC, "/DC0/host/c1"),
 			},
 			wantErr:    true,
 			wantSubstr: "overlapping",
@@ -427,7 +427,7 @@ func TestValidateSourceFDTopologyDisjoint(t *testing.T) {
 				if err == nil {
 					t.Fatal("validateSourceFDTopologyDisjoint succeeded, want error")
 				}
-				if !strings.Contains(err.Error(), tt.wantSubstr) || !strings.Contains(err.Error(), "DC0") {
+				if !strings.Contains(err.Error(), tt.wantSubstr) || !strings.Contains(err.Error(), testSourceDC) {
 					t.Fatalf("validateSourceFDTopologyDisjoint error = %q, want %q naming the datacenter", err.Error(), tt.wantSubstr)
 				}
 				return
@@ -453,46 +453,46 @@ func TestMatchesSourceFailureDomain(t *testing.T) {
 	}{
 		{
 			name:      "empty pool with a compute cluster matches that cluster's default pool",
-			workspace: machinev1beta1.Workspace{Datacenter: "DC0", ResourcePool: "/DC0/host/c1/Resources"},
-			fd:        configv1.VSpherePlatformFailureDomainSpec{Topology: configv1.VSpherePlatformTopology{Datacenter: "DC0", ComputeCluster: "/DC0/host/c1"}},
+			workspace: machinev1beta1.Workspace{Datacenter: testSourceDC, ResourcePool: "/DC0/host/c1/Resources"},
+			fd:        configv1.VSpherePlatformFailureDomainSpec{Topology: configv1.VSpherePlatformTopology{Datacenter: testSourceDC, ComputeCluster: "/DC0/host/c1"}},
 			want:      true,
 		},
 		{
 			name:      "empty pool with a compute cluster rejects another cluster's default pool",
-			workspace: machinev1beta1.Workspace{Datacenter: "DC0", ResourcePool: "/DC0/host/c2/Resources"},
-			fd:        configv1.VSpherePlatformFailureDomainSpec{Topology: configv1.VSpherePlatformTopology{Datacenter: "DC0", ComputeCluster: "/DC0/host/c1"}},
+			workspace: machinev1beta1.Workspace{Datacenter: testSourceDC, ResourcePool: "/DC0/host/c2/Resources"},
+			fd:        configv1.VSpherePlatformFailureDomainSpec{Topology: configv1.VSpherePlatformTopology{Datacenter: testSourceDC, ComputeCluster: "/DC0/host/c1"}},
 			want:      false,
 		},
 		{
 			name:      "empty pool with a compute cluster rejects a custom pool in that cluster",
-			workspace: machinev1beta1.Workspace{Datacenter: "DC0", ResourcePool: "/DC0/host/c1/Resources/pool-a"},
-			fd:        configv1.VSpherePlatformFailureDomainSpec{Topology: configv1.VSpherePlatformTopology{Datacenter: "DC0", ComputeCluster: "/DC0/host/c1"}},
+			workspace: machinev1beta1.Workspace{Datacenter: testSourceDC, ResourcePool: "/DC0/host/c1/Resources/pool-a"},
+			fd:        configv1.VSpherePlatformFailureDomainSpec{Topology: configv1.VSpherePlatformTopology{Datacenter: testSourceDC, ComputeCluster: "/DC0/host/c1"}},
 			want:      false,
 		},
 		{
 			// Unchanged behaviour: with neither field set no pool is
 			// determinable, so every pool in the datacenter matches.
 			name:      "empty pool without a compute cluster matches every pool in the datacenter",
-			workspace: machinev1beta1.Workspace{Datacenter: "DC0", ResourcePool: "/DC0/host/c2/Resources"},
-			fd:        configv1.VSpherePlatformFailureDomainSpec{Topology: configv1.VSpherePlatformTopology{Datacenter: "DC0"}},
+			workspace: machinev1beta1.Workspace{Datacenter: testSourceDC, ResourcePool: "/DC0/host/c2/Resources"},
+			fd:        configv1.VSpherePlatformFailureDomainSpec{Topology: configv1.VSpherePlatformTopology{Datacenter: testSourceDC}},
 			want:      true,
 		},
 		{
 			name:      "explicit pool matches only that pool",
-			workspace: machinev1beta1.Workspace{Datacenter: "DC0", ResourcePool: "/DC0/host/c1/Resources/pool-a"},
-			fd:        configv1.VSpherePlatformFailureDomainSpec{Topology: configv1.VSpherePlatformTopology{Datacenter: "DC0", ResourcePool: "/DC0/host/c1/Resources/pool-a", ComputeCluster: "/DC0/host/c1"}},
+			workspace: machinev1beta1.Workspace{Datacenter: testSourceDC, ResourcePool: "/DC0/host/c1/Resources/pool-a"},
+			fd:        configv1.VSpherePlatformFailureDomainSpec{Topology: configv1.VSpherePlatformTopology{Datacenter: testSourceDC, ResourcePool: "/DC0/host/c1/Resources/pool-a", ComputeCluster: "/DC0/host/c1"}},
 			want:      true,
 		},
 		{
 			name:      "explicit pool rejects another pool in the same datacenter",
-			workspace: machinev1beta1.Workspace{Datacenter: "DC0", ResourcePool: "/DC0/host/c1/Resources/pool-b"},
-			fd:        configv1.VSpherePlatformFailureDomainSpec{Topology: configv1.VSpherePlatformTopology{Datacenter: "DC0", ResourcePool: "/DC0/host/c1/Resources/pool-a", ComputeCluster: "/DC0/host/c1"}},
+			workspace: machinev1beta1.Workspace{Datacenter: testSourceDC, ResourcePool: "/DC0/host/c1/Resources/pool-b"},
+			fd:        configv1.VSpherePlatformFailureDomainSpec{Topology: configv1.VSpherePlatformTopology{Datacenter: testSourceDC, ResourcePool: "/DC0/host/c1/Resources/pool-a", ComputeCluster: "/DC0/host/c1"}},
 			want:      false,
 		},
 		{
 			name:      "different datacenter never matches",
-			workspace: machinev1beta1.Workspace{Datacenter: "DC1", ResourcePool: "/DC0/host/c1/Resources"},
-			fd:        configv1.VSpherePlatformFailureDomainSpec{Topology: configv1.VSpherePlatformTopology{Datacenter: "DC0", ComputeCluster: "/DC0/host/c1"}},
+			workspace: machinev1beta1.Workspace{Datacenter: testTargetDC, ResourcePool: "/DC0/host/c1/Resources"},
+			fd:        configv1.VSpherePlatformFailureDomainSpec{Topology: configv1.VSpherePlatformTopology{Datacenter: testSourceDC, ComputeCluster: "/DC0/host/c1"}},
 			want:      false,
 		},
 	}
@@ -509,12 +509,12 @@ func TestEnsureMappingImmutable(t *testing.T) {
 	explicit := mappingList([2]string{"s1", "d1"}, [2]string{"s2", "d2"})
 
 	// Infrastructure variants proving drift does not participate in the check.
-	destFDAdded := newInfrastructureForPreflight("vc.example.com", "DC0")
+	destFDAdded := newInfrastructureForPreflight("vc.example.com", testSourceDC)
 	destFDAdded.Spec.PlatformSpec.VSphere.FailureDomains = append(destFDAdded.Spec.PlatformSpec.VSphere.FailureDomains, configv1.VSpherePlatformFailureDomainSpec{
 		Name:   "fd-c",
 		Server: "vc.example.com",
 	})
-	sourceFDsRemoved := newInfrastructureForPreflight("vc.example.com", "DC0")
+	sourceFDsRemoved := newInfrastructureForPreflight("vc.example.com", testSourceDC)
 	sourceFDsRemoved.Spec.PlatformSpec.VSphere.FailureDomains = sourceFDsRemoved.Spec.PlatformSpec.VSphere.FailureDomains[:1]
 
 	tests := []struct {
@@ -528,25 +528,25 @@ func TestEnsureMappingImmutable(t *testing.T) {
 		{
 			name:  "status unset",
 			spec:  explicit,
-			infra: newInfrastructureForPreflight("vc.example.com", "DC0"),
+			infra: newInfrastructureForPreflight("vc.example.com", testSourceDC),
 		},
 		{
 			name:   "unchanged spec",
 			status: explicit,
 			spec:   explicit,
-			infra:  newInfrastructureForPreflight("vc.example.com", "DC0"),
+			infra:  newInfrastructureForPreflight("vc.example.com", testSourceDC),
 		},
 		{
 			name:   "reordered spec",
 			status: explicit,
 			spec:   mappingList([2]string{"s2", "d2"}, [2]string{"s1", "d1"}),
-			infra:  newInfrastructureForPreflight("vc.example.com", "DC0"),
+			infra:  newInfrastructureForPreflight("vc.example.com", testSourceDC),
 		},
 		{
 			name:       "edited spec",
 			status:     explicit,
 			spec:       mappingList([2]string{"s1", "d1"}, [2]string{"s2", "d3"}),
-			infra:      newInfrastructureForPreflight("vc.example.com", "DC0"),
+			infra:      newInfrastructureForPreflight("vc.example.com", testSourceDC),
 			wantErr:    true,
 			wantSubstr: "failureDomainMappings are immutable",
 		},
@@ -554,7 +554,7 @@ func TestEnsureMappingImmutable(t *testing.T) {
 			name:       "omitted then edited",
 			status:     mappingList([2]string{"s1", "d1"}),
 			spec:       mappingList([2]string{"s1", "d2"}),
-			infra:      newInfrastructureForPreflight("vc.example.com", "DC0"),
+			infra:      newInfrastructureForPreflight("vc.example.com", testSourceDC),
 			wantErr:    true,
 			wantSubstr: "failureDomainMappings are immutable",
 		},
@@ -562,7 +562,7 @@ func TestEnsureMappingImmutable(t *testing.T) {
 			name:       "renamed source failure domain",
 			status:     explicit,
 			spec:       mappingList([2]string{"s1", "d1"}, [2]string{"s3", "d2"}),
-			infra:      newInfrastructureForPreflight("vc.example.com", "DC0"),
+			infra:      newInfrastructureForPreflight("vc.example.com", testSourceDC),
 			wantErr:    true,
 			wantSubstr: "is not part of the recorded mapping",
 		},
@@ -570,7 +570,7 @@ func TestEnsureMappingImmutable(t *testing.T) {
 			name:   "explicit then cleared",
 			status: explicit,
 			spec:   nil,
-			infra:  newInfrastructureForPreflight("vc.example.com", "DC0"),
+			infra:  newInfrastructureForPreflight("vc.example.com", testSourceDC),
 		},
 		{
 			name:   "destination FD added",

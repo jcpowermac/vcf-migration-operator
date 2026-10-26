@@ -105,7 +105,7 @@ func TestValidateSourceMachineSetCoverage(t *testing.T) {
 			rec:  []string{base, base + "-2"},
 			sourceFDs: []configv1.VSpherePlatformFailureDomainSpec{
 				newSourceFailureDomainForRollout(),
-				{Name: "source-fd-2", Server: "source.example.com", Topology: configv1.VSpherePlatformTopology{Datacenter: "dc-source", ResourcePool: ""}},
+				{Name: "source-fd-2", Server: "source.example.com", Topology: configv1.VSpherePlatformTopology{Datacenter: sourceDatacenter, ResourcePool: ""}},
 			},
 			wantErr: "matches multiple source failure domains",
 		},

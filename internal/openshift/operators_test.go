@@ -15,7 +15,7 @@ func newTestClusterOperator(name string, available, degraded bool) *configv1.Clu
 }
 
 func newTestClusterOperatorWithProgressing(name string, available, progressing, degraded bool) *configv1.ClusterOperator {
-	conditions := []configv1.ClusterOperatorStatusCondition{}
+	conditions := make([]configv1.ClusterOperatorStatusCondition, 0, 3)
 
 	availableStatus := configv1.ConditionFalse
 	if available {

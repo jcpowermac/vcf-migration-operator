@@ -1208,7 +1208,7 @@ func newFeatureGateForPreflight(version string, enabled bool) *configv1.FeatureG
 	}
 
 	return &configv1.FeatureGate{
-		ObjectMeta: metav1.ObjectMeta{Name: "cluster"},
+		ObjectMeta: metav1.ObjectMeta{Name: testInfraName},
 		Status: configv1.FeatureGateStatus{
 			FeatureGates: []configv1.FeatureGateDetails{details},
 		},
@@ -1265,7 +1265,7 @@ func TestDCVMFolderMissingVMPFolder(t *testing.T) {
 	simDC.VmFolder = types.ManagedObjectReference{}
 
 	finder := find.NewFinder(client.Client)
-	datacenter, err := finder.Datacenter(ctx, "DC0")
+	datacenter, err := finder.Datacenter(ctx, testSourceDC)
 	if err != nil {
 		t.Fatalf("Finder.Datacenter: %v", err)
 	}

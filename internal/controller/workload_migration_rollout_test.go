@@ -1097,7 +1097,7 @@ func newSourceFailureDomainForRollout() configv1.VSpherePlatformFailureDomainSpe
 		Name:   "source-fd-1",
 		Server: "source.example.com",
 		Topology: configv1.VSpherePlatformTopology{
-			Datacenter:   "dc-source",
+			Datacenter:   sourceDatacenter,
 			ResourcePool: "rp-source-1",
 		},
 	}
@@ -1154,7 +1154,7 @@ func newCPMSHeldOnUnmanagedNodesForRollout() *machinev1.ControlPlaneMachineSet {
 	cpms.Status.Conditions = []metav1.Condition{{
 		Type:    "Degraded",
 		Status:  metav1.ConditionTrue,
-		Reason:  "UnmanagedNodes",
+		Reason:  reasonUnmanaged,
 		Message: "Found 1 unmanaged node(s)",
 	}}
 	return cpms
@@ -1362,7 +1362,7 @@ func TestOldWorkersStallEventDebounce(t *testing.T) {
 	// Step 6 publishes the recorded names before any cleanup.
 	reconciler.Client = newMigrationStatusClient(t, migration)
 
-	var stalled []string
+	stalled := make([]string, 0, 2)
 
 	// First stalled reconcile emits exactly one Warning event.
 	if _, err := reconciler.ensureWorkloadMigratedRolloutAndScaleDown(ctx, migration); err != nil {
@@ -1445,7 +1445,7 @@ func TestOldWorkersStallEventDebounce(t *testing.T) {
 func stalledEvents(t *testing.T, reconciler *VmwareCloudFoundationMigrationReconciler) []string {
 	t.Helper()
 	recorder := reconciler.Recorder.(*events.FakeRecorder)
-	var stalled []string
+	stalled := make([]string, 0, 2)
 	for {
 		select {
 		case event := <-recorder.Events:
