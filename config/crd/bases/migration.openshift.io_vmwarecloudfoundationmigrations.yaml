@@ -319,6 +319,14 @@ spec:
                 - message: topology.template is required for every failure domain
                   rule: self.all(fd, has(fd.topology.template) && fd.topology.template
                     != '')
+              migrateStorage:
+                default: false
+                description: |-
+                  migrateStorage indicates whether vSphere CSI volumes are migrated along
+                  with compute nodes. When false, vSphere CSI persistent volumes block the
+                  migration during preflight.
+                  When omitted, defaults to false.
+                type: boolean
               nodeMigration:
                 description: |-
                   nodeMigration controls how nodes move to the target vCenter.
@@ -472,14 +480,62 @@ spec:
               state:
                 default: Pending
                 description: |-
-                  state controls the workflow: Pending, Running, Paused.
-                  The migration workflow only executes when state is Running.
+                  state controls the workflow: Pending, Planning, Running, Paused.
+                  Planning runs non-disruptive checks; Running proceeds when the plan has no blockers.
                   When omitted, defaults to Pending.
                 enum:
                 - Pending
+                - Planning
                 - Running
                 - Paused
                 type: string
+              storage:
+                description: |-
+                  storage configures CNS volume data migration. It can only be set when
+                  migrateStorage is true.
+                properties:
+                  dataMigrationStrategy:
+                    default: Auto
+                    description: |-
+                      DataMigrationStrategy defines how VMO will move the data.
+                      When omitted, defaults to Auto. CnsNative is not currently supported.
+                    enum:
+                    - Auto
+                    - Rsync
+                    type: string
+                  storageClassMapping:
+                    description: |-
+                      StorageClassMapping maps source StorageClasses to target StorageClasses for
+                      provisioning destination PVCs. An unmapped source uses the same StorageClass.
+                      This allows in-tree or datastore-pinned source classes to use a suitable
+                      vSphere CSI target class. Each source may appear only once; multiple sources
+                      may share a target. Existing source PVCs and StorageClasses are not modified.
+                    items:
+                      description: StorageClassMapping maps a source StorageClass
+                        to a target StorageClass.
+                      properties:
+                        source:
+                          description: Source is the name of the source PVC's StorageClass.
+                          maxLength: 253
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                          type: string
+                        target:
+                          description: Target is the name of the vSphere CSI StorageClass
+                            for destination PVCs.
+                          maxLength: 253
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                          type: string
+                      required:
+                      - source
+                      - target
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - source
+                    x-kubernetes-list-type: map
+                type: object
               targetVCenterCredentialsSecret:
                 description: |-
                   targetVCenterCredentialsSecret references the secret containing target vCenter credentials.
@@ -506,6 +562,8 @@ spec:
             - message: every failureDomainMappings.destination must match a failureDomains[].name
               rule: '!has(self.failureDomainMappings) || self.failureDomainMappings.all(m,
                 m.destination in self.failureDomains.map(fd, fd.name))'
+            - message: storage can only be set when migrateStorage is true
+              rule: '!has(self.storage) || (has(self.migrateStorage) && self.migrateStorage)'
           status:
             description: status defines the observed state of VmwareCloudFoundationMigration.
             properties:
@@ -530,6 +588,7 @@ spec:
                     (openshift-vcf-migration/cluster), while False indicates an unsupported
                     object name or namespace.
                   - InfrastructurePrepared: preflight validation and migration path selection.
+                  - StoragePlanned: storage inventory and target resolution have no blockers.
                   - DestinationInitialized: destination vCenter folders and tags created.
                   - MultiSiteConfigured: cluster configured for both source and target vCenters.
                   - WorkloadMigrated: workloads migrated to destination vCenter machine sets.

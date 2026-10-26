@@ -214,7 +214,7 @@ Target failure domain:
 
 ```
 migration.openshift.io/target-failure-domain annotation on the PVC
-  -> storage.failureDomainMap[sourceFD]
+  -> failureDomainMappings[sourceFD]
   -> the only entry in spec.failureDomains, if there is exactly one
   -> TargetFailureDomainUnresolved
 ```

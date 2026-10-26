@@ -218,6 +218,7 @@ func TestPhaseFromConditionsCompleted(t *testing.T) {
 	status := &migrationv1alpha1.VmwareCloudFoundationMigrationStatus{
 		Conditions: []metav1.Condition{
 			cond(migrationv1alpha1.ConditionInfrastructurePrepared),
+			cond(migrationv1alpha1.ConditionStoragePlanned),
 			cond(migrationv1alpha1.ConditionDestinationInitialized),
 			cond(migrationv1alpha1.ConditionMultiSiteConfigured),
 			cond(migrationv1alpha1.ConditionWorkloadMigrated),

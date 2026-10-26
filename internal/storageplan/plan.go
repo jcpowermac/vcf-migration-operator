@@ -12,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
+	"github.com/openshift/vcf-migration-operator/internal/util"
 )
 
 const (
@@ -19,6 +20,13 @@ const (
 	Driver = "csi.vsphere.vmware.com"
 	// TargetFailureDomainAnnotation overrides the destination of one PVC.
 	TargetFailureDomainAnnotation = "migration.openshift.io/target-failure-domain"
+)
+
+// Target failure domain resolution errors. Their text is used as the volume
+// blocker reason, so it must stay a CamelCase identifier.
+var (
+	errTargetFailureDomainInvalid    = fmt.Errorf("TargetFailureDomainInvalid")
+	errTargetFailureDomainUnresolved = fmt.Errorf("TargetFailureDomainUnresolved")
 )
 
 // Input is a consistent-enough inventory; binding identities are checked before use.
@@ -32,15 +40,15 @@ type Input struct {
 	TopologyCategories []string
 }
 
-// Namespace contains the volume inventory for one workload namespace.
-type Namespace struct {
+// NamespacePlan contains the volume inventory for one workload namespace.
+type NamespacePlan struct {
 	Volumes   []migrationv1alpha1.StorageWorkloadMigrationVolume
 	Consumers []migrationv1alpha1.StorageWorkloadMigrationConsumer
 }
 
 // Plan contains namespace inventories and cluster-wide blockers.
 type Plan struct {
-	Namespaces map[string]*Namespace
+	Namespaces map[string]*NamespacePlan
 	Blockers   []migrationv1alpha1.StorageWorkloadMigrationBlocker
 }
 
@@ -65,11 +73,11 @@ func blocker(reason, message string) migrationv1alpha1.StorageWorkloadMigrationB
 
 // Build computes volume blockers, target placement, and Pod topology compatibility.
 func Build(in Input) *Plan {
-	plan := &Plan{Namespaces: map[string]*Namespace{}}
+	plan := &Plan{Namespaces: map[string]*NamespacePlan{}}
 	pvcs := map[string]*corev1.PersistentVolumeClaim{}
 	for i := range in.PVCs {
 		p := &in.PVCs[i]
-		pvcs[p.Namespace+"/"+p.Name] = p
+		pvcs[util.GetObjectKey(p.Name, p.Namespace)] = p
 	}
 	classes := map[string]*storagev1.StorageClass{}
 	for i := range in.StorageClasses {
@@ -105,29 +113,29 @@ func Build(in Input) *Plan {
 		ref := pv.Spec.ClaimRef
 		var pvc *corev1.PersistentVolumeClaim
 		if ref != nil {
-			pvc = pvcs[ref.Namespace+"/"+ref.Name]
+			pvc = pvcs[util.GetObjectKey(ref.Name, ref.Namespace)]
 		}
 		if pvc == nil || ref.UID == "" || pvc.UID != ref.UID || pvc.Spec.VolumeName != pv.Name {
 			plan.Blockers = append(plan.Blockers, blocker("PVCBindingMismatch", fmt.Sprintf("PV %s does not have a matching PVC binding and UID", pv.Name)))
 			continue
 		}
 
-		ns := plan.Namespaces[pvc.Namespace]
-		if ns == nil {
-			ns = &Namespace{}
-			plan.Namespaces[pvc.Namespace] = ns
+		nsPlan := plan.Namespaces[pvc.Namespace]
+		if nsPlan == nil {
+			nsPlan = &NamespacePlan{}
+			plan.Namespaces[pvc.Namespace] = nsPlan
 			if PlatformNamespaceUnsupported(pvc.Namespace) {
 				plan.Blockers = append(plan.Blockers, blocker("PlatformNamespaceUnsupported", fmt.Sprintf("namespace %s requires an unsupported platform quiesce procedure", pvc.Namespace)))
 			}
 		}
 
 		v := planVolume(in.Migration, pv, pvc, sources, classes)
-		ns.Volumes = append(ns.Volumes, v)
+		nsPlan.Volumes = append(nsPlan.Volumes, v)
 	}
 
 	checkPodTopology(plan, in.Pods)
-	for _, ns := range plan.Namespaces {
-		sort.Slice(ns.Volumes, func(i, j int) bool { return ns.Volumes[i].SourcePVC.Name < ns.Volumes[j].SourcePVC.Name })
+	for _, nsPlan := range plan.Namespaces {
+		sort.Slice(nsPlan.Volumes, func(i, j int) bool { return nsPlan.Volumes[i].SourcePVC.Name < nsPlan.Volumes[j].SourcePVC.Name })
 	}
 	sort.Slice(plan.Blockers, func(i, j int) bool {
 		return plan.Blockers[i].Reason+plan.Blockers[i].Message < plan.Blockers[j].Reason+plan.Blockers[j].Message
@@ -228,28 +236,29 @@ func matchesTopology(term corev1.NodeSelectorTerm, region, zone string) bool {
 }
 
 // targetFailureDomain applies PVC override, source map, and single-target fallback in order.
-func targetFailureDomain(m *migrationv1alpha1.VmwareCloudFoundationMigration, pvc *corev1.PersistentVolumeClaim, source string) (string, string) {
+func targetFailureDomain(m *migrationv1alpha1.VmwareCloudFoundationMigration, pvc *corev1.PersistentVolumeClaim, source string) (string, error) {
 	target, override := pvc.Annotations[TargetFailureDomainAnnotation]
 	if override {
 		for _, entry := range m.Spec.FailureDomains {
 			if entry.Name == target {
-				return target, ""
+				return target, nil
 			}
 		}
+		return "", errTargetFailureDomainInvalid
 	}
 
 	for _, entry := range m.Spec.FailureDomainMappings {
 		if source != "" && entry.Source == source {
-			return target, ""
+			return entry.Destination, nil
 		}
 	}
 
 	// if there is only one failure domain pick first one
 	if len(m.Spec.FailureDomains) == 1 {
-		return m.Spec.FailureDomains[0].Name, ""
+		return m.Spec.FailureDomains[0].Name, nil
 	}
 
-	return "", "TargetFailureDomainUnresolved"
+	return "", errTargetFailureDomainUnresolved
 }
 
 // PodVolumes returns inventory indices mounted by a Pod.
@@ -287,12 +296,12 @@ func planVolume(m *migrationv1alpha1.VmwareCloudFoundationMigration, pv *corev1.
 		},
 	}
 
-	target, reason := targetFailureDomain(m, pvc, sourceFailureDomain(pv, sources))
+	target, err := targetFailureDomain(m, pvc, sourceFailureDomain(pv, sources))
 
 	v.TargetFailureDomain = target
 
-	if reason != "" {
-		AddBlocker(&v, reason, "set the PVC target-failure-domain annotation to a target in spec.failureDomains")
+	if err != nil {
+		AddBlocker(&v, err.Error(), "set the PVC target-failure-domain annotation to a target in spec.failureDomains")
 	}
 
 	if pv.Spec.VolumeMode != nil && *pv.Spec.VolumeMode == corev1.PersistentVolumeBlock {
@@ -326,20 +335,20 @@ func checkPodTopology(plan *Plan, pods []corev1.Pod) {
 		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
 			continue
 		}
-		ns := plan.Namespaces[pod.Namespace]
-		if ns == nil {
+		nsPlan := plan.Namespaces[pod.Namespace]
+		if nsPlan == nil {
 			continue
 		}
-		indices := PodVolumes(&pod, ns.Volumes)
+		indices := PodVolumes(&pod, nsPlan.Volumes)
 		targets := map[string]bool{}
 		for _, i := range indices {
-			if fd := ns.Volumes[i].TargetFailureDomain; fd != "" {
+			if fd := nsPlan.Volumes[i].TargetFailureDomain; fd != "" {
 				targets[fd] = true
 			}
 		}
 		if len(targets) > 1 {
 			for _, i := range indices {
-				AddBlocker(&ns.Volumes[i], "IncompatiblePodTopology", fmt.Sprintf("Pod %s mounts PVCs resolving to different target failure domains", pod.Name))
+				AddBlocker(&nsPlan.Volumes[i], "IncompatiblePodTopology", fmt.Sprintf("Pod %s mounts PVCs resolving to different target failure domains", pod.Name))
 			}
 		}
 	}

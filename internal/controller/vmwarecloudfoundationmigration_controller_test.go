@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -160,6 +161,51 @@ var _ = Describe("storage configuration admission", func() {
 
 		resource.Spec.MigrateStorage = false
 		Expect(k8sClient.Update(ctx, resource)).To(MatchError(ContainSubstring("storage can only be set when migrateStorage is true")))
+	})
+
+	It("validates storage class mappings and preserves accepted entries", func() {
+		for _, tt := range []struct {
+			name     string
+			mappings []migrationv1alpha1.StorageClassMapping
+			invalid  bool
+		}{
+			{name: "omitted"},
+			{name: "empty", mappings: []migrationv1alpha1.StorageClassMapping{}},
+			{name: "legacy source", mappings: []migrationv1alpha1.StorageClassMapping{{Source: "legacy-vsphere", Target: "thin-csi"}}},
+			{name: "shared target", mappings: []migrationv1alpha1.StorageClassMapping{
+				{Source: "legacy-vsphere", Target: "thin-csi"}, {Source: "pinned.vsphere", Target: "thin-csi"},
+			}},
+			{name: "identity mapping", mappings: []migrationv1alpha1.StorageClassMapping{{Source: "thin-csi", Target: "thin-csi"}}},
+			{name: "duplicate source", invalid: true, mappings: []migrationv1alpha1.StorageClassMapping{
+				{Source: "legacy", Target: "thin-csi"}, {Source: "legacy", Target: "other-csi"},
+			}},
+			{name: "empty source", invalid: true, mappings: []migrationv1alpha1.StorageClassMapping{{Target: "thin-csi"}}},
+			{name: "empty target", invalid: true, mappings: []migrationv1alpha1.StorageClassMapping{{Source: "legacy"}}},
+			{name: "invalid source", invalid: true, mappings: []migrationv1alpha1.StorageClassMapping{{Source: "Invalid_Name", Target: "thin-csi"}}},
+			{name: "invalid target", invalid: true, mappings: []migrationv1alpha1.StorageClassMapping{{Source: "legacy", Target: "bad/name"}}},
+			{name: "long source", invalid: true, mappings: []migrationv1alpha1.StorageClassMapping{{Source: strings.Repeat("a", 254), Target: "thin-csi"}}},
+			{name: "long target", invalid: true, mappings: []migrationv1alpha1.StorageClassMapping{{Source: "legacy", Target: strings.Repeat("a", 254)}}},
+		} {
+			By(tt.name)
+			resource := newResource()
+			resource.Spec.MigrateStorage = true
+			resource.Spec.Storage.StorageClassMapping = tt.mappings
+			err := k8sClient.Create(ctx, resource)
+			if tt.invalid {
+				Expect(errors.IsInvalid(err)).To(BeTrue(), "expected invalid storageClassMapping: %v", err)
+				continue
+			}
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, resource)).To(Succeed()) })
+			if len(tt.mappings) == 0 {
+				Expect(resource.Spec.Storage.StorageClassMapping).To(BeEmpty())
+			} else {
+				Expect(resource.Spec.Storage.StorageClassMapping).To(Equal(tt.mappings))
+			}
+			stored := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(resource), stored)).To(Succeed())
+			Expect(stored.Spec.Storage.StorageClassMapping).To(Equal(resource.Spec.Storage.StorageClassMapping))
+		}
 	})
 })
 

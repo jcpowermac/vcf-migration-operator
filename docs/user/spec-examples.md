@@ -7,7 +7,7 @@ The `VmwareCloudFoundationMigration` spec requires:
 
 `state` is optional (defaults to `Pending`; set to `Running` to start the migration).
 
-The API also accepts `Planning` and `Paused`. `Planning` reserves the state for migration planning; planning execution is not yet implemented, so it does not start migration work.
+The API also accepts `Planning` and `Paused`. `Planning` runs only the non-disruptive preflight and storage planning checks and never starts migration work; set `state` to `Running` once the plan has no blockers.
 See the full field reference in the [API reference](../dev/api.md).
 
 ## Single Target Failure Domain

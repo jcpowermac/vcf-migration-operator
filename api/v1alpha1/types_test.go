@@ -50,27 +50,26 @@ func TestMigrationProgressNilDeepCopy(t *testing.T) {
 	}
 }
 
-func TestStorageFailureDomainMapDeepCopy(t *testing.T) {
+func TestStorageClassMappingDeepCopy(t *testing.T) {
 	orig := &VmwareCloudFoundationMigration{
 		Spec: VmwareCloudFoundationMigrationSpec{
 			Storage: &StorageMigrationSpec{
-				FailureDomainMap: []FailureDomainMap{
-					{Source: "source-a", Target: "target-a"},
+				StorageClassMapping: []StorageClassMapping{
+					{Source: "legacy-vsphere", Target: "thin-csi"},
 				},
 			},
 		},
 	}
-
 	copied := orig.DeepCopy()
-	if copied.Spec.Storage == nil || len(copied.Spec.Storage.FailureDomainMap) != 1 {
-		t.Fatalf("DeepCopy: failure domain map was not copied: %+v", copied.Spec.Storage)
+	if copied.Spec.Storage == nil || len(copied.Spec.Storage.StorageClassMapping) != 1 {
+		t.Fatalf("DeepCopy: storage class mapping was not copied: %+v", copied.Spec.Storage)
 	}
-	if got := copied.Spec.Storage.FailureDomainMap[0]; got != orig.Spec.Storage.FailureDomainMap[0] {
-		t.Fatalf("DeepCopy: got mapping %+v, want %+v", got, orig.Spec.Storage.FailureDomainMap[0])
+	if got := copied.Spec.Storage.StorageClassMapping[0]; got != orig.Spec.Storage.StorageClassMapping[0] {
+		t.Fatalf("DeepCopy: got mapping %+v, want %+v", got, orig.Spec.Storage.StorageClassMapping[0])
 	}
-	copied.Spec.Storage.FailureDomainMap[0].Source = "changed-source"
-	copied.Spec.Storage.FailureDomainMap[0].Target = "changed-target"
-	if got := orig.Spec.Storage.FailureDomainMap[0]; got.Source != "source-a" || got.Target != "target-a" {
+	copied.Spec.Storage.StorageClassMapping[0].Source = "changed-source"
+	copied.Spec.Storage.StorageClassMapping[0].Target = "changed-target"
+	if got := orig.Spec.Storage.StorageClassMapping[0]; got.Source != "legacy-vsphere" || got.Target != "thin-csi" {
 		t.Fatalf("DeepCopy: mutating the copy changed the original mapping: %+v", got)
 	}
 }

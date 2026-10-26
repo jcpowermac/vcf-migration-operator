@@ -21,6 +21,7 @@ import (
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
 	"github.com/openshift/vcf-migration-operator/internal/openshift"
+	"github.com/openshift/vcf-migration-operator/internal/util"
 	"github.com/openshift/vcf-migration-operator/internal/vsphere"
 )
 
@@ -730,11 +731,7 @@ func listDynamicResourceNames(ctx context.Context, dynamicClient dynamic.Interfa
 	names := make([]string, 0, len(resourceList.Items))
 	for i := range resourceList.Items {
 		item := &resourceList.Items[i]
-		name := item.GetName()
-		if namespace := item.GetNamespace(); namespace != "" {
-			name = namespace + "/" + name
-		}
-		names = append(names, name)
+		names = append(names, util.GetObjectKey(item.GetName(), item.GetNamespace()))
 	}
 
 	sort.Strings(names)

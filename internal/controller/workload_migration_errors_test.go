@@ -177,6 +177,9 @@ func TestCheckMappingForReconcileDrift(t *testing.T) {
 		[]migrationv1alpha1.FailureDomainMapping{{Source: "source-fd-1", Destination: "target-fd-2"}},
 		[]migrationv1alpha1.FailureDomainMapping{{Source: "source-fd-1", Destination: "target-fd-1"}},
 	)
+	// Mappings are only immutable once the migration has started.
+	startTime := metav1.Now()
+	migration.Status.StartTime = &startTime
 	env := newWMErrEnv(t, migration)
 
 	shortCircuit, err := env.reconciler.checkMappingForReconcile(ctx, migration, migration.Status)

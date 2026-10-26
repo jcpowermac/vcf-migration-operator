@@ -1006,26 +1006,31 @@ type StorageMigrationSpec struct {
 	// +kubebuilder:default=Auto
 	DataMigrationStrategy VolumeDataMigrationStrategy `json:"dataMigrationStrategy,omitempty"`
 
-	// FailureDomainMap maps source vCenter failure domains to target vCenter failure domains.
-	// Each source failure domain may appear only once.
+	// StorageClassMapping maps source StorageClasses to target StorageClasses for
+	// provisioning destination PVCs. An unmapped source uses the same StorageClass.
+	// This allows in-tree or datastore-pinned source classes to use a suitable
+	// vSphere CSI target class. Each source may appear only once; multiple sources
+	// may share a target. Existing source PVCs and StorageClasses are not modified.
 	// +optional
 	// +listType=map
 	// +listMapKey=source
-	FailureDomainMap []FailureDomainMap `json:"failureDomainMap,omitempty"`
+	StorageClassMapping []StorageClassMapping `json:"storageClassMapping,omitempty"`
 }
 
-// FailureDomainMap maps a source failure domain to a target failure domain.
-type FailureDomainMap struct {
-	// Source is the source vCenter failure domain name.
+// StorageClassMapping maps a source StorageClass to a target StorageClass.
+type StorageClassMapping struct {
+	// Source is the name of the source PVC's StorageClass.
 	// +required
 	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	Source string `json:"source"`
 
-	// Target is the target vCenter failure domain name.
+	// Target is the name of the vSphere CSI StorageClass for destination PVCs.
 	// +required
 	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	Target string `json:"target"`
 }
 

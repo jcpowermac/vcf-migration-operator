@@ -2,6 +2,7 @@ package storageplan
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -103,12 +104,12 @@ func TestVolumeBlockers(t *testing.T) {
 	}{
 		{"valid", "", func(in *Input) {}},
 		{"raw block", "RawBlockUnsupported", func(in *Input) { in.PVs[0].Spec.VolumeMode = ptr.To(corev1.PersistentVolumeBlock) }},
-		{"in tree", "InTreeVolumeUnsupported", func(in *Input) {
+		{"in tree", "", func(in *Input) {
 			in.PVs[0].Spec.CSI = nil
 			in.PVs[0].Spec.VsphereVolume = &corev1.VsphereVirtualDiskVolumeSource{VolumePath: "disk"}
 		}},
-		{"migrated", "InTreeVolumeUnsupported", func(in *Input) { in.PVs[0].Annotations = map[string]string{"pv.kubernetes.io/migrated-to": Driver} }},
-		{"file", "FileVolumeUnsupported", func(in *Input) { in.PVs[0].Spec.CSI.VolumeHandle = "file:disk" }},
+		{"migrated", "", func(in *Input) { in.PVs[0].Annotations = map[string]string{"pv.kubernetes.io/migrated-to": Driver} }},
+		{"file", "", func(in *Input) { in.PVs[0].Spec.CSI.VolumeHandle = "file:disk" }},
 		{"static", "StaticVolumeUnsupported", func(in *Input) { in.PVCs[0].Spec.StorageClassName = nil }},
 		{"missing class", "StaticVolumeUnsupported", func(in *Input) { in.StorageClasses = nil }},
 		{"immediate", "ImmediateBindingUnsupported", func(in *Input) { in.StorageClasses[0].VolumeBindingMode = nil }},
@@ -203,18 +204,18 @@ func TestFailureDomains(t *testing.T) {
 	}
 	in := validInput()
 	in.Migration.Spec.FailureDomains = append(in.Migration.Spec.FailureDomains, configv1.VSpherePlatformFailureDomainSpec{Name: "second"})
-	in.Migration.Spec.Storage.FailureDomainMap = []migrationv1alpha1.FailureDomainMap{{Source: "source", Target: "second"}}
+	in.Migration.Spec.FailureDomainMappings = []migrationv1alpha1.FailureDomainMapping{{Source: "source", Destination: "second"}}
 	claim := &in.PVCs[0]
-	if target, reason := targetFailureDomain(in.Migration, claim, "source"); target != "second" || reason != "" {
-		t.Fatalf("TargetFailureDomain map: %s %s", target, reason)
+	if target, err := targetFailureDomain(in.Migration, claim, "source"); target != "second" || err != nil {
+		t.Fatalf("TargetFailureDomain map: %s %v", target, err)
 	}
 	claim.Annotations = map[string]string{TargetFailureDomainAnnotation: "target"}
 	if target, _ := targetFailureDomain(in.Migration, claim, "source"); target != "target" {
 		t.Fatalf("TargetFailureDomain override: %s", target)
 	}
 	claim.Annotations[TargetFailureDomainAnnotation] = ""
-	if _, reason := targetFailureDomain(in.Migration, claim, "source"); reason != "TargetFailureDomainInvalid" {
-		t.Fatalf("TargetFailureDomain empty override: %s", reason)
+	if _, err := targetFailureDomain(in.Migration, claim, "source"); !errors.Is(err, errTargetFailureDomainInvalid) {
+		t.Fatalf("TargetFailureDomain empty override: %v", err)
 	}
 }
 
