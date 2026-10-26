@@ -311,7 +311,8 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 	}
 
 	// Record the effective mapping so later phases and immutability checks use
-	// the pairs resolved at preflight.
+	// the pairs resolved at preflight. Before the migration starts, a re-run for
+	// an edited spec replaces the previously recorded mapping.
 	migration.Status.FailureDomainMappings = mappings
 
 	message := "Preflight validation passed"

@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -1301,6 +1302,7 @@ func TestUpdateStatusSkipsStaleMappingPublication(t *testing.T) {
 	}
 
 	mappings := []migrationv1alpha1.FailureDomainMapping{{Source: "source-fd-1", Destination: "target-fd-1"}}
+	previous := []migrationv1alpha1.FailureDomainMapping{{Source: "source-fd-1", Destination: "target-fd-0"}}
 	// inFlight is the copy this reconcile fetched and validated: generation 1.
 	inFlight := &migrationv1alpha1.VmwareCloudFoundationMigration{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1315,17 +1317,30 @@ func TestUpdateStatusSkipsStaleMappingPublication(t *testing.T) {
 		name           string
 		latestGen      int64
 		latestMappings []migrationv1alpha1.FailureDomainMapping
-		wantPublished  bool
+		latestStarted  bool
+		want           []migrationv1alpha1.FailureDomainMapping
 	}{
 		{
-			name:          "same generation publishes mapping",
-			latestGen:     1,
-			wantPublished: true,
+			name:      "same generation publishes mapping",
+			latestGen: 1,
+			want:      mappings,
 		},
 		{
-			name:          "newer generation does not receive stale mapping",
-			latestGen:     2,
-			wantPublished: false,
+			name:      "newer generation does not receive stale mapping",
+			latestGen: 2,
+		},
+		{
+			name:           "replanning before start replaces recorded mapping",
+			latestGen:      1,
+			latestMappings: previous,
+			want:           mappings,
+		},
+		{
+			name:           "started migration keeps recorded mapping",
+			latestGen:      1,
+			latestMappings: previous,
+			latestStarted:  true,
+			want:           previous,
 		},
 	}
 	for _, tt := range tests {
@@ -1339,6 +1354,10 @@ func TestUpdateStatusSkipsStaleMappingPublication(t *testing.T) {
 				Status: migrationv1alpha1.VmwareCloudFoundationMigrationStatus{
 					FailureDomainMappings: tt.latestMappings,
 				},
+			}
+			if tt.latestStarted {
+				started := metav1.Now()
+				latest.Status.StartTime = &started
 			}
 			fakeClient := clientfake.NewClientBuilder().
 				WithScheme(scheme).
@@ -1361,9 +1380,8 @@ func TestUpdateStatusSkipsStaleMappingPublication(t *testing.T) {
 			if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(latest), persisted); err != nil {
 				t.Fatalf("getting persisted migration: %v", err)
 			}
-			got := len(persisted.Status.FailureDomainMappings) > 0
-			if got != tt.wantPublished {
-				t.Fatalf("mapping published = %v, want %v (persisted status %+v)", got, tt.wantPublished, persisted.Status)
+			if got := persisted.Status.FailureDomainMappings; !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("persisted mappings = %+v, want %+v", got, tt.want)
 			}
 		})
 	}

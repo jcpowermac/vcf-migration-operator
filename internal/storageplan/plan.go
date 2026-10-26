@@ -166,14 +166,15 @@ func Parameter(sc *storagev1.StorageClass, key string) (string, bool) {
 	return "", false
 }
 
-// SourceFailureDomain resolves all affinity terms conservatively; ambiguous placement is unknown.
-func SourceFailureDomain(pv *corev1.PersistentVolume, sources []configv1.VSpherePlatformFailureDomainSpec) string {
+// sourceFailureDomain resolves all affinity terms conservatively; ambiguous placement is unknown.
+func sourceFailureDomain(pv *corev1.PersistentVolume, sources []configv1.VSpherePlatformFailureDomainSpec) string {
 	if pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil {
 		if len(sources) == 1 {
 			return sources[0].Name
 		}
 		return ""
 	}
+
 	matches := map[string]bool{}
 	for _, term := range pv.Spec.NodeAffinity.Required.NodeSelectorTerms {
 		for _, fd := range sources {
@@ -191,7 +192,13 @@ func SourceFailureDomain(pv *corev1.PersistentVolume, sources []configv1.VSphere
 }
 
 func matchesTopology(term corev1.NodeSelectorTerm, region, zone string) bool {
-	values := map[string]string{"topology.csi.vmware.com/openshift-region": region, "topology.csi.vmware.com/openshift-zone": zone, "topology.kubernetes.io/region": region, "topology.kubernetes.io/zone": zone}
+	values := map[string]string{
+		"topology.csi.vmware.com/openshift-region": region,
+		"topology.csi.vmware.com/openshift-zone":   zone,
+		"topology.kubernetes.io/region":            region,
+		"topology.kubernetes.io/zone":              zone,
+	}
+
 	for _, req := range term.MatchExpressions {
 		value, ok := values[req.Key]
 		if !ok {
@@ -223,25 +230,25 @@ func matchesTopology(term corev1.NodeSelectorTerm, region, zone string) bool {
 // targetFailureDomain applies PVC override, source map, and single-target fallback in order.
 func targetFailureDomain(m *migrationv1alpha1.VmwareCloudFoundationMigration, pvc *corev1.PersistentVolumeClaim, source string) (string, string) {
 	target, override := pvc.Annotations[TargetFailureDomainAnnotation]
-	if !override && m.Spec.Storage != nil {
-		for _, entry := range m.Spec.Storage.FailureDomainMap {
-			if source != "" && entry.Source == source {
-				target = entry.Target
-				break
+	if override {
+		for _, entry := range m.Spec.FailureDomains {
+			if entry.Name == target {
+				return target, ""
 			}
 		}
 	}
-	if target == "" && !override && len(m.Spec.FailureDomains) == 1 {
-		target = m.Spec.FailureDomains[0].Name
-	}
-	for _, fd := range m.Spec.FailureDomains {
-		if fd.Name == target {
+
+	for _, entry := range m.Spec.FailureDomainMappings {
+		if source != "" && entry.Source == source {
 			return target, ""
 		}
 	}
-	if override || target != "" {
-		return "", "TargetFailureDomainInvalid"
+
+	// if there is only one failure domain pick first one
+	if len(m.Spec.FailureDomains) == 1 {
+		return m.Spec.FailureDomains[0].Name, ""
 	}
+
 	return "", "TargetFailureDomainUnresolved"
 }
 
@@ -280,21 +287,18 @@ func planVolume(m *migrationv1alpha1.VmwareCloudFoundationMigration, pv *corev1.
 		},
 	}
 
-	target, reason := targetFailureDomain(m, pvc, SourceFailureDomain(pv, sources))
+	target, reason := targetFailureDomain(m, pvc, sourceFailureDomain(pv, sources))
 
 	v.TargetFailureDomain = target
+
 	if reason != "" {
 		AddBlocker(&v, reason, "set the PVC target-failure-domain annotation to a target in spec.failureDomains")
 	}
+
 	if pv.Spec.VolumeMode != nil && *pv.Spec.VolumeMode == corev1.PersistentVolumeBlock {
 		AddBlocker(&v, "RawBlockUnsupported", "raw block volumes cannot be migrated")
 	}
-	if pv.Spec.VsphereVolume != nil || pv.Annotations["pv.kubernetes.io/migrated-to"] != "" {
-		AddBlocker(&v, "InTreeVolumeUnsupported", "in-tree and CSI-migrated in-tree volumes cannot be migrated")
-	}
-	if strings.HasPrefix(handle, "file:") {
-		AddBlocker(&v, "FileVolumeUnsupported", "vSAN file service volumes cannot be migrated")
-	}
+
 	var sc *storagev1.StorageClass
 	if pvc.Spec.StorageClassName != nil {
 		sc = classes[*pvc.Spec.StorageClassName]

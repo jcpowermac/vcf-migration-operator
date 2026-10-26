@@ -347,8 +347,9 @@ type VmwareCloudFoundationMigrationStatus struct {
 
 	// failureDomainMappings is the effective source-to-destination failure domain
 	// mapping resolved at preflight. When spec.failureDomainMappings is omitted it
-	// holds the single inferred pair. The controller treats this field as
-	// write-once: after preflight resolves the mappings it does not rewrite them.
+	// holds the single inferred pair. Until the migration starts, each preflight
+	// run replaces it with the mapping resolved for the current spec. Once the
+	// migration has started the controller treats this field as write-once.
 	// +optional
 	// +listType=atomic
 	FailureDomainMappings []FailureDomainMapping `json:"failureDomainMappings,omitempty"`
@@ -1081,7 +1082,7 @@ const (
 	ReasonCompleted     = "Completed"
 	ReasonFailed        = "Failed"
 	// ReasonMappingRejected indicates spec.failureDomainMappings was changed
-	// after preflight recorded the effective mapping. It is distinct from
+	// after the migration started with the recorded mapping. It is distinct from
 	// ReasonFailed so condition handling does not have to guess which entries a
 	// generic failure left behind.
 	ReasonMappingRejected = "MappingRejected"

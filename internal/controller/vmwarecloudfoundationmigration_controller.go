@@ -1678,15 +1678,20 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 		if completed {
 			hasChanges = true
 		}
-		// The preflight-resolved mapping is recorded once and never
-		// overwritten, like the timestamps above. Only publish the mapping for
-		// the generation (and object identity) it was validated against: a spec
-		// edit or delete/recreate can land between this reconcile's fetch and
-		// the status write, and publishing a stale mapping would lock the newer
-		// valid spec out via ensureMappingImmutable.
-		if len(migration.Status.FailureDomainMappings) > 0 && len(latest.Status.FailureDomainMappings) == 0 &&
-			migration.Generation == latest.Generation && migration.UID == latest.UID {
-			latest.Status.FailureDomainMappings = migration.Status.FailureDomainMappings
+		// Only publish the mapping for the generation (and object identity) it
+		// was validated against: a spec edit or delete/recreate can land
+		// between this reconcile's fetch and the status write, and publishing a
+		// stale mapping would lock the newer valid spec out via
+		// ensureMappingImmutable.
+		resolved := migration.Status.FailureDomainMappings
+		sameObject := migration.Generation == latest.Generation && migration.UID == latest.UID
+		// Until the migration starts, preflight re-runs for each spec
+		// generation and its mapping replaces the recorded one. Afterwards the
+		// mapping is write-once, like the timestamps above.
+		firstRecord := len(latest.Status.FailureDomainMappings) == 0
+		replanned := latest.Status.StartTime == nil && !slices.Equal(resolved, latest.Status.FailureDomainMappings)
+		if len(resolved) > 0 && sameObject && (firstRecord || replanned) {
+			latest.Status.FailureDomainMappings = resolved
 			hasChanges = true
 		}
 		if mergeInitialNodeMigrationPlan(migration, latest, baseStatus) {

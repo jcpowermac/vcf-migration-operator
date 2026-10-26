@@ -186,19 +186,19 @@ func TestFailureDomains(t *testing.T) {
 	sources := []configv1.VSpherePlatformFailureDomainSpec{{Name: "a", Region: "r", Zone: "z"}, {Name: "b", Region: "r", Zone: "other"}}
 	for _, prefix := range []string{"topology.csi.vmware.com/openshift-", "topology.kubernetes.io/"} {
 		pv := corev1.PersistentVolume{Spec: corev1.PersistentVolumeSpec{NodeAffinity: &corev1.VolumeNodeAffinity{Required: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{{Key: prefix + "region", Operator: corev1.NodeSelectorOpIn, Values: []string{"r"}}, {Key: prefix + "zone", Operator: corev1.NodeSelectorOpIn, Values: []string{"z"}}}}}}}}}
-		if got := SourceFailureDomain(&pv, sources); got != "a" {
+		if got := sourceFailureDomain(&pv, sources); got != "a" {
 			t.Fatalf("SourceFailureDomain: %q", got)
 		}
 		pv.Spec.NodeAffinity.Required.NodeSelectorTerms[0].MatchExpressions[1].Values = append([]string{"z"}, "other")
-		if got := SourceFailureDomain(&pv, sources); got != "" {
+		if got := sourceFailureDomain(&pv, sources); got != "" {
 			t.Fatalf("SourceFailureDomain ambiguous: %q", got)
 		}
 	}
 	pv := &corev1.PersistentVolume{}
-	if got := SourceFailureDomain(pv, sources[:1]); got != "a" {
+	if got := sourceFailureDomain(pv, sources[:1]); got != "a" {
 		t.Fatalf("SourceFailureDomain fallback: %q", got)
 	}
-	if got := SourceFailureDomain(pv, sources); got != "" {
+	if got := sourceFailureDomain(pv, sources); got != "" {
 		t.Fatalf("SourceFailureDomain unknown: %q", got)
 	}
 	in := validInput()
@@ -392,7 +392,7 @@ func TestAffinityAlternativeWithoutTopology(t *testing.T) {
 		{MatchExpressions: []corev1.NodeSelectorRequirement{{Key: "topology.kubernetes.io/zone", Operator: corev1.NodeSelectorOpIn, Values: []string{"a"}}}},
 		{MatchExpressions: []corev1.NodeSelectorRequirement{{Key: "kubernetes.io/hostname", Operator: corev1.NodeSelectorOpIn, Values: []string{"node"}}}},
 	}}}}}
-	if got := SourceFailureDomain(pv, sources); got != "" {
+	if got := sourceFailureDomain(pv, sources); got != "" {
 		t.Fatalf("SourceFailureDomain ignored alternative: %s", got)
 	}
 }

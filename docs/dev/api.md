@@ -47,9 +47,12 @@ The secret must contain keys in the format `<vcenter-fqdn>.username` and `<vcent
 
 ### Failure Domain Mapping Behavior
 
-The effective mapping is resolved once at preflight and recorded in
-`status.failureDomainMappings`; every later phase uses the recorded value. After
-preflight, `spec.failureDomainMappings` is only checked for equivalence with the recorded
+The effective mapping is resolved at preflight and recorded in
+`status.failureDomainMappings`; every later phase uses the recorded value. Until the
+migration starts (`status.startTime` is unset, i.e. during `Pending` or `Planning`), the
+mapping stays editable: preflight re-runs for each spec generation and replaces the
+recorded mapping with the newly resolved one. Once the migration has started,
+`spec.failureDomainMappings` is only checked for equivalence with the recorded
 mapping: reordering the same source→destination pairs is accepted (the comparison ignores
 order), and clearing the field is tolerated (the recorded mapping keeps driving every
 later phase, and an empty recorded list short-circuits the check too). Changing an
