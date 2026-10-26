@@ -4,7 +4,7 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: vcf-migration-operator
-  name: vcf-migration-operator-allow-api-server-egress
+  name: vcf-migration-operator-allow-all-egress
 spec:
   egress:
   - {}
