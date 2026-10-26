@@ -109,6 +109,27 @@ func selectVMotionSourceFailureDomainByOwner(node *corev1.Node, owner vsphere.VM
 	return selected, nil
 }
 
+// reconcileVMotionWorkflow initializes lifecycle status and dispatches VMotion
+// planning. Planning state runs the same non-disruptive VMotion checks but
+// leaves StartTime unset so the migration can still be reviewed before Running.
+func (r *VmwareCloudFoundationMigrationReconciler) reconcileVMotionWorkflow(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus, state migrationv1alpha1.MigrationState) (ctrl.Result, error) {
+	r.seedReadyCondition(migration)
+
+	startExecution := state == migrationv1alpha1.MigrationStateRunning && migration.Status.StartTime == nil
+	if startExecution {
+		now := metav1.Now()
+		migration.Status.StartTime = &now
+		if r.Recorder != nil {
+			r.Recorder.Eventf(migration, nil, "Normal", "MigrationStarted", "MigrationStarted", "Migration workflow started")
+		}
+		if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	return r.reconcileVMotionPlan(ctx, migration, baseStatus)
+}
+
 func (r *VmwareCloudFoundationMigrationReconciler) reconcileVMotionPlan(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus) (ctrl.Result, error) {
 	if err := validateVMotionSelection(migration.Spec.NodeMigration); err != nil {
 		return r.blockVMotionPlan(ctx, migration, baseStatus, err.Error())

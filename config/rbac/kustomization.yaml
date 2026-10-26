@@ -26,3 +26,6 @@ resources:
 - vmwarecloudfoundationmigration_editor_role.yaml
 - vmwarecloudfoundationmigration_viewer_role.yaml
 
+- storageworkloadmigration_admin_role.yaml
+- storageworkloadmigration_editor_role.yaml
+- storageworkloadmigration_viewer_role.yaml

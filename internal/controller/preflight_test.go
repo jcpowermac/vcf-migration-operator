@@ -496,6 +496,27 @@ func TestRunPreflightChecks(t *testing.T) {
 			wantTargetSecretReadCount: 2,
 		},
 		{
+			name:                  "storage planning permits CSI volumes with Managed driver",
+			version:               "5.0.0",
+			gateEnabled:           true,
+			omitDefaultStorageOps: true,
+			dynamicObjects: []runtime.Object{
+				newManagementStateResource("ClusterCSIDriver", vsphereCSIDriverName, "Managed"),
+				newManagementStateResource("Storage", "cluster", "Managed"),
+			},
+			pvs: []runtime.Object{&corev1.PersistentVolume{
+				ObjectMeta: metav1.ObjectMeta{Name: "vsphere-csi-pv"},
+				Spec: corev1.PersistentVolumeSpec{PersistentVolumeSource: corev1.PersistentVolumeSource{
+					CSI: &corev1.CSIPersistentVolumeSource{Driver: vsphereCSIDriverName},
+				}},
+			}},
+			mutateMigration: func(m *migrationv1alpha1.VmwareCloudFoundationMigration) {
+				m.Spec.MigrateStorage = true
+			},
+			wantMessageContains:       "Preflight validation passed",
+			wantTargetSecretReadCount: 2,
+		},
+		{
 			name:        "rejects source ComputeCluster region affinity",
 			version:     "5.0.0",
 			gateEnabled: true,

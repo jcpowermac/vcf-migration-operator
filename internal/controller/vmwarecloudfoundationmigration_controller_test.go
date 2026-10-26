@@ -114,6 +114,51 @@ var _ = Describe("required failure-domain template admission", func() {
 		}
 		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, resource)).To(Succeed()) })
+		Expect(resource.Spec.State).To(Equal(migrationv1alpha1.MigrationStatePending))
+
+		By("accepting Planning on update and create")
+		resource.Spec.State = migrationv1alpha1.MigrationStatePlanning
+		Expect(k8sClient.Update(ctx, resource)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: resource.Name, Namespace: resource.Namespace}, resource)).To(Succeed())
+		Expect(resource.Spec.State).To(Equal(migrationv1alpha1.MigrationStatePlanning))
+
+		planned := resource.DeepCopy()
+		planned.Name = ""
+		planned.ResourceVersion = ""
+		planned.UID = ""
+		Expect(k8sClient.Create(ctx, planned)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, planned)).To(Succeed()) })
+		Expect(planned.Spec.State).To(Equal(migrationv1alpha1.MigrationStatePlanning))
+	})
+})
+
+var _ = Describe("storage configuration admission", func() {
+	newResource := func() *migrationv1alpha1.VmwareCloudFoundationMigration {
+		return &migrationv1alpha1.VmwareCloudFoundationMigration{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: "storage-admission-", Namespace: "default"},
+			Spec: migrationv1alpha1.VmwareCloudFoundationMigrationSpec{
+				TargetVCenterCredentialsSecret: migrationv1alpha1.SecretReference{Name: "target-vcenter-creds"},
+				Storage:                        &migrationv1alpha1.StorageMigrationSpec{},
+				FailureDomains: []configv1.VSpherePlatformFailureDomainSpec{{
+					Name: "fd-a", Region: "region-a", Zone: "zone-a", Server: "vcenter.example.com",
+					Topology: configv1.VSpherePlatformTopology{Datacenter: "DC1", ComputeCluster: "/DC1/host/Cluster1", Datastore: "/DC1/datastore/DS1", Networks: []string{"VM Network"}, Template: "/DC1/vm/template-a"},
+				}},
+			},
+		}
+	}
+
+	It("rejects storage when migrateStorage is not enabled", func() {
+		Expect(k8sClient.Create(ctx, newResource())).To(MatchError(ContainSubstring("storage can only be set when migrateStorage is true")))
+	})
+
+	It("accepts storage when migrateStorage is enabled and rejects disabling it", func() {
+		resource := newResource()
+		resource.Spec.MigrateStorage = true
+		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, resource)).To(Succeed()) })
+
+		resource.Spec.MigrateStorage = false
+		Expect(k8sClient.Update(ctx, resource)).To(MatchError(ContainSubstring("storage can only be set when migrateStorage is true")))
 	})
 })
 

@@ -254,6 +254,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 	}
 
 	if err := runPreflightStep(log, "vSphere CSI persistent volumes", func() error {
+		if migration.Spec.MigrateStorage {
+			return nil
+		}
 		return checkNoVSphereCSIPersistentVolumes(ctx, r.KubeClient)
 	}); err != nil {
 		return "", err
@@ -261,7 +264,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 	var storageWarning string
 	if err := runPreflightStep(log, "storage management state", func() error {
 		var err error
-		storageWarning, err = checkVSphereStorageManagement(ctx, r.DynamicClient)
+		storageWarning, err = checkStorageManagementForPlan(ctx, r.DynamicClient, migration.Spec.MigrateStorage)
 		return err
 	}); err != nil {
 		return "", err
@@ -480,7 +483,7 @@ func checkNoVSphereCSIPersistentVolumes(ctx context.Context, kubeClient kubernet
 	}
 
 	sort.Strings(blocked)
-	return fmt.Errorf("vSphere CSI-backed persistent volumes are not supported for migration; remove PersistentVolumes using driver %q: %s", vsphereCSIDriverName, strings.Join(blocked, ", "))
+	return fmt.Errorf("vSphere CSI-backed persistent volumes are not supported for migration; configure spec.storage or remove PersistentVolumes using driver %q: %s", vsphereCSIDriverName, strings.Join(blocked, ", "))
 }
 
 func checkVSphereStorageManagement(ctx context.Context, dynamicClient dynamic.Interface) (string, error) {

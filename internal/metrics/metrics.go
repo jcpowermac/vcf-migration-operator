@@ -101,6 +101,7 @@ var (
 	// phaseOrder lists the workflow conditions in execution order.
 	phaseOrder = []string{
 		migrationv1alpha1.ConditionInfrastructurePrepared,
+		migrationv1alpha1.ConditionStoragePlanned,
 		migrationv1alpha1.ConditionDestinationInitialized,
 		migrationv1alpha1.ConditionMultiSiteConfigured,
 		migrationv1alpha1.ConditionWorkloadMigrated,
@@ -108,7 +109,7 @@ var (
 	}
 
 	allPhases = []string{
-		"Pending", "InfrastructurePrepared", "DestinationInitialized",
+		"Pending", "Planning", "PlanComplete", "InfrastructurePrepared", "StoragePlanned", "DestinationInitialized",
 		"MultiSiteConfigured", "WorkloadMigrated",
 		"SourceCleaned", "Completed", "Failed", "Paused",
 	}
@@ -153,8 +154,15 @@ func PhaseFromConditions(status *migrationv1alpha1.VmwareCloudFoundationMigratio
 	if ready != nil && ready.Status == metav1.ConditionTrue {
 		return "Completed"
 	}
-	if ready != nil && ready.Reason == migrationv1alpha1.ReasonPaused {
-		return "Paused"
+	if ready != nil {
+		switch ready.Reason {
+		case migrationv1alpha1.ReasonPaused, migrationv1alpha1.ReasonPlanningAfterStart:
+			return "Paused"
+		case migrationv1alpha1.ReasonPlanning:
+			return "Planning"
+		case migrationv1alpha1.ReasonPlanComplete:
+			return "PlanComplete"
+		}
 	}
 	started := false
 	for _, condType := range phaseOrder {

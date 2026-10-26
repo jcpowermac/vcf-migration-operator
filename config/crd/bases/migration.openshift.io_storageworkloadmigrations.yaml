@@ -1,0 +1,282 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: storageworkloadmigrations.migration.openshift.io
+spec:
+  group: migration.openshift.io
+  names:
+    categories:
+    - migration
+    kind: StorageWorkloadMigration
+    listKind: StorageWorkloadMigrationList
+    plural: storageworkloadmigrations
+    shortNames:
+    - swm
+    singular: storageworkloadmigration
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .spec.migrationRef.name
+      name: Migration
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: StorageWorkloadMigration tracks customer-coordinated storage
+          migration in one namespace.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: Spec identifies the migration that owns this plan.
+            properties:
+              migrationRef:
+                description: MigrationRef identifies the VmwareCloudFoundationMigration
+                  that owns this plan.
+                properties:
+                  name:
+                    description: Name is the object name.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  uid:
+                    description: UID is the identity of the object; same-name replacements
+                      must not be adopted.
+                    maxLength: 128
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                - uid
+                type: object
+                x-kubernetes-validations:
+                - message: migrationRef is immutable
+                  rule: self == oldSelf
+            required:
+            - migrationRef
+            type: object
+          status:
+            description: Status contains operator-owned inventory and progress.
+            properties:
+              conditions:
+                description: Conditions reports readiness, blockers, retries, and
+                  required customer actions.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              consumers:
+                description: Consumers lists workload controllers observed consuming
+                  PVCs in this namespace.
+                items:
+                  description: |-
+                    StorageWorkloadMigrationConsumer records a workload controller observed consuming
+                    PVCs in this namespace. It is informational: it tells the customer which workloads
+                    to stop and resume, and lists the workloads checked for readiness during validation.
+                    It is not an identity check; quiescence is verified through Pods and VolumeAttachments.
+                  properties:
+                    apiVersion:
+                      description: APIVersion is the API group and version of the
+                        consumer.
+                      minLength: 1
+                      type: string
+                    kind:
+                      description: Kind is the consumer resource kind.
+                      minLength: 1
+                      type: string
+                    name:
+                      description: Name is the consumer name in this workload namespace.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                    uid:
+                      description: UID is the identity of the consumer when it was
+                        observed.
+                      maxLength: 128
+                      minLength: 1
+                      type: string
+                  required:
+                  - apiVersion
+                  - kind
+                  - name
+                  - uid
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - uid
+                x-kubernetes-list-type: map
+              phase:
+                description: Phase identifies the current lifecycle phase.
+                enum:
+                - Planning
+                type: string
+              volumes:
+                description: Volumes records source identities and resolved destinations.
+                items:
+                  description: StorageWorkloadMigrationVolume records a source volume
+                    and its planned destination.
+                  properties:
+                    blockers:
+                      description: Blockers lists reasons this volume cannot be migrated.
+                      items:
+                        description: StorageWorkloadMigrationBlocker explains why
+                          a volume cannot be migrated.
+                        properties:
+                          message:
+                            description: Message explains the blocker and how to resolve
+                              it.
+                            maxLength: 1024
+                            type: string
+                          reason:
+                            description: Reason is a CamelCase blocker identifier.
+                            maxLength: 64
+                            minLength: 1
+                            type: string
+                        required:
+                        - message
+                        - reason
+                        type: object
+                      type: array
+                      x-kubernetes-list-map-keys:
+                      - reason
+                      x-kubernetes-list-type: map
+                    sourcePV:
+                      description: SourcePV identifies the bound source PV and CSI
+                        volume.
+                      properties:
+                        name:
+                          description: Name is the source PV name.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        uid:
+                          description: UID is the source PV identity.
+                          maxLength: 128
+                          minLength: 1
+                          type: string
+                        volumeHandle:
+                          description: VolumeHandle identifies the source CSI volume.
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      - uid
+                      - volumeHandle
+                      type: object
+                    sourcePVC:
+                      description: SourcePVC identifies the source PVC in this workload
+                        namespace.
+                      properties:
+                        name:
+                          description: Name is the object name.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        uid:
+                          description: UID is the identity of the object; same-name
+                            replacements must not be adopted.
+                          maxLength: 128
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      - uid
+                      type: object
+                    targetFailureDomain:
+                      description: TargetFailureDomain is the resolved target failure
+                        domain; absent while unresolved.
+                      maxLength: 256
+                      minLength: 1
+                      type: string
+                  required:
+                  - sourcePV
+                  - sourcePVC
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -21,7 +21,15 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - namespaces
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - ""
+  resources:
   - nodes
+  - persistentvolumeclaims
   - persistentvolumes
   verbs:
   - get
@@ -35,6 +43,14 @@ rules:
   verbs:
   - create
   - patch
+- apiGroups:
+  - apps
+  resources:
+  - daemonsets
+  - replicasets
+  - statefulsets
+  verbs:
+  - get
 - apiGroups:
   - apps
   resources:
@@ -54,6 +70,13 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - batch
+  resources:
+  - cronjobs
+  - jobs
+  verbs:
+  - get
 - apiGroups:
   - config.openshift.io
   resources:
@@ -119,6 +142,26 @@ rules:
 - apiGroups:
   - migration.openshift.io
   resources:
+  - storageworkloadmigrations
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - migration.openshift.io
+  resources:
+  - storageworkloadmigrations/status
+  - vmwarecloudfoundationmigrations/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - migration.openshift.io
+  resources:
   - vmwarecloudfoundationmigrations
   verbs:
   - get
@@ -131,14 +174,6 @@ rules:
   resources:
   - vmwarecloudfoundationmigrations/finalizers
   verbs:
-  - update
-- apiGroups:
-  - migration.openshift.io
-  resources:
-  - vmwarecloudfoundationmigrations/status
-  verbs:
-  - get
-  - patch
   - update
 - apiGroups:
   - networking.k8s.io
@@ -159,3 +194,10 @@ rules:
   - storages
   verbs:
   - get
+- apiGroups:
+  - storage.k8s.io
+  resources:
+  - storageclasses
+  verbs:
+  - get
+  - list

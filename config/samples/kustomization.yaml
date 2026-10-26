@@ -1,4 +1,5 @@
 ## Append samples of your project ##
 resources:
 - migration_v1alpha1_vmwarecloudfoundationmigration.yaml
+- migration_v1alpha1_storageworkloadmigration.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

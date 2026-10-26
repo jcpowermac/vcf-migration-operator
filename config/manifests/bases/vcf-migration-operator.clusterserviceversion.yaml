@@ -19,6 +19,12 @@ spec:
   apiservicedefinitions: {}
   customresourcedefinitions:
     owned:
+    - description: StorageWorkloadMigration tracks customer-coordinated storage migration
+        in one namespace.
+      displayName: Storage Workload Migration
+      kind: StorageWorkloadMigration
+      name: storageworkloadmigrations.migration.openshift.io
+      version: v1alpha1
     - description: |-
         VmwareCloudFoundationMigration is the Schema for the vmwarecloudfoundationmigrations API.
         It orchestrates migration of an OpenShift cluster from one vCenter to another.

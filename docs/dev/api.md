@@ -16,13 +16,18 @@
 | `failureDomainMappings` | `[]FailureDomainMapping` | No | | Maps source failure domain names (from `Infrastructure`) to destination `failureDomains` entries. Required unless exactly one source and one destination failure domain exist; must cover every failure domain exactly once. |
 | `nodeMigration` | `NodeMigrationSpec` | No | | Selects Recreate or the VMotion API shape. When omitted, retains MachineSet/CPMS replacement. VMotion requires both roles, explicit matching Hot/Cold modes, and serial worker availability. API shape does not mean controller execution is implemented. See [Node Migration API](node-migration-api.md). |
 
+- `state` (`MigrationState`, optional, default `Pending`): accepts `Pending`, `Planning`, `Running`, or `Paused`. The migration workflow only executes when `Running`.
+- `targetVCenterCredentialsSecret` (`SecretReference`, required): Secret with target vCenter credentials.
+- `failureDomains` (`[]VSpherePlatformFailureDomainSpec`, required, minimum one): target failure domains, using the OpenShift `configv1` type.
+- `failureDomainMappings` (`[]FailureDomainMapping`, optional): maps source failure domain names (from `Infrastructure`) to destination `failureDomains` entries. Required unless exactly one source and one destination failure domain exist; must cover every failure domain exactly once.
+>>>>>>> 4b9daa3f (Implement support for storage planning)
+
 ### MigrationState Enum
 
-| Value | Meaning |
-|-------|---------|
-| `Pending` | Migration has not started |
-| `Running` | Migration is actively progressing |
-| `Paused` | Migration is paused by the user |
+- `Pending`: migration has not started.
+- `Planning`: the cluster administrator has requested migration planning. The API accepts this value; planning execution is not yet implemented, so the reconciler skips migration work in this state.
+- `Running`: migration is actively progressing.
+- `Paused`: migration is paused by the user.
 
 ### SecretReference
 
