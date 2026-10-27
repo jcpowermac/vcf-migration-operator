@@ -9,6 +9,12 @@ import unittest
 
 SCRIPT = Path(__file__).with_name("sync-main.sh").resolve()
 CONFLICT = "Conflict while cherry-picking"
+# Inherited Git redirection must not leak into the fixtures or the script.
+GIT_REDIRECT_VARS = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE",
+    "GIT_PREFIX", "GIT_QUARANTINE_PATH",
+)
 
 
 class SyncMainTest(unittest.TestCase):
@@ -20,6 +26,8 @@ class SyncMainTest(unittest.TestCase):
         self.repo.mkdir()
         self.env = dict(os.environ, GIT_CONFIG_NOSYSTEM="1",
                         GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0")
+        for var in GIT_REDIRECT_VARS:
+            self.env.pop(var, None)
         self.git("init", "-b", "main")
         self.git("config", "user.name", "Test")
         self.git("config", "user.email", "test@example.invalid")
@@ -163,6 +171,15 @@ exit 1
         self.assertIn("PR already open", self.run_sync("--yes"))
         self.assertFalse(self.worktree().exists())
 
+    def test_ignores_inherited_git_redirection(self):
+        bogus = str(self.repo / "nonexistent")
+        env = dict(self.env, GIT_DIR=bogus, GIT_WORK_TREE=bogus,
+                   GIT_INDEX_FILE=bogus, GIT_COMMON_DIR=bogus)
+        result = subprocess.run(["/bin/bash", str(SCRIPT), "v0.1", "--list"],
+                                cwd=self.repo, env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("cherry-pick", result.stdout)
+
     def assert_sync_rejected(self, message, *args):
         worktree = str(self.worktree())
         refs = self.git("for-each-ref", "--format=%(refname) %(objectname)", "refs/heads")
@@ -265,6 +282,10 @@ exit 1
         result = self.run_sync_raw("--yes")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(CONFLICT, result.stderr)
+        empty_commit = (f'git -C "{self.worktree().resolve()}" -c core.commentChar=\'#\' '
+                        'commit --allow-empty --no-edit')
+        self.assertIn(empty_commit, result.stderr)
+        self.assertIn("git add", result.stderr)
         # the picks ran in a worktree, the invoking checkout is untouched
         self.assertEqual(self.git("branch", "--show-current"), "main")
         worktree = self.worktree()
@@ -274,6 +295,7 @@ exit 1
         again = self.run_sync_raw("--yes")
         self.assertNotEqual(again.returncode, 0)
         self.assertIn("still in progress", again.stderr)
+        self.assertIn(empty_commit, again.stderr)
 
         (worktree / "clash").write_text("resolved\n")
         self.git("-C", str(worktree), "add", "clash")

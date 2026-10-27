@@ -35,6 +35,12 @@
 
 set -euo pipefail
 
+# Ignore inherited Git redirection (hooks, `git rebase --exec`, CI wrappers) so
+# every command below addresses the invoking checkout, not an outer repository.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+    GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX \
+    GIT_QUARANTINE_PATH
+
 UPSTREAM_REMOTE=upstream
 FORK_REMOTE=origin
 UPSTREAM_REPO=openshift/vcf-migration-operator
@@ -96,7 +102,13 @@ if [ -e "$worktree_dir" ]; then
     [ "$(git -C "$worktree_dir" symbolic-ref -q HEAD)" = "refs/heads/$BRANCH" ] ||
         fail "$worktree_dir must have $BRANCH checked out; restore that branch and rerun"
     if git -C "$worktree_dir" rev-parse -q --verify CHERRY_PICK_HEAD >/dev/null; then
-        fail "a cherry-pick is still in progress; finish it with 'git -C \"$worktree_dir\" cherry-pick --continue' (or --skip / --abort), then rerun"
+        fail "a cherry-pick is still in progress; resolve the conflict and stage the resolution with git add/rm, then:
+    git -C \"$worktree_dir\" cherry-pick --continue
+If Git reports the cherry-pick is empty and keeping the current files is intentional, record it with:
+    git -C \"$worktree_dir\" -c core.commentChar='#' commit --allow-empty --no-edit
+This preserves the tracking trailer so reruns remember the resolution; --skip does not.
+Then rerun this script. To abort instead:
+    git -C \"$worktree_dir\" cherry-pick --abort"
     fi
     [ -z "$(git -C "$worktree_dir" status --porcelain)" ] ||
         fail "$worktree_dir has uncommitted changes; commit, stash or discard them and rerun"
@@ -308,10 +320,14 @@ if [ "${#plan[@]}" -gt 0 ]; then
 Conflict while cherry-picking $sha in the sync worktree:
     $worktree_dir
 
-Resolve the conflict in that worktree, then:
+Resolve the conflict in that worktree and stage the resolution with git add/rm, then:
     git -C "$worktree_dir" cherry-pick --continue
-(use --skip if the resolution leaves the commit empty) and rerun this
-script; already-applied commits are skipped.
+
+If Git reports the cherry-pick is empty and keeping the current files is intentional, record it with:
+    git -C "$worktree_dir" -c core.commentChar='#' commit --allow-empty --no-edit
+This preserves the tracking trailer so reruns remember the resolution; --skip does not.
+
+Then rerun this script; already-applied commits are skipped.
 
 To discard this run:
     git -C "$worktree_dir" cherry-pick --abort
