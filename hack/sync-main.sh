@@ -19,10 +19,13 @@
 # always produces the same ordered plan. A PR lookup that cannot be
 # resolved is fatal rather than silently included.
 #
-# Resume: on a conflict the script stops with the cherry-pick in progress.
-# Resolve it, run `git cherry-pick --continue`, then rerun; commits already
-# on the sync branch are skipped by the "(cherry picked from commit ...)"
-# trailer that -x writes, which survives conflict resolutions.
+# Resume: the picks happen in a worktree at .git/sync-main-to-<target>, so
+# the invoking checkout is never switched and this script stays on disk (the
+# target branch does not contain it). On a conflict the script stops with the
+# cherry-pick in progress in that worktree: resolve it there, run
+# `git cherry-pick --continue`, then rerun; commits already on the sync
+# branch are skipped by the "(cherry picked from commit ...)" trailer that
+# -x writes, which survives conflict resolutions.
 #
 # Limitations: only the commits each merge introduced are picked; a merge
 # commit's own resolution delta is not applied. Label filtering relies on
@@ -83,6 +86,21 @@ esac
 
 TARGET_REF="$UPSTREAM_REMOTE/$target_branch"
 BRANCH="sync-main-to-$target_branch"
+# pwd -P: git worktree list reports symlink-free paths (/tmp -> /private/tmp)
+worktree_dir="$(cd "$(git rev-parse --git-common-dir)" && pwd -P)/$BRANCH"
+
+# Validate reused worktrees before fast-forwarding or publishing, even with no picks left.
+if [ -e "$worktree_dir" ]; then
+    git worktree list --porcelain | grep -qxF "worktree $worktree_dir" ||
+        fail "$worktree_dir exists but is not a registered worktree; inspect it before rerunning"
+    [ "$(git -C "$worktree_dir" symbolic-ref -q HEAD)" = "refs/heads/$BRANCH" ] ||
+        fail "$worktree_dir must have $BRANCH checked out; restore that branch and rerun"
+    if git -C "$worktree_dir" rev-parse -q --verify CHERRY_PICK_HEAD >/dev/null; then
+        fail "a cherry-pick is still in progress; finish it with 'git -C \"$worktree_dir\" cherry-pick --continue' (or --skip / --abort), then rerun"
+    fi
+    [ -z "$(git -C "$worktree_dir" status --porcelain)" ] ||
+        fail "$worktree_dir has uncommitted changes; commit, stash or discard them and rerun"
+fi
 
 git fetch --prune "$UPSTREAM_REMOTE" --quiet
 git rev-parse -q --verify "$TARGET_REF" >/dev/null ||
@@ -117,6 +135,8 @@ if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
         if git merge-base --is-ancestor "$BRANCH" "$fork_ref"; then
             if [ "$(git symbolic-ref -q HEAD)" = "refs/heads/$BRANCH" ]; then
                 git merge --ff-only "$fork_ref"
+            elif [ -d "$worktree_dir" ]; then
+                git -C "$worktree_dir" merge --ff-only "$fork_ref"
             else
                 git branch -f "$BRANCH" "$fork_ref"
             fi
@@ -247,44 +267,59 @@ if [ "$confirm" = yes ]; then
     esac
 fi
 
-[ -z "$(git status --porcelain)" ] || fail "working tree not clean"
-
-if [ "$has_branch" = yes ]; then
-    git checkout "$BRANCH"
+# an empty plan still means there is nothing to pick, so no worktree needed
+if [ "${#plan[@]}" -gt 0 ]; then
     # shortcut: assumes the target branch is never force-pushed; if it
     # advanced, trailer skipping keeps picks correct but the branch may
     # need a manual rebase
-    if [ "$merge_base" != "$(git rev-parse "$TARGET_REF")" ]; then
-        printf 'warning: %s has moved since %s was created\n' "$TARGET_REF" "$BRANCH" >&2
+    if [ "$has_branch" = yes ] &&
+            [ "$merge_base" != "$(git rev-parse "$TARGET_REF")" ]; then
+        printf 'warning: %s has moved since %s was created\n' \
+            "$TARGET_REF" "$BRANCH" >&2
     fi
-else
-    git checkout -b "$BRANCH" "$TARGET_REF"
-fi
 
-for ((i = 0; i < ${#plan[@]}; i++)); do
-    sha=${plan[i]}
-    printf 'picking %s %s\n' \
-        "$(git rev-parse --short "$sha")" "$(git log -1 --format=%s "$sha")"
-    if ! git cherry-pick -x "$sha"; then
-        # an empty pick means the change is already present; skip it
-        if git diff --cached --quiet && [ -z "$(git ls-files -u)" ]; then
-            git cherry-pick --skip
-            continue
+    git worktree prune
+    if [ ! -d "$worktree_dir" ]; then
+        elsewhere=$(git worktree list --porcelain |
+            awk -v ref="refs/heads/$BRANCH" '/^worktree /{p=$2} $0 == "branch " ref {print p}')
+        [ -z "$elsewhere" ] ||
+            fail "$BRANCH is checked out at $elsewhere; switch that worktree to another branch and rerun"
+        if [ "$has_branch" = yes ]; then
+            git worktree add --quiet "$worktree_dir" "$BRANCH"
+        else
+            git worktree add --quiet -b "$BRANCH" "$worktree_dir" "$TARGET_REF"
         fi
-        cat >&2 <<EOF
+    fi
 
-Conflict while cherry-picking $sha.
+    cd "$worktree_dir"
 
-Resolve the conflict, then:
-    git cherry-pick --continue
-and rerun this script; already-applied commits are skipped.
+    for ((i = 0; i < ${#plan[@]}; i++)); do
+        sha=${plan[i]}
+        printf 'picking %s %s\n' \
+            "$(git rev-parse --short "$sha")" "$(git log -1 --format=%s "$sha")"
+        if ! git cherry-pick -x "$sha"; then
+            # an empty pick means the change is already present; skip it
+            if git diff --cached --quiet && [ -z "$(git ls-files -u)" ]; then
+                git cherry-pick --skip
+                continue
+            fi
+            cat >&2 <<EOF
+
+Conflict while cherry-picking $sha in the sync worktree:
+    $worktree_dir
+
+Resolve the conflict in that worktree, then:
+    git -C "$worktree_dir" cherry-pick --continue
+(use --skip if the resolution leaves the commit empty) and rerun this
+script; already-applied commits are skipped.
 
 To discard this run:
-    git cherry-pick --abort
+    git -C "$worktree_dir" cherry-pick --abort
 EOF
-        exit 1
-    fi
-done
+            exit 1
+        fi
+    done
+fi
 
 if [ "$(git rev-list --count "$TARGET_REF..$BRANCH")" -eq 0 ]; then
     printf 'nothing to push; sync branch has no commits ahead of %s\n' "$TARGET_REF"
