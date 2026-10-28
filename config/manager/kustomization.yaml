@@ -4,5 +4,5 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 images:
 - name: controller
-  newName: registry.ci.openshift.org/origin/vcf-migration-operator
-  newTag: latest
+  newName: quay.io/gnufied/vcf-migration-operator
+  newTag: oct28-414
