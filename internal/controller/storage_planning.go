@@ -47,6 +47,20 @@ func isPlanningOrPausedReason(reason string) bool {
 	}
 }
 
+// blockUnsupportedStorageExecution keeps the guard at the execution boundary
+// until the complete storage workflow is implemented, preserving valid plans.
+func (r *VmwareCloudFoundationMigrationReconciler) blockUnsupportedStorageExecution(migration *migrationv1alpha1.VmwareCloudFoundationMigration, condition string) bool {
+	if isPlanningCondition(condition) || !migration.Spec.MigrateStorage {
+		return false
+	}
+	message := "Storage migration execution is not implemented; only non-disruptive storage planning is available"
+	changed := r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonStorageExecutionUnsupported, message)
+	if changed && r.Recorder != nil {
+		r.Recorder.Eventf(migration, nil, "Warning", migrationv1alpha1.ReasonStorageExecutionUnsupported, migrationv1alpha1.ConditionReady, "%s", message)
+	}
+	return true
+}
+
 func isPlanningCondition(condition string) bool {
 	return condition == migrationv1alpha1.ConditionInfrastructurePrepared || condition == migrationv1alpha1.ConditionStoragePlanned
 }
@@ -286,7 +300,8 @@ func countBlockedVolumes(volumes []migrationv1alpha1.StorageWorkloadMigrationVol
 // storagePlanBlockedMessage builds the StoragePlanned condition message for a
 // plan with blocked volumes or plan-wide blockers.
 func storagePlanBlockedMessage(summary storagePlanSummary, blockers []migrationv1alpha1.StorageWorkloadMigrationBlocker) string {
-	parts := []string{fmt.Sprintf("%d volumes blocked in %d namespaces", summary.blockedVolumes, summary.blockedNamespaces)}
+	parts := make([]string, 0, len(blockers)+2)
+	parts = append(parts, fmt.Sprintf("%d volumes blocked in %d namespaces", summary.blockedVolumes, summary.blockedNamespaces))
 	for _, b := range blockers {
 		parts = append(parts, b.Reason+": "+b.Message)
 	}

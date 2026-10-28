@@ -267,14 +267,14 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 	return r.reconcileWorkflow(ctx, migration, baseStatus)
 }
 
-// reconcileWorkflow processes migration state only after singleton and deletion guards pass.
-func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus) (ctrl.Result, error) {
+// reconcileState handles planning, pause, and resume conditions before the workflow runs.
+// It reports whether processing must stop, including when persisting status fails.
+func (r *VmwareCloudFoundationMigrationReconciler) reconcileState(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus) (bool, error) {
 	log := klog.FromContext(ctx)
-
 	state := migration.Spec.State
 	if (state == migrationv1alpha1.MigrationStatePlanning || state == migrationv1alpha1.MigrationStatePending || state == "") && migration.Status.StartTime != nil {
 		r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPlanningAfterStart, "Migration has started; set spec.state to Running or Paused")
-		return ctrl.Result{}, r.updateStatus(ctx, migration, baseStatus)
+		return true, r.updateStatus(ctx, migration, baseStatus)
 	}
 
 	if state != migrationv1alpha1.MigrationStateRunning && state != migrationv1alpha1.MigrationStatePlanning {
@@ -288,9 +288,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 			}
 		}
 		if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
-			return ctrl.Result{}, err
+			return true, err
 		}
-		return ctrl.Result{}, nil
+		return true, nil
 	}
 	if state == migrationv1alpha1.MigrationStatePlanning {
 		r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPlanning, "Running non-disruptive migration checks")
@@ -307,6 +307,18 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 			r.setReadyRunning(migration)
 		}
 	}
+
+	return false, nil
+}
+
+// reconcileWorkflow processes migration state only after singleton and deletion guards pass.
+func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus) (ctrl.Result, error) {
+	log := klog.FromContext(ctx)
+
+	if stop, err := r.reconcileState(ctx, migration, baseStatus); stop {
+		return ctrl.Result{}, err
+	}
+	state := migration.Spec.State
 
 	if hasVMotionSelection(migration) {
 		return r.reconcileVMotionWorkflow(ctx, migration, baseStatus, state)
@@ -352,7 +364,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 			continue
 		}
 
-		handler, ok := handlers[condType]
+		conditionHandler, ok := handlers[condType]
 		if !ok {
 			return ctrl.Result{}, fmt.Errorf("no handler for condition %q", condType)
 		}
@@ -364,14 +376,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 			}
 			return ctrl.Result{}, err
 		}
-		// Keep this guard at the execution boundary until the complete storage
-		// workflow is implemented; individual planning results remain valid.
-		if !isPlanningCondition(condType) && migration.Spec.MigrateStorage {
-			message := "Storage migration execution is not implemented; only non-disruptive storage planning is available"
-			changed := r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonStorageExecutionUnsupported, message)
-			if changed && r.Recorder != nil {
-				r.Recorder.Eventf(migration, nil, "Warning", migrationv1alpha1.ReasonStorageExecutionUnsupported, migrationv1alpha1.ConditionReady, "%s", message)
-			}
+		if r.blockUnsupportedStorageExecution(migration, condType) {
 			return ctrl.Result{RequeueAfter: planningResync}, r.updateStatus(ctx, migration, baseStatus)
 		}
 		// Persist the execution boundary only after current-generation planning passes.
@@ -385,7 +390,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 				r.Recorder.Eventf(migration, nil, "Normal", "MigrationStarted", "MigrationStarted", "Migration workflow started")
 			}
 		}
-		result, err := handler(ctx, migration)
+		result, err := conditionHandler(ctx, migration)
 		// Helpers may treat cleanup errors as best-effort; recheck before publishing success.
 		if permissionErr := execution.Check(ctx); permissionErr != nil {
 			err = permissionErr
@@ -1657,21 +1662,11 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateStatus(ctx context.Cont
 				}
 			}
 		}
-		if migration.Status.StartTime != nil && latest.Status.StartTime == nil {
-			if migration.UID != latest.UID || !latest.DeletionTimestamp.IsZero() || migration.Generation != latest.Generation ||
-				latest.Spec.State != migrationv1alpha1.MigrationStateRunning || !reflect.DeepEqual(migration.Spec, latest.Spec) {
-				return fmt.Errorf("starting migration: spec or execution permission changed during planning; revalidating before disruption")
-			}
-			// VMotion records StartTime when its frozen planning flow begins and
-			// does not walk the legacy planning conditions.
-			if !hasVMotionSelection(latest) {
-				for _, condition := range []string{migrationv1alpha1.ConditionInfrastructurePrepared, migrationv1alpha1.ConditionStoragePlanned} {
-					if !isConditionComplete(latest, condition) {
-						return fmt.Errorf("starting migration: condition %s is not satisfied", condition)
-					}
-				}
-			}
-			latest.Status.StartTime = migration.Status.StartTime
+		started, err := mergeStartTime(migration, latest)
+		if err != nil {
+			return err
+		}
+		if started {
 			hasChanges = true
 		}
 		ready := apimeta.FindStatusCondition(migration.Status.Conditions, migrationv1alpha1.ConditionReady)
@@ -1745,6 +1740,28 @@ func mergeInitialNodeMigrationPlan(migration, latest *migrationv1alpha1.VmwareCl
 	}
 	latest.Status.NodeMigration = migration.Status.NodeMigration.DeepCopy()
 	return true
+}
+
+// mergeStartTime validates the execution boundary before recording the first start time.
+func mergeStartTime(migration, latest *migrationv1alpha1.VmwareCloudFoundationMigration) (bool, error) {
+	if migration.Status.StartTime == nil || latest.Status.StartTime != nil {
+		return false, nil
+	}
+	if migration.UID != latest.UID || !latest.DeletionTimestamp.IsZero() || migration.Generation != latest.Generation ||
+		latest.Spec.State != migrationv1alpha1.MigrationStateRunning || !reflect.DeepEqual(migration.Spec, latest.Spec) {
+		return false, fmt.Errorf("starting migration: spec or execution permission changed during planning; revalidating before disruption")
+	}
+	// VMotion records StartTime when its frozen planning flow begins and
+	// does not walk the legacy planning conditions.
+	if !hasVMotionSelection(latest) {
+		for _, condition := range []string{migrationv1alpha1.ConditionInfrastructurePrepared, migrationv1alpha1.ConditionStoragePlanned} {
+			if !isConditionComplete(latest, condition) {
+				return false, fmt.Errorf("starting migration: condition %s is not satisfied", condition)
+			}
+		}
+	}
+	latest.Status.StartTime = migration.Status.StartTime
+	return true, nil
 }
 
 // mergeCompletionRecord binds completion atomically to the spec that this

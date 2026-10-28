@@ -18,6 +18,7 @@ import (
 var _ = Describe("Storage planning against the API server", func() {
 	It("persists blocker changes and revalidates Planning to Running before disruption", func() {
 		r, m := planningFixture(GinkgoT())
+		targetFD := m.Spec.FailureDomains[0].Name
 		r.Client = k8sClient
 		m.UID = ""
 		m.ResourceVersion = ""
@@ -60,7 +61,7 @@ var _ = Describe("Storage planning against the API server", func() {
 		Expect(apimeta.FindStatusCondition(m.Status.Conditions, migrationv1alpha1.ConditionStoragePlanned).Status).To(Equal(metav1.ConditionFalse))
 		Expect(k8sClient.Get(ctx, swmKey, swm)).To(Succeed())
 		Expect(swm.Status.Volumes[0].Blockers[0].Reason).To(Equal("TargetFailureDomainInvalid"))
-		pvc.Annotations[storageplan.TargetFailureDomainAnnotation] = "target"
+		pvc.Annotations[storageplan.TargetFailureDomainAnnotation] = targetFD
 		_, err = r.KubeClient.CoreV1().PersistentVolumeClaims("app").Update(ctx, pvc, metav1.UpdateOptions{})
 		Expect(err).NotTo(HaveOccurred())
 		_, err = r.Reconcile(ctx, req)

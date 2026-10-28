@@ -184,6 +184,7 @@ func TestClusterBlockers(t *testing.T) {
 }
 
 func TestFailureDomains(t *testing.T) {
+	const secondFD = "second"
 	sources := []configv1.VSpherePlatformFailureDomainSpec{{Name: "a", Region: "r", Zone: "z"}, {Name: "b", Region: "r", Zone: "other"}}
 	for _, prefix := range []string{"topology.csi.vmware.com/openshift-", "topology.kubernetes.io/"} {
 		pv := corev1.PersistentVolume{Spec: corev1.PersistentVolumeSpec{NodeAffinity: &corev1.VolumeNodeAffinity{Required: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{{Key: prefix + "region", Operator: corev1.NodeSelectorOpIn, Values: []string{"r"}}, {Key: prefix + "zone", Operator: corev1.NodeSelectorOpIn, Values: []string{"z"}}}}}}}}}
@@ -203,10 +204,10 @@ func TestFailureDomains(t *testing.T) {
 		t.Fatalf("SourceFailureDomain unknown: %q", got)
 	}
 	in := validInput()
-	in.Migration.Spec.FailureDomains = append(in.Migration.Spec.FailureDomains, configv1.VSpherePlatformFailureDomainSpec{Name: "second"})
-	in.Migration.Spec.FailureDomainMappings = []migrationv1alpha1.FailureDomainMapping{{Source: "source", Destination: "second"}}
+	in.Migration.Spec.FailureDomains = append(in.Migration.Spec.FailureDomains, configv1.VSpherePlatformFailureDomainSpec{Name: secondFD})
+	in.Migration.Spec.FailureDomainMappings = []migrationv1alpha1.FailureDomainMapping{{Source: "source", Destination: secondFD}}
 	claim := &in.PVCs[0]
-	if target, err := targetFailureDomain(in.Migration, claim, "source"); target != "second" || err != nil {
+	if target, err := targetFailureDomain(in.Migration, claim, "source"); target != secondFD || err != nil {
 		t.Fatalf("TargetFailureDomain map: %s %v", target, err)
 	}
 	claim.Annotations = map[string]string{TargetFailureDomainAnnotation: "target"}
