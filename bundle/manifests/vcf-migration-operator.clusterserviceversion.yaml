@@ -6,24 +6,6 @@ metadata:
       [
         {
           "apiVersion": "migration.openshift.io/v1alpha1",
-          "kind": "StorageWorkloadMigration",
-          "metadata": {
-            "labels": {
-              "app.kubernetes.io/managed-by": "kustomize",
-              "app.kubernetes.io/name": "vcf-migration-operator"
-            },
-            "name": "vcf-storage-example",
-            "namespace": "payments"
-          },
-          "spec": {
-            "migrationRef": {
-              "name": "cluster",
-              "uid": "00000000-0000-0000-0000-000000000001"
-            }
-          }
-        },
-        {
-          "apiVersion": "migration.openshift.io/v1alpha1",
           "kind": "VmwareCloudFoundationMigration",
           "metadata": {
             "labels": {

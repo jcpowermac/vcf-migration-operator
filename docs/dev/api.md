@@ -9,7 +9,7 @@
 ## Spec
 
 - `state` (`MigrationState`, optional, default `Pending`): accepts `Pending`, `Planning`, `Running`, or `Paused`. `Planning` runs only the non-disruptive checks; the full migration workflow executes only when `Running`.
-- `migrateStorage` (`bool`, optional, default `false`): migrate vSphere CSI volumes along with compute nodes. When `false`, vSphere CSI persistent volumes block the migration during preflight.
+- `migrateStorage` (`bool`, optional, default `false`): migrate vSphere CSI volumes along with compute nodes. When `false`, vSphere CSI persistent volumes block the migration during preflight. Only storage planning is implemented; when `true`, `Running` stops with `Ready=False`, reason `StorageExecutionUnsupported`, before any disruptive condition.
 - `targetVCenterCredentialsSecret` (`SecretReference`, required): Secret with target vCenter credentials.
 - `failureDomains` (`[]VSpherePlatformFailureDomainSpec`, required, minimum one): target failure domains, using the OpenShift `configv1` type.
 - `failureDomainMappings` (`[]FailureDomainMapping`, optional): maps source failure domain names (from `Infrastructure`) to destination `failureDomains` entries. Required unless exactly one source and one destination failure domain exist; must cover every failure domain exactly once.
@@ -169,9 +169,9 @@ stops new probe VM cleanup requests; any remaining probes must be handled during
 | Field | Type | Description |
 |-------|------|-------------|
 | `conditions` | `[]metav1.Condition` | Ordered migration phase conditions |
-| `failureDomainMappings` | `[]FailureDomainMapping` | Effective source-to-destination failure domain mapping, recorded once at preflight and immutable afterwards; it drives every later phase |
+| `failureDomainMappings` | `[]FailureDomainMapping` | Effective source-to-destination failure domain mapping, resolved at preflight and replaced by each preflight run until `startTime` is set, then write-once; it drives every later phase |
 | `workerMachineSetNames` | `[]string` | Append-only inventory of destination worker MachineSet names (max 256), used to require the replacements after the source MachineSets are deleted |
-| `startTime` | `*metav1.Time` | When migration entered `Running` |
+| `startTime` | `*metav1.Time` | When the first disruptive condition started, after planning passed in `Running` |
 | `completionTime` | `*metav1.Time` | When migration reached `Ready` |
 | `nodeMigration` | `NodeMigrationStatus` | Per-node move progress. Nil when using MachineSet/CPMS replacement. |
 

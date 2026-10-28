@@ -1,3 +1,5 @@
+# Illustrative only: the operator creates StorageWorkloadMigration objects during Planning.
+# Do not apply this placeholder; edit actions on the operator-generated plan instead.
 apiVersion: migration.openshift.io/v1alpha1
 kind: StorageWorkloadMigration
 metadata:

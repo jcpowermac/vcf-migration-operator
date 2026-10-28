@@ -19,18 +19,19 @@ flowchart TD
 
 [cmd/main.go](../../cmd/main.go) creates the controller-runtime manager and Kubernetes/OpenShift clients, then registers the reconciler.
 
-The [migration API](../../api/v1alpha1/vmwarecloudfoundationmigration_types.go) supplies destination credentials, failure domains—including topology and VM templates—and a `Pending`, `Planning`, `Running`, or `Paused` state. Only resources named `cluster` are processed, and migration work runs only when `spec.state` is `Running`. `Planning` is accepted by the API; planning execution is not yet implemented.
+The [migration API](../../api/v1alpha1/vmwarecloudfoundationmigration_types.go) supplies destination credentials, failure domains—including topology and VM templates—and a `Pending`, `Planning`, `Running`, or `Paused` state. Only the `openshift-vcf-migration/cluster` resource is processed. `Planning` runs non-disruptive preflight and storage inventory, writes namespace-scoped `StorageWorkloadMigration` records, and reports `PlanComplete` or `PlanBlocked`. `Running` continues through the migration workflow after those checks pass. See the [Planning phase](../csi-migration-plan/01-planning-phase.md).
 
 ## Reconciliation engine
 
 [Reconcile()](../../internal/controller/vmwarecloudfoundationmigration_controller.go) walks a fixed list of status conditions:
 
 1. `InfrastructurePrepared`
-2. `DestinationInitialized`
-3. `MultiSiteConfigured`
-4. `WorkloadMigrated`
-5. `SourceCleaned`
-6. `Ready`
+2. `StoragePlanned`
+3. `DestinationInitialized`
+4. `MultiSiteConfigured`
+5. `WorkloadMigrated`
+6. `SourceCleaned`
+7. `Ready`
 
 It executes the first incomplete stage, persists status, and returns. Conditions act as persistent checkpoints. Handlers inspect existing resources and readiness, while requeues let other controllers finish their work. Errors are recorded in conditions and Warning events, then retried with backoff.
 
@@ -80,4 +81,4 @@ Keeping both vCenters configured allows source machines to remain operational wh
 
 ## Storage scope
 
-The current preflight code rejects PersistentVolumes using `csi.vsphere.vmware.com` and requires the vSphere `ClusterCSIDriver` management state to be `Removed`. This workflow does not migrate vSphere CSI-backed volumes.
+With `spec.migrateStorage: false` (the default), preflight rejects PersistentVolumes using `csi.vsphere.vmware.com` and requires the vSphere `ClusterCSIDriver` management state to be `Removed`. With `spec.migrateStorage: true`, it requires `Managed` and inventories vSphere-backed volumes into storage plans. Only planning is implemented; data transfer and cutover remain later phases. A successful plan does not mean volume data has been migrated.

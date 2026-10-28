@@ -2,7 +2,7 @@
 
 Status: Draft / Proposal
 
-The authoritative end-to-end design is the [vSphere Storage Transfer with VMO enhancement](../../../ocp_enhancements/enhancements/storage/vsphere-storage-transfer-vmo.md), last updated 2026-10-21 in the enhancement checkout. This document supplements it with implementation details for this repository. API examples describe the intended design; they do not imply that the current controller implements it. Unresolved enhancement details are listed in section 13.
+The authoritative end-to-end design is the [vSphere Storage Transfer with VMO enhancement](https://github.com/gnufied/enhancements-1/blob/add-vmo-storage-migration/enhancements/storage/vsphere-storage-transfer-vmo.md), proposed in [openshift/enhancements#2155](https://github.com/openshift/enhancements/pull/2155). This document supplements it with implementation details for this repository. API examples describe the intended design; they do not imply that the current controller implements it. Unresolved enhancement details are listed in section 13.
 
 ## 1. Scope
 
@@ -21,7 +21,7 @@ Migration is performed per namespace with VMO doing precopy, final copy, rebindi
 
 ## Non-Goals
 
-1. Quiescing customer workloads.
+1. Automated quiescing of customer workloads.
 2. Modifying customer workload to fit new topology.  
 3. Moving raw block volumes.
 4. Copying of Snapshot data.
@@ -38,7 +38,7 @@ When storage migration is enabled, the customer must start in `Planning`. VMO in
 
 Planning creates inventory objects, not `VolumeCopy` instances, target PVCs, or transfer Pods. The customer reviews the plan and resolves blockers before setting `state: Running`.
 
-The proposed shape of the `VmwareCloudFoundationMigration` storage configuration is:
+The proposed shape of the `VmwareCloudFoundationMigration` storage configuration is shown below. The current API accepts `Auto` (the default) and `Rsync`; restricting it to `Rsync` and changing the default remain pending decisions in [Data Migration Action Items](../learn/data_migration_action.md#restrict-datamigrationstrategy-to-rsync-until-other-movers-exist).
 
 ```yaml
 spec:
@@ -51,13 +51,13 @@ spec:
     storageClassMapping:
       - source: thin-csi
         target: thin-csi-2
-    failureDomainMappings:
-      - source: source-a
-        target: target-a
-      - source: source-b
-        target: target-b
-      - source: source-c
-        target: target-c
+  failureDomainMappings:
+    - source: source-a
+      destination: target-a
+    - source: source-b
+      destination: target-b
+    - source: source-c
+      destination: target-c
 ```
 
 `failureDomainMappings` are entries in the migration CR, not separate Kubernetes objects.
@@ -140,7 +140,7 @@ Movers are level-triggered and idempotent, and persist all progress (including a
 - **`Rsync`** (this release) uses `pvc-transfer` to copy files between a source reader Pod and a target receiver Pod. It supports precopy and does not consume the source. Sections 5 and 6 describe its Pod placement and target provisioning.
 - **`CNSRelocate`** (future) would move the FCD to a target-vCenter datastore with a vSphere API such as `CnsRelocateVolume`, then statically create the target PV from the returned handle. It would have no transfer Pods or precopy, and it would consume the source.
 
-In this release, `dataMigrationStrategy: Auto` resolves to `Rsync` for supported volumes; it reports blockers when no implemented mover is valid. Future mover selection may prefer movers that avoid a file-level copy. A mover can only be swapped before `Prepare` starts; after that, changing method requires an explicit recovery/reset procedure, whose API is not yet defined.
+Under the proposed `Auto` semantics, `dataMigrationStrategy: Auto` would resolve to `Rsync` for supported volumes and report blockers when no implemented mover is valid. Whether to retain `Auto` or expose only `Rsync` remains pending; mover execution is not implemented yet. Future mover selection may prefer movers that avoid a file-level copy. A mover can only be swapped before `Prepare` starts; after that, changing method requires an explicit recovery/reset procedure, whose API is not yet defined.
 
 A future mover with `ConsumesSource` would remove the source during `FinalCopying`, rather than after validation and a rollback-retention period. Planning must disclose that source rollback will be unavailable. After setting VCFM to `Running`, the customer would still wait for `AwaitingQuiesce`, stop workloads, and set `finalCopyApproved: true` before relocation begins; no precopy runs. That approval would authorize the source-consuming operation. Eligibility and cleanup configuration for such a mover belong to the future relocation design; this release does not expose `cleanupSourceData` in the proposed VCFM configuration.
 
@@ -450,7 +450,7 @@ The enhancement owns the end-to-end test matrix and graduation criteria. Reposit
 - Customer placement and validation approvals, system-namespace cleanup ownership, source compute retirement, and removal of temporary placement dependencies.
 - Preservation of CSI topology when the final target has one failure domain, including replacement Nodes after migration.
 
-The minimum end-to-end scenarios are single-zone migration, multi-datacenter zonal migration, RWX volumes, CSI-migrated in-tree PVs, and source classes using datastore URLs. Additional candidates are zonal-to-single-zone migration and zonal migration across multiple compute clusters. The degree of end-to-end automation remains open. Tecvh Preview readiness requires passing end-to-end CI, completed documentation, successful QE scenarios, and merged engineering stories.
+The minimum end-to-end scenarios are single-zone migration, multi-datacenter zonal migration, RWX volumes, CSI-migrated in-tree PVs, and source classes using datastore URLs. Additional candidates are zonal-to-single-zone migration and zonal migration across multiple compute clusters. The degree of end-to-end automation remains open. Tech Preview readiness requires passing end-to-end CI, completed documentation, successful QE scenarios, and merged engineering stories.
 
 `StorageWorkloadMigration.status` and `VolumeCopy.status` are the durable progress and troubleshooting interfaces; Events supplement them. The enhancement proposes telemetry for successful and failed migrations, the volume migration method, and migration duration. Exact metrics and telemetry fields remain to be defined.
 

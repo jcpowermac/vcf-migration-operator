@@ -1079,6 +1079,8 @@ const (
 	ReasonPlanComplete = "PlanComplete"
 	// ReasonPlanBlocked indicates storage blockers prevent migration.
 	ReasonPlanBlocked = "PlanBlocked"
+	// ReasonStorageExecutionUnsupported indicates storage planning is available but execution is not implemented.
+	ReasonStorageExecutionUnsupported = "StorageExecutionUnsupported"
 	// ReasonPlanningAfterStart indicates planning cannot restart a migration.
 	ReasonPlanningAfterStart = "PlanningAfterStart"
 	// ReasonNotConfigured indicates storage migration was not requested.

@@ -2,6 +2,8 @@
 
 Open decisions and follow-ups for CSI volume migration (see
 [csi-volume-migration-plan.md](../plans/csi-volume-migration-plan.md)).
+`StorageMigrationSpec` is the Go type for `VmwareCloudFoundationMigration.spec.storage`;
+its `DataMigrationStrategy` field is exposed as `spec.storage.dataMigrationStrategy`.
 
 ## Restrict `dataMigrationStrategy` to `Rsync` until other movers exist
 

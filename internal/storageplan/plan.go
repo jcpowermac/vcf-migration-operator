@@ -143,7 +143,7 @@ func Build(in Input) *Plan {
 	return plan
 }
 
-// IsVSphereVolume includes in-tree volumes so unsupported disks cannot be stranded.
+// IsVSphereVolume identifies native CSI, in-tree, and CSI-migrated vSphere volumes for inventory.
 func IsVSphereVolume(pv *corev1.PersistentVolume) bool {
 	return pv.Spec.CSI != nil && pv.Spec.CSI.Driver == Driver || pv.Spec.VsphereVolume != nil || pv.Annotations["pv.kubernetes.io/migrated-to"] == Driver
 }

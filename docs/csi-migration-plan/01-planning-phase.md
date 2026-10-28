@@ -10,8 +10,12 @@ Parent design: [csi-volume-migration-plan.md](../plans/csi-volume-migration-plan
 Make `spec.state: Planning` run every non-disruptive check, inventory vSphere CSI
 volumes into per-namespace `StorageWorkloadMigration` (SWM) objects, and report
 blockers, without changing the cluster or either vCenter's configuration.
-`Running` reuses the same steps and only proceeds past them when the plan has no
-blockers.
+`Running` reuses the same steps. With `spec.migrateStorage: true`, it then stops
+with `Ready=False`, reason `StorageExecutionUnsupported`, before setting
+`startTime` or entering a disruptive condition. This temporary guard remains at
+the execution boundary until the complete storage workflow is implemented, even
+when the inventory contains no volumes. A successful plan remains
+`StoragePlanned=True`.
 
 ## Non-goals
 
@@ -31,11 +35,11 @@ VMO never writes `spec.state`. The customer creates the migration in `Pending`
 | :--- | :--- |
 | `Pending` | No work. Unchanged from today. |
 | `Planning` | Run the planning conditions, then stop. Never run a disruptive condition. |
-| `Running` | Run all conditions. Planning conditions run first; a blocked plan stops the pipeline before any disruptive step. |
+| `Running` | Run planning first. With `migrateStorage: true`, stop at the execution boundary with `StorageExecutionUnsupported`; otherwise continue the compute workflow. |
 | `Paused` | No work. Unchanged from today. |
 
-Setting `Running` directly is allowed and is equivalent to `Planning` followed by
-`Running`, minus the review pause.
+Setting `Running` directly is allowed and runs the same planning checks without
+the review pause. The storage execution guard still applies.
 
 `Planning` or `Pending` after the migration has started (see section 2.3) is
 treated like `Paused`, with `Ready=False`, reason `PlanningAfterStart`, message
@@ -161,16 +165,19 @@ revalidation.
 inventory and blocker logic lives in a new package `internal/storageplan` so it
 can be unit-tested without envtest.
 
-### 3.1 Storage not configured
+### 3.1 Storage migration not enabled
 
-If `spec.storage` is nil, set `StoragePlanned=True`, reason `NotConfigured`. The
-preflight check in section 4 still blocks clusters that have vSphere CSI PVs.
+If `spec.migrateStorage` is false, set `StoragePlanned=True`, reason
+`NotConfigured`. The preflight check in section 4 still blocks clusters that have
+vSphere CSI PVs. When `migrateStorage` is true, inventory runs even if the optional
+`spec.storage` configuration is omitted. The API rejects `spec.storage` unless
+`migrateStorage` is true.
 
 ### 3.2 Inventory
 
 1. List PVs with `spec.csi.driver == csi.vsphere.vmware.com`. Include in-tree
-   vSphere volumes and vSphere CSI-migrated annotations so unsupported source
-   disks are reported rather than silently omitted.
+   vSphere volumes and vSphere CSI-migrated annotations so source disks are
+   inventoried rather than silently omitted.
 2. For each PV:
    - `Bound`: read `spec.claimRef`, get the PVC, and require PVC UID ==
      `claimRef.uid` and `pvc.spec.volumeName == pv.name`. Otherwise record a
@@ -189,8 +196,6 @@ Each failed check adds a `{reason, message}` blocker to the volume
 | Reason | Check |
 | :--- | :--- |
 | `RawBlockUnsupported` | `pv.spec.volumeMode == Block` |
-| `InTreeVolumeUnsupported` | `pv.spec.vsphereVolume != nil`, or annotation `pv.kubernetes.io/migrated-to` |
-| `FileVolumeUnsupported` | volume handle starts with `file:` (vSAN file services) |
 | `StaticVolumeUnsupported` | PVC has no `storageClassName`, or the StorageClass does not exist |
 | `ImmediateBindingUnsupported` | StorageClass `volumeBindingMode` is not `WaitForFirstConsumer` |
 | `StorageClassPinnedToSource` | StorageClass has a `datastoreurl` parameter (case-insensitive) or `allowedTopologies` |
@@ -198,6 +203,11 @@ Each failed check adds a `{reason, message}` blocker to the volume
 | `TargetFailureDomainUnresolved` | section 3.4 |
 | `TargetFailureDomainInvalid` | override annotation names a failure domain not in `spec.failureDomains` |
 | `IncompatiblePodTopology` | a Pod mounting several migrating PVCs resolves them to different target failure domains |
+
+In-tree vSphere PVs, CSI-migrated PVs, and vSAN file volumes (`file:` handles)
+are supported by planning and do not receive type-specific blockers. They still
+undergo the checks above. Data transfer is a later phase; target StorageClass
+mapping and validation of file-capable target provisioning remain follow-ups.
 
 ### 3.4 Target failure domain resolution
 
@@ -317,10 +327,11 @@ example a layered operator) is a `PlatformNamespaceUnsupported` blocker.
 
 In `runPreflightChecks`:
 
-| | `spec.storage` nil | `spec.storage` set |
-| :--- | :--- | :--- |
-| `checkNoVSphereCSIPersistentVolumes` | unchanged: blocks if any vSphere CSI PV exists; message also suggests configuring `spec.storage` | skipped; PVs become inventory |
-| `checkVSphereStorageManagement` | unchanged: requires `ClusterCSIDriver` `Removed` | requires `ClusterCSIDriver` `Managed` |
+- With `spec.migrateStorage: false`, `checkNoVSphereCSIPersistentVolumes` blocks
+  vSphere CSI PVs and suggests enabling `spec.migrateStorage`;
+  `checkVSphereStorageManagement` requires `ClusterCSIDriver` `Removed`.
+- With `spec.migrateStorage: true`, the PV check is skipped and PVs become
+  inventory. `checkStorageManagementForPlan` requires `ClusterCSIDriver` `Managed`.
 
 ## 5. API changes
 

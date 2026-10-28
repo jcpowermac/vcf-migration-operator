@@ -255,10 +255,25 @@ func TestRunningBlockedPlan(t *testing.T) {
 	if got.Status.StartTime != nil {
 		t.Fatal("blocked Running migration started")
 	}
+	recorder := r.Recorder.(*events.FakeRecorder)
+	for len(recorder.Events) > 0 {
+		<-recorder.Events
+	}
 	unchanged := reconcilePlan(t, r, m)
 	if unchanged.ResourceVersion != got.ResourceVersion {
 		t.Fatal("unchanged blocked plan caused a status update")
 	}
+	requirePlanCondition(t, unchanged, migrationv1alpha1.ConditionReady, migrationv1alpha1.ReasonPlanBlocked, metav1.ConditionFalse)
+	if drainRecorder(recorder, "Migration is running") {
+		t.Fatal("unchanged blocked plan announced that the migration is running")
+	}
+	pv.Spec.VolumeMode = nil
+	if _, err := r.KubeClient.CoreV1().PersistentVolumes().Update(context.Background(), pv, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	unblocked := reconcilePlan(t, r, m)
+	requirePlanCondition(t, unblocked, migrationv1alpha1.ConditionStoragePlanned, migrationv1alpha1.ReasonCompleted, metav1.ConditionTrue)
+	requirePlanCondition(t, unblocked, migrationv1alpha1.ConditionReady, migrationv1alpha1.ReasonStorageExecutionUnsupported, metav1.ConditionFalse)
 }
 
 func TestPlanningAfterStart(t *testing.T) {
@@ -361,9 +376,75 @@ func TestStaleStoragePlans(t *testing.T) {
 	}
 }
 
+func TestRunningStorageExecutionUnsupported(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		planFirst     bool
+		withoutVolume bool
+	}{
+		{name: "direct Running with volumes"},
+		{name: "Planning to Running", planFirst: true},
+		{name: "direct Running without volumes", withoutVolume: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r, m := planningFixture(t)
+			ctx := context.Background()
+			if tt.withoutVolume {
+				if err := r.KubeClient.CoreV1().PersistentVolumes().Delete(ctx, "pv", metav1.DeleteOptions{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.planFirst {
+				m = reconcilePlan(t, r, m)
+				requirePlanCondition(t, m, migrationv1alpha1.ConditionReady, migrationv1alpha1.ReasonPlanComplete, metav1.ConditionFalse)
+			}
+			m.Spec.State = migrationv1alpha1.MigrationStateRunning
+			if err := r.Update(ctx, m); err != nil {
+				t.Fatal(err)
+			}
+			result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(m)})
+			if err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+			if result.RequeueAfter != planningResync {
+				t.Fatalf("RequeueAfter = %v, want %v", result.RequeueAfter, planningResync)
+			}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(m), m); err != nil {
+				t.Fatal(err)
+			}
+			requirePlanCondition(t, m, migrationv1alpha1.ConditionStoragePlanned, migrationv1alpha1.ReasonCompleted, metav1.ConditionTrue)
+			requirePlanCondition(t, m, migrationv1alpha1.ConditionReady, migrationv1alpha1.ReasonStorageExecutionUnsupported, metav1.ConditionFalse)
+			if m.Status.StartTime != nil {
+				t.Fatal("unsupported storage execution persisted StartTime")
+			}
+			for _, condition := range conditionOrder {
+				if isPlanningCondition(condition) || condition == migrationv1alpha1.ConditionReady {
+					continue
+				}
+				if apimeta.FindStatusCondition(m.Status.Conditions, condition) != nil {
+					t.Fatalf("unsupported storage execution entered %s", condition)
+				}
+			}
+			recorder := r.Recorder.(*events.FakeRecorder)
+			if !drainRecorder(recorder, migrationv1alpha1.ReasonStorageExecutionUnsupported) {
+				t.Fatal("missing StorageExecutionUnsupported event")
+			}
+			unchanged := reconcilePlan(t, r, m)
+			if unchanged.ResourceVersion != m.ResourceVersion {
+				t.Fatal("unchanged execution guard caused a status update")
+			}
+			if drainRecorder(recorder, migrationv1alpha1.ReasonStorageExecutionUnsupported) {
+				t.Fatal("unchanged execution guard repeated its warning event")
+			}
+		})
+	}
+}
+
 func TestRunningPersistsStartBeforeDisruption(t *testing.T) {
 	r, m := planningFixture(t)
 	m.Spec.State = migrationv1alpha1.MigrationStateRunning
+	m.Spec.MigrateStorage = false
+	m.Spec.Storage = nil
 	if err := r.Update(context.Background(), m); err != nil {
 		t.Fatal(err)
 	}
@@ -378,7 +459,7 @@ func TestRunningPersistsStartBeforeDisruption(t *testing.T) {
 	if m.Status.StartTime == nil {
 		t.Fatal("disruptive handler ran without persisting StartTime")
 	}
-	requirePlanCondition(t, m, migrationv1alpha1.ConditionStoragePlanned, migrationv1alpha1.ReasonCompleted, metav1.ConditionTrue)
+	requirePlanCondition(t, m, migrationv1alpha1.ConditionStoragePlanned, migrationv1alpha1.ReasonNotConfigured, metav1.ConditionTrue)
 }
 
 func TestStatusRejectsStalePlanDowngrade(t *testing.T) {

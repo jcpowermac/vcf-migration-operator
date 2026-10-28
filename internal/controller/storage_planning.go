@@ -117,6 +117,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureStoragePlanned(ctx cont
 
 	if !m.Spec.MigrateStorage {
 		r.setCondition(m, migrationv1alpha1.ConditionStoragePlanned, metav1.ConditionTrue, migrationv1alpha1.ReasonNotConfigured, "Storage migration is not enabled")
+		r.clearStoragePlanBlocked(m)
 		return ctrl.Result{}, nil
 	}
 
@@ -145,7 +146,22 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureStoragePlanned(ctx cont
 		return ctrl.Result{RequeueAfter: planningResync}, nil
 	}
 	r.setCondition(m, migrationv1alpha1.ConditionStoragePlanned, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted, fmt.Sprintf("Planned %d volumes in %d namespaces", summary.volumes, summary.namespaces))
+	r.clearStoragePlanBlocked(m)
 	return ctrl.Result{}, nil
+}
+
+// clearStoragePlanBlocked releases a Running migration's Ready condition from
+// PlanBlocked once storage planning passes. reconcileWorkflow keeps that
+// reason in place so a blocked plan does not flip Ready on every reconcile.
+func (r *VmwareCloudFoundationMigrationReconciler) clearStoragePlanBlocked(m *migrationv1alpha1.VmwareCloudFoundationMigration) {
+	if m.Spec.State != migrationv1alpha1.MigrationStateRunning {
+		return
+	}
+	ready := apimeta.FindStatusCondition(m.Status.Conditions, migrationv1alpha1.ConditionReady)
+	if ready == nil || ready.Reason != migrationv1alpha1.ReasonPlanBlocked {
+		return
+	}
+	r.setReadyRunning(m)
 }
 
 // recordStoragePlannedEvent emits an event when the StoragePlanned condition

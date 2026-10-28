@@ -485,7 +485,7 @@ func checkNoVSphereCSIPersistentVolumes(ctx context.Context, kubeClient kubernet
 	}
 
 	sort.Strings(blocked)
-	return fmt.Errorf("vSphere CSI-backed persistent volumes are not supported for migration; configure spec.storage or remove PersistentVolumes using driver %q: %s", vsphereCSIDriverName, strings.Join(blocked, ", "))
+	return fmt.Errorf("vSphere CSI-backed persistent volumes block migration; set spec.migrateStorage to true or remove PersistentVolumes using driver %q: %s", vsphereCSIDriverName, strings.Join(blocked, ", "))
 }
 
 func checkVSphereStorageManagement(ctx context.Context, dynamicClient dynamic.Interface) (string, error) {
