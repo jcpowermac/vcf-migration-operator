@@ -7,9 +7,11 @@ metadata:
   name: cluster
 spec:
   state: Pending
+  migrateStorage: true
   targetVCenterCredentialsSecret:
     name: target-vcenter-creds
     namespace: openshift-vcf-migration
+  
   # nodeMigration controls the selected node-migration API shape.
   # Omitting it retains the legacy MachineSet/CPMS replacement path.
   #
@@ -38,13 +40,12 @@ spec:
     - name: target-fd-1
       region: target-region
       zone: target-zone-1
-      server: vcenter-target.example.com
+      server: vc01-lab2.devqe.ibmc.devcluster.openshift.com
       topology:
-        datacenter: TargetDC
-        computeCluster: /TargetDC/host/TargetCluster
-        datastore: /TargetDC/datastore/TargetDatastore
+        datacenter: vsphere9-lab2-dc
+        computeCluster: /vsphere9-lab2-dc/host/vsphere9-lab2-cluster
+        datastore: /vsphere9-lab2-dc/datastore/vsanDatastore
         networks:
-          - "VM Network"
-        resourcePool: /TargetDC/host/TargetCluster/Resources
-        template: /TargetDC/vm/rhcos-template
-        folder: /TargetDC/vm/my-cluster-infra-id
+          - VM Network
+        resourcePool: /vsphere9-lab2-dc/host/vsphere9-lab2-cluster/Resources
+        template: /vsphere9-lab2-dc/vm/rhcos-9.8.20260428-0-vmware.x86_64
