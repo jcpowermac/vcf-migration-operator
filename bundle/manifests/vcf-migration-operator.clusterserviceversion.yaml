@@ -19,21 +19,21 @@ metadata:
               {
                 "name": "target-fd-1",
                 "region": "target-region",
-                "server": "vcenter-target.example.com",
+                "server": "vc01-lab2.devqe.ibmc.devcluster.openshift.com",
                 "topology": {
-                  "computeCluster": "/TargetDC/host/TargetCluster",
-                  "datacenter": "TargetDC",
-                  "datastore": "/TargetDC/datastore/TargetDatastore",
-                  "folder": "/TargetDC/vm/my-cluster-infra-id",
+                  "computeCluster": "/vsphere9-lab2-dc/host/vsphere9-lab2-cluster",
+                  "datacenter": "vsphere9-lab2-dc",
+                  "datastore": "/vsphere9-lab2-dc/datastore/vsanDatastore",
                   "networks": [
                     "VM Network"
                   ],
-                  "resourcePool": "/TargetDC/host/TargetCluster/Resources",
-                  "template": "/TargetDC/vm/rhcos-template"
+                  "resourcePool": "/vsphere9-lab2-dc/host/vsphere9-lab2-cluster/Resources",
+                  "template": "/vsphere9-lab2-dc/vm/rhcos-9.8.20260428-0-vmware.x86_64"
                 },
                 "zone": "target-zone-1"
               }
             ],
+            "migrateStorage": true,
             "state": "Pending",
             "targetVCenterCredentialsSecret": {
               "name": "target-vcenter-creds",
@@ -43,7 +43,7 @@ metadata:
         }
       ]
     capabilities: Basic Install
-    createdAt: "2026-10-26T17:53:45Z"
+    createdAt: "2026-11-09T15:32:59Z"
     features.operators.openshift.io/disconnected: "true"
     features.operators.openshift.io/fips-compliant: "false"
     features.operators.openshift.io/proxy-aware: "false"
