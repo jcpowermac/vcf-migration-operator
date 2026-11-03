@@ -8,6 +8,7 @@ The operator reconciles the `VmwareCloudFoundationMigration` custom resource thr
 
 - **User Guide**
   - [Install with OLM](docs/user/install-with-olm.md)
+  - [Install with Operator SDK](docs/user/install-with-operator-sdk.md)
   - [Install without OLM](docs/user/install-without-olm.md)
   - [Spec Examples](docs/user/spec-examples.md) — YAML examples of the migration spec
 - **Developer Guide**
