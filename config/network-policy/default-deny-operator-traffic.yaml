@@ -1,0 +1,21 @@
+# Make the operator pod's ingress and egress restrictions explicit. The allow
+# policies in this directory add what the operator needs: metrics ingress,
+# DNS resolution, and TCP/443 to vCenter and the API server.
+# Policy rules are additive, so egress is limited to the union of the allow
+# rules' ports and DNS destinations.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: vcf-migration-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: default-deny-operator-traffic
+  namespace: system
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: vcf-migration-operator
+  policyTypes:
+    - Ingress
+    - Egress
