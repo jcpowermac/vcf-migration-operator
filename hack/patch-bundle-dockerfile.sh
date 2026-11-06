@@ -21,6 +21,7 @@ LABEL version="'"${VERSION}"'"
 LABEL cpe="cpe:/a:redhat:vcf_migration_operator:'"${MAJOR_MINOR}"'::el9"
 LABEL url="https://github.com/openshift/vcf-migration-operator"
 LABEL vendor="Red Hat, Inc."
+LABEL maintainer="AOS-SPLAT@redhat.com"
 LABEL description="The VCF Migration Operator automates migrating OpenShift clusters between VMware vCenters \
                    (e.g. VMware Cloud Foundation / VCF), orchestrating infrastructure preparation, multi-site \
                    configuration, machine migration, and source cleanup."
