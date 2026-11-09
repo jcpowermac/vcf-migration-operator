@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 
+	"golang.org/x/mod/modfile"
+
 	"github.com/openshift/vcf-migration-operator/hack/upgrade-automation/updater"
 )
 
@@ -122,18 +124,11 @@ func execute(args []string, root string, stdout, stderr io.Writer) int {
 }
 
 func validateRepository(root string) error {
-	modulePath := ""
 	goMod, err := os.ReadFile(filepath.Join(root, "go.mod")) // #nosec G304 -- fixed filename under the maintainer-selected repository root.
 	if err != nil {
 		return &updater.PreconditionError{Err: fmt.Errorf("repository root must contain go.mod: %w", err)}
 	}
-	for _, line := range strings.Split(string(goMod), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) >= 2 && fields[0] == "module" {
-			modulePath = fields[1]
-			break
-		}
-	}
+	modulePath := modfile.ModulePath(goMod)
 	if modulePath != "github.com/openshift/vcf-migration-operator" {
 		return &updater.PreconditionError{Err: fmt.Errorf("expected repository module github.com/openshift/vcf-migration-operator, found %q", modulePath)}
 	}
