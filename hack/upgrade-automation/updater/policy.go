@@ -64,8 +64,13 @@ func ParsePolicy(mode, goTarget, k8sRelease string, k8sTargetArgs []string) (Pol
 	if k8sRelease != "" && (!exactGoVersion.MatchString(k8sRelease) || !semver.IsValid("v"+k8sRelease)) {
 		return Policy{}, fmt.Errorf("invalid Kubernetes release %q: expected stable 1.N.P", k8sRelease)
 	}
-	if !updatesKubernetes && (len(k8sTargetArgs) != 0 || k8sRelease != "") {
-		return Policy{}, fmt.Errorf("mode %q pins Kubernetes and does not accept --k8s-target", mode)
+	if !updatesKubernetes {
+		if k8sRelease != "" {
+			return Policy{}, fmt.Errorf("mode %q pins Kubernetes and does not accept --k8s-release", mode)
+		}
+		if len(k8sTargetArgs) != 0 {
+			return Policy{}, fmt.Errorf("mode %q pins Kubernetes and does not accept --k8s-target", mode)
+		}
 	}
 	for _, target := range k8sTargetArgs {
 		modulePath, version, ok := strings.Cut(target, "=")

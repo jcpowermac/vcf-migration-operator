@@ -88,6 +88,33 @@ func TestParsePolicyRejectsTargetsForPinnedDimensions(t *testing.T) {
 	}
 }
 
+func TestParsePolicyNamesRejectedKubernetesFlag(t *testing.T) {
+	for _, mode := range []string{"pin-both", "go-only"} {
+		goTarget := ""
+		if mode == "go-only" {
+			goTarget = "1.26.10"
+		}
+		for _, tt := range []struct {
+			name     string
+			release  string
+			targets  []string
+			wantFlag string
+		}{
+			{name: "release", release: "1.36.6", wantFlag: "--k8s-release"},
+			{name: "target", targets: []string{"k8s.io/api=v0.36.6"}, wantFlag: "--k8s-target"},
+			{name: "both", release: "1.36.6", targets: []string{"k8s.io/api=v0.36.6"}, wantFlag: "--k8s-release"},
+		} {
+			t.Run(mode+"/"+tt.name, func(t *testing.T) {
+				_, err := ParsePolicy(mode, goTarget, tt.release, tt.targets)
+				want := fmt.Sprintf("mode %q pins Kubernetes and does not accept %s", mode, tt.wantFlag)
+				if err == nil || err.Error() != want {
+					t.Fatalf("ParsePolicy: got %v, want %q", err, want)
+				}
+			})
+		}
+	}
+}
+
 func TestValidatePolicyPreservesIndependentGoAndKubernetesPins(t *testing.T) {
 	baseline := Snapshot{
 		GoDirective: "1.26.7",
