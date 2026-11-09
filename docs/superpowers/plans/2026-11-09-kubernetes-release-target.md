@@ -57,7 +57,7 @@
 
 ## Execution result
 
-Both tasks implemented natively on existing feature branch, without commit or dependency changes. All 65 updater tests pass with GOFLAGS=-mod=readonly, including local proxy release resolution/rollback/report tests and incomplete-vendor launcher regression. Vet, build, Bash syntax, plain help with unset GOFLAGS, help with vendor GOFLAGS, and diff checks pass. Independent final review found no issues. Broader non-e2e tests exceeded 120-second command timeout; completed output showed api/v1alpha1 and updater packages passing, but full suite is not verified. No live upgrade performed.
+Both tasks implemented natively on existing feature branch, without commit or dependency changes. The release implementation and graph-only pin fix passed 66 updater tests with GOFLAGS=-mod=readonly, including local proxy release resolution/rollback/report tests, graph-only pin regression, and incomplete-vendor launcher regression. Vet, build, Bash syntax, plain help with unset GOFLAGS, help with vendor GOFLAGS, and diff checks pass. Independent final review found no issues. Broader non-e2e tests exceeded 120-second command timeout; completed output showed api/v1alpha1 and updater packages passing, but full suite is not verified. No live upgrade performed.
 
 ## Self-review
 
