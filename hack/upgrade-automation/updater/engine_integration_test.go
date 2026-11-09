@@ -300,7 +300,7 @@ func TestCandidateLimitCapsEachModuleAtTwentyAcrossPasses(t *testing.T) {
 	versions := []string{"v1.0.0"}
 	for patch := 1; patch <= 22; patch++ {
 		version := fmt.Sprintf("v1.0.%d", patch)
-		writeProxyModule(t, proxy, "example.test/a", version, "1.27.0", nil)
+		writeProxyModule(t, proxy, "example.test/a", version, futureGoVersion, nil)
 		versions = append(versions, version)
 	}
 	writeProxyVersionList(t, proxy, "example.test/a", versions)
@@ -335,7 +335,7 @@ func TestCandidateLimitAllowsAcceptanceOnTwentiethTrial(t *testing.T) {
 	versions := []string{"v1.0.0"}
 	for patch := 1; patch <= 20; patch++ {
 		version := fmt.Sprintf("v1.0.%d", patch)
-		goVersion := "1.27.0"
+		goVersion := futureGoVersion
 		if patch == 1 {
 			goVersion = "1.20"
 		}

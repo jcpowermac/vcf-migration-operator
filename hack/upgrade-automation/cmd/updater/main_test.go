@@ -29,6 +29,18 @@ func TestValidateRepositoryModuleIdentity(t *testing.T) {
 	}
 }
 
+func TestValidateRepositoryQuotedModulePath(t *testing.T) {
+	root := cliFixture(t)
+	setFakeGitStatus(t, "")
+	goMod := "// repository identity\nmodule \"github.com/openshift/vcf-migration-operator\" // module comment\n\ngo 1.26.7\n"
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte(goMod), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRepository(root); err != nil {
+		t.Fatalf("validateRepository: rejecting valid quoted module path: %v", err)
+	}
+}
+
 func TestParseArgsKubernetesRelease(t *testing.T) {
 	for _, mode := range []string{"both", "kubernetes-only"} {
 		args := []string{"--mode", mode, "--k8s-release", "1.36.6"}
