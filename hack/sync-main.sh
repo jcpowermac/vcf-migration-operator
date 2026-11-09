@@ -110,7 +110,9 @@ This preserves the tracking trailer so reruns remember the resolution; --skip do
 Then rerun this script. To abort instead:
     git -C \"$worktree_dir\" cherry-pick --abort"
     fi
-    [ -z "$(git -C "$worktree_dir" status --porcelain)" ] ||
+    # --untracked-files=no: tool artifacts (e.g. .agentic-qe/) are not work in
+    # progress and a cherry-pick does not delete them.
+    [ -z "$(git -C "$worktree_dir" status --porcelain --untracked-files=no)" ] ||
         fail "$worktree_dir has uncommitted changes; commit, stash or discard them and rerun"
 fi
 
