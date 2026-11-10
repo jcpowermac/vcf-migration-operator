@@ -1,4 +1,4 @@
-.PHONY: help build-index update-graph
+.PHONY: help build-index
 
 help:  ## Show this help
 	@echo "Available targets:"
@@ -10,10 +10,3 @@ build-index: ## Run build-catalog.sh with SNAPSHOT=<snapshot-or-url>
 		exit 1; \
 	fi
 	./hack/build-catalog.sh $(SNAPSHOT)
-
-update-graph: ## Run update-graph.sh with VERSION=<version>
-	@if [ -z "$(VERSION)" ]; then \
-		echo "Error: VERSION variable not set. Use: make update-graph VERSION=<version>"; \
-		exit 1; \
-	fi
-	./hack/update-graph.sh $(VERSION)
