@@ -20,12 +20,13 @@
 # Dependency directories (remove the comment below to include it)
 # vendor/
 
-# Go workspace file
-go.work
-go.work.sum
+# Root Go workspace files; vendored workspace files must remain tracked.
+/go.work
+/go.work.sum
 
 # Build output
 bin/
+/_output/
 
 # env file
 /.env
