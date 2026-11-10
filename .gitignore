@@ -26,6 +26,7 @@
 
 # Build output
 bin/
+/_output/
 
 # env file
 /.env
