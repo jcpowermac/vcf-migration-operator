@@ -60,7 +60,8 @@ func main(){fmt.Println(modfile.ModulePath([]byte("module fixture.test/root"))) 
 	for _, flags := range []string{"", "-mod=vendor"} {
 		t.Run("GOFLAGS="+flags, func(t *testing.T) {
 			t.Setenv("GOFLAGS", flags)
-			output, err := exec.Command("bash", launcher, "--k8s-release", "1.36.6", "--go-bin", selected, "--help").CombinedOutput()
+			output, err := exec.Command("bash", launcher, "--k8s-release", "1.36.6", "--go-bin", selected, "--help").
+				CombinedOutput()
 			if err != nil || !bytes.Contains(output, []byte("fixture.test/root")) {
 				t.Fatalf("launcher: %v, %s", err, output)
 			}
