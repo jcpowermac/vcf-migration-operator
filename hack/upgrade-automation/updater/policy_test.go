@@ -262,6 +262,9 @@ func TestValidatePolicyOrdersKubernetesViolationsDeterministically(t *testing.T)
 		t.Fatal(err)
 	}
 	violations := ValidatePolicy(baseline, after, policy)
+	if len(violations) != 16 {
+		t.Fatalf("ValidatePolicy() returned %d violations, want 16: %v", len(violations), violations)
+	}
 	for index := 1; index < len(violations); index++ {
 		if violations[index-1].Error() > violations[index].Error() {
 			t.Fatalf("policy violations are not stable-sorted: %v", violations)
