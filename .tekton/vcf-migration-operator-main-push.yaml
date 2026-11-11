@@ -8,10 +8,11 @@ metadata:
     pipelinesascode.tekton.dev/cancel-in-progress: "false"
     pipelinesascode.tekton.dev/max-keep-runs: "3"
     pipelinesascode.tekton.dev/on-cel-expression: event == "push" && target_branch == "v0.1"
+      && files.all.exists(f, f != 'bundle.konflux.Dockerfile')
   creationTimestamp: null
   labels:
     appstudio.openshift.io/application: vcf-migration-operator-0-1
-    appstudio.openshift.io/component: vcf-migration-operator-v0.1
+    appstudio.openshift.io/component: vcf-migration-operator-0-1
     pipelines.appstudio.openshift.io/type: build
   name: vcf-migration-operator-on-push
   namespace: vcf-migration-operator-tenant
