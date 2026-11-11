@@ -1,12 +1,17 @@
 FROM registry.access.redhat.com/ubi9/go-toolset:latest as builder
-ARG IMG=registry.redhat.io/vcf-migration-operator-tech-preview/vcf-migration-rhel9-operator@sha256:9723e444ac8a99bf4ccf197410be97547ebc9c9278c5165ddcbf187e7886a9bd
+ARG IMG=registry.redhat.io/vcf-migration-operator-tech-preview/vcf-migration-rhel9-operator@sha256:3247daf1d9b019a5109af4b674e27f0f3c8062d547e4d2ccce5a82e37fcebd07
 ARG ORIGINAL_IMG=registry.ci.openshift.org/origin/vcf-migration-operator:latest
 WORKDIR /code
 COPY ./ ./
 
-# Fail fast if IMG was not overridden from its placeholder default.
-RUN echo "${IMG}" | grep -q '@sha256:placeholder' && \
-    { echo "ERROR: IMG contains placeholder digest; override IMG with a valid image reference."; exit 1; } || true
+# Fail fast if IMG does not point at the v0.1 operand repository. The digest is
+# rewritten by the component nudge, so only the repository is asserted here: a
+# nudge generated for another stream must not retarget the bundle at a
+# different repository.
+RUN case "${IMG}" in \
+      registry.redhat.io/vcf-migration-operator-tech-preview/vcf-migration-rhel9-operator@sha256:[0-9a-f]*) ;; \
+      *) echo "ERROR: IMG must be a vcf-migration-rhel9-operator @sha256 digest, got ${IMG}"; exit 1 ;; \
+    esac
 
 # Replace the bundle image in the repository with the one specified by the IMG build argument.
 RUN cp -r bundle /tmp/bundle && \
