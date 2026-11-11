@@ -26,6 +26,10 @@ import (
 
 const vsphereCSIDriverName = "csi.vsphere.vmware.com"
 
+// maxDestinationWorkerMachineSets mirrors the MaxItems=256 kubebuilder marker on
+// status.workerMachineSetNames, so creation never exceeds what status accepts.
+const maxDestinationWorkerMachineSets = 256
+
 // Management states for the spec.managementState field read from ClusterCSIDriver
 // and Storage operators during preflight.
 const (
@@ -35,7 +39,6 @@ const (
 	managementStateUnmanaged = "Unmanaged"
 )
 const preflightVSphereTimeout = 2 * time.Minute
-const rhcosArchAMD64 = "x86_64"
 
 var (
 	machineHealthCheckGVR = schema.GroupVersionResource{Group: "machine.openshift.io", Version: "v1beta1", Resource: "machinehealthchecks"}
@@ -71,21 +74,113 @@ type credentials struct {
 	password string
 }
 
+func runPreflightStep(log klog.Logger, check string, fn func() error, fields ...any) error {
+	logFields := append([]any{"check", check}, fields...)
+	started := time.Now()
+	log.Info("preflight check started", logFields...)
+
+	err := fn()
+	resultFields := append(append([]any(nil), logFields...), "duration", time.Since(started).String())
+	if err != nil {
+		log.Error(err, "preflight check failed", resultFields...)
+		return err
+	}
+	log.Info("preflight check completed", resultFields...)
+	return nil
+}
+
 // fdTemplateMissing returns an error naming the first failure domain whose
-// topology.template is empty. Called from runPreflightChecks only when spec.image
-// is not set, because in that mode the operator does not import a template and
-// each failure domain must reference an existing one.
+// topology.template is empty.
 func fdTemplateMissing(fds []configv1.VSpherePlatformFailureDomainSpec) error {
 	for i := range fds {
 		if fds[i].Topology.Template == "" {
-			return fmt.Errorf("spec.failureDomains[%d].topology.template is required when spec.image is not set (failure domain %q)", i, fds[i].Name)
+			return fmt.Errorf("spec.failureDomains[%d].topology.template is required (failure domain %q)", i, fds[i].Name)
 		}
 	}
 	return nil
 }
 
-func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) (string, error) {
+func validateFailureDomainTypes(fds []configv1.VSpherePlatformFailureDomainSpec) error {
+	for i := range fds {
+		fd := &fds[i]
+		if fd.RegionAffinity != nil && fd.RegionAffinity.Type == configv1.ComputeClusterFailureDomainRegion {
+			return fmt.Errorf("failure domain %q uses unsupported region type %q", fd.Name, fd.RegionAffinity.Type)
+		}
+		if fd.ZoneAffinity != nil && fd.ZoneAffinity.Type == configv1.HostGroupFailureDomainZone {
+			return fmt.Errorf("failure domain %q uses unsupported zone type %q", fd.Name, fd.ZoneAffinity.Type)
+		}
+	}
+	return nil
+}
+
+func (r *VmwareCloudFoundationMigrationReconciler) validateMigrationFailureDomains(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) ([]migrationv1alpha1.FailureDomainMapping, error) {
+	infra, err := openshift.NewInfrastructureManager(r.ConfigClient).Get(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("getting infrastructure for failure domain validation: %w", err)
+	}
+	if infra.Spec.PlatformSpec.VSphere != nil {
+		if err := validateFailureDomainTypes(infra.Spec.PlatformSpec.VSphere.FailureDomains); err != nil {
+			return nil, fmt.Errorf("validating source failure domains: %w", err)
+		}
+	}
+	if err := validateSourceVCenterCount(infra); err != nil {
+		return nil, err
+	}
+	var sourceFDs []configv1.VSpherePlatformFailureDomainSpec
+	if infra.Spec.PlatformSpec.VSphere != nil {
+		sourceFDs = infra.Spec.PlatformSpec.VSphere.FailureDomains
+	}
+	if err := validateSourceFDTopologyDisjoint(sourceFDs); err != nil {
+		return nil, err
+	}
+	mappings, err := resolveFailureDomainMappings(migration.Spec.FailureDomainMappings, sourceFDs, migration.Spec.FailureDomains)
+	if err != nil {
+		return nil, err
+	}
+	if infra.Status.InfrastructureName == "" {
+		return nil, fmt.Errorf("infrastructure status has no InfrastructureName")
+	}
+	if err := r.validateMachineSetNameCollisions(ctx, infra.Status.InfrastructureName, mappings, sourceFDs, migration.Spec.FailureDomains); err != nil {
+		return nil, err
+	}
+	if err := r.validateDestinationMachineSetCount(ctx, mappings, sourceFDs); err != nil {
+		return nil, err
+	}
+	return mappings, nil
+}
+
+// validateDestinationMachineSetCount fails closed when the resolved mappings
+// would generate more destination worker MachineSets than
+// status.workerMachineSetNames can hold. Creation appends one name per source
+// MachineSet, so the overflow would otherwise surface only as a rejected status
+// update after the capacity was already created.
+func (r *VmwareCloudFoundationMigrationReconciler) validateDestinationMachineSetCount(ctx context.Context, mappings []migrationv1alpha1.FailureDomainMapping, sourceFDs []configv1.VSpherePlatformFailureDomainSpec) error {
 	log := klog.FromContext(ctx)
+	machineMgr := openshift.NewMachineManager(r.KubeClient, r.MachineClient, r.DynamicClient)
+
+	count := 0
+	for i := range mappings {
+		source := findFailureDomainByName(sourceFDs, mappings[i].Source)
+		if source == nil {
+			return fmt.Errorf("resolving source failure domain %q", mappings[i].Source)
+		}
+		// One destination MachineSet is created per source MachineSet; a mapped
+		// source failure domain without MachineSets generates none.
+		sourceSets, err := machineMgr.GetMachineSetsByFailureDomain(ctx, source.Server, source)
+		if err != nil {
+			return fmt.Errorf("listing machinesets for source failure domain %q: %w", source.Name, err)
+		}
+		count += len(sourceSets)
+	}
+	if count > maxDestinationWorkerMachineSets {
+		return fmt.Errorf("failure domain mapping would generate %d destination MachineSets, exceeding the %d supported by status.workerMachineSetNames", count, maxDestinationWorkerMachineSets)
+	}
+	log.V(2).Info("validated generated destination MachineSet count", "count", count, "max", maxDestinationWorkerMachineSets)
+	return nil
+}
+
+func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) (string, error) {
+	log := klog.FromContext(ctx).V(1)
 	condType := migrationv1alpha1.ConditionInfrastructurePrepared
 
 	if len(migration.Spec.FailureDomains) == 0 {
@@ -94,16 +189,20 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 	if err := validateUniqueFailureDomainNames(migration.Spec.FailureDomains); err != nil {
 		return "", err
 	}
-	if migration.Spec.Image == nil {
-		if err := fdTemplateMissing(migration.Spec.FailureDomains); err != nil {
-			return "", err
-		}
+	if err := fdTemplateMissing(migration.Spec.FailureDomains); err != nil {
+		return "", err
+	}
+	if err := validateFailureDomainTypes(migration.Spec.FailureDomains); err != nil {
+		return "", err
+	}
+	if err := validateFailureDomainServers(migration.Spec.FailureDomains); err != nil {
+		return "", err
+	}
+	if migration.Spec.TargetVCenterCredentialsSecret.Name == "" {
+		return "", fmt.Errorf("spec.targetVCenterCredentialsSecret.name must not be empty")
 	}
 
 	secretRef := migration.Spec.TargetVCenterCredentialsSecret
-	if secretRef.Name == "" {
-		return "", fmt.Errorf("spec.targetVCenterCredentialsSecret.name must not be empty")
-	}
 	ns := secretRef.Namespace
 	if ns == "" {
 		ns = migration.Namespace
@@ -112,48 +211,105 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 		return "", fmt.Errorf("target credentials secret %s/%s not found: %w", ns, secretRef.Name, err)
 	}
 
-	support, err := openshift.GetVSphereMultiVCenterSupport(ctx, r.ConfigClient)
-	if err != nil {
-		return "", fmt.Errorf("checking cluster readiness: %w", err)
-	}
-	if !support.FeatureGateEnabled {
-		return "", fmt.Errorf("feature gate VSphereMultiVCenterDay2 is not enabled for OpenShift %s; enable the feature gate before starting migration", support.ClusterVersion)
-	}
-	r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Validating cluster readiness")
-	if support.UpgradeInProgress {
-		return "", newTransientError(fmt.Errorf("cluster upgrade is in progress; wait for ClusterVersion/version Progressing=False before starting migration"))
-	}
-
-	opMgr := openshift.NewOperatorManager(r.ConfigClient)
-	healthy, unhealthyOperators, err := opMgr.CheckAllOperatorsHealthy(ctx)
-	if err != nil {
-		return "", fmt.Errorf("checking cluster operator health: %w", err)
-	}
-	if !healthy {
-		return "", newTransientError(fmt.Errorf("cluster operators are not healthy; wait for operators to recover before starting migration: %s", strings.Join(unhealthyOperators, ", ")))
-	}
-
-	if err := checkNoVSphereCSIPersistentVolumes(ctx, r.KubeClient); err != nil {
-		return "", err
-	}
-	storageWarning, err := checkVSphereStorageManagement(ctx, r.DynamicClient)
+	mappings, err := r.validateMigrationFailureDomains(ctx, migration)
 	if err != nil {
 		return "", err
 	}
-	if err := checkInterferingRolloutResources(ctx, r.DynamicClient); err != nil {
+
+	if err := runPreflightStep(log, "source MachineSet coverage", func() error {
+		return r.validatePreflightSourceCoverage(ctx, mappings)
+	}); err != nil {
+		return "", err
+	}
+
+	if err := runPreflightStep(log, "cluster readiness", func() error {
+		support, err := openshift.GetVSphereMultiVCenterSupport(ctx, r.ConfigClient)
+		if err != nil {
+			return fmt.Errorf("checking cluster readiness: %w", err)
+		}
+		if !support.FeatureGateEnabled {
+			return fmt.Errorf("feature gate VSphereMultiVCenterDay2 is not enabled for OpenShift %s; enable the feature gate before starting migration", support.ClusterVersion)
+		}
+		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, "Validating cluster readiness")
+		if support.UpgradeInProgress {
+			return newTransientError(fmt.Errorf("cluster upgrade is in progress; wait for ClusterVersion/version Progressing=False before starting migration"))
+		}
+		return nil
+	}); err != nil {
+		return "", err
+	}
+
+	if err := runPreflightStep(log, "cluster operator health", func() error {
+		opMgr := openshift.NewOperatorManager(r.ConfigClient)
+		healthy, unhealthyOperators, err := opMgr.CheckAllOperatorsHealthy(ctx)
+		if err != nil {
+			return fmt.Errorf("checking cluster operator health: %w", err)
+		}
+		if !healthy {
+			return newTransientError(fmt.Errorf("cluster operators are not healthy; wait for operators to recover before starting migration: %s", strings.Join(unhealthyOperators, ", ")))
+		}
+		return nil
+	}); err != nil {
+		return "", err
+	}
+
+	if err := runPreflightStep(log, "vSphere CSI persistent volumes", func() error {
+		return checkNoVSphereCSIPersistentVolumes(ctx, r.KubeClient)
+	}); err != nil {
+		return "", err
+	}
+	var storageWarning string
+	if err := runPreflightStep(log, "storage management state", func() error {
+		var err error
+		storageWarning, err = checkVSphereStorageManagement(ctx, r.DynamicClient)
+		return err
+	}); err != nil {
+		return "", err
+	}
+	if err := runPreflightStep(log, "interfering rollout resources", func() error {
+		return checkInterferingRolloutResources(ctx, r.DynamicClient)
+	}); err != nil {
 		return "", err
 	}
 
 	vsphereCtx, cancel := context.WithTimeout(ctx, preflightVSphereTimeout)
 	defer cancel()
 	defer func() {
-		log.V(2).Info("clearing cached vSphere sessions after preflight")
-		vsphere.ClearSessions(vsphereCtx)
+		// The probe-VM phase can outlive vsphereCtx; log out on a fresh bounded
+		// context so session handles are released even on long runs.
+		logoutCtx, logoutCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer logoutCancel()
+		_ = runPreflightStep(log, "clear cached vSphere sessions", func() error {
+			vsphere.ClearSessions(logoutCtx)
+			return nil
+		})
 	}()
 
-	if err := r.validatePreflightVSphere(ctx, vsphereCtx, migration); err != nil {
+	if err := runPreflightStep(log, "vSphere topology", func() error {
+		return r.validatePreflightVSphere(ctx, vsphereCtx, migration)
+	}, "failureDomainCount", len(migration.Spec.FailureDomains)); err != nil {
 		return "", err
 	}
+
+	checkNet := r.checkNetworkingViaProbeVMsFunc
+	if checkNet == nil {
+		checkNet = r.checkNetworkingViaProbeVMs
+	}
+	if err := runPreflightStep(log, "probe VM network compatibility", func() error {
+		sourceVC, err := openshift.NewInfrastructureManager(r.ConfigClient).GetSourceVCenter(ctx)
+		if err != nil {
+			return fmt.Errorf("getting source vCenter: %w", err)
+		}
+		netcheckCtx, cancel := context.WithTimeout(ctx, preflightNetcheckTimeout)
+		defer cancel()
+		return checkNet(netcheckCtx, migration, sourceVC)
+	}, "failureDomainCount", len(migration.Spec.FailureDomains)); err != nil {
+		return "", err
+	}
+
+	// Record the effective mapping so later phases and immutability checks use
+	// the pairs resolved at preflight.
+	migration.Status.FailureDomainMappings = mappings
 
 	message := "Preflight validation passed"
 	if storageWarning != "" {
@@ -164,39 +320,39 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 
 // validatePreflightVSphere connects to the source and target vCenters and
 // verifies that the failure domain topology (datacenter, cluster, datastore,
-// networks, template) is reachable on each target. When spec.image is set,
-// it also performs a best-effort reachability check against the OVA URL.
+// networks, template) is reachable on each target.
 func (r *VmwareCloudFoundationMigrationReconciler) validatePreflightVSphere(ctx context.Context, vsphereCtx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration) error {
-	log := klog.FromContext(ctx)
+	log := klog.FromContext(ctx).V(1)
 	condType := migrationv1alpha1.ConditionInfrastructurePrepared
 
-	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient)
-	sourceVC, err := infraMgr.GetSourceVCenter(ctx)
+	sourceVC, err := openshift.NewInfrastructureManager(r.ConfigClient).GetSourceVCenter(ctx)
 	if err != nil {
 		return fmt.Errorf("getting source vCenter: %w", err)
 	}
 
-	sm := openshift.NewSecretManager(r.KubeClient)
-	srcUser, srcPass, err := sm.GetCredentials(ctx, sourceVC.Server)
-	if err != nil {
-		return fmt.Errorf("getting source vCenter credentials: %w", err)
+	if err := runPreflightStep(log, "source vCenter connectivity", func() error {
+		sm := openshift.NewSecretManager(r.KubeClient)
+		srcUser, srcPass, err := sm.GetCredentials(ctx, sourceVC.Server)
+		if err != nil {
+			return fmt.Errorf("getting source vCenter credentials: %w", err)
+		}
+		if len(sourceVC.Datacenters) == 0 {
+			return fmt.Errorf("source vCenter has no datacenters configured")
+		}
+		if len(sourceVC.Datacenters) > 1 {
+			return fmt.Errorf("source vCenter must have exactly one datacenter configured, found %d", len(sourceVC.Datacenters))
+		}
+		srcSession, err := getVSphereSession(vsphereCtx, sourceVC.Server, sourceVC.Datacenters[0], srcUser, srcPass)
+		if err != nil {
+			return fmt.Errorf("connecting to source vCenter %s: %w", sourceVC.Server, err)
+		}
+		if _, err := srcSession.Finder.Datacenter(vsphereCtx, sourceVC.Datacenters[0]); err != nil {
+			return fmt.Errorf("source datacenter %q not accessible: %w", sourceVC.Datacenters[0], err)
+		}
+		return nil
+	}, "server", sourceVC.Server, "datacenters", sourceVC.Datacenters); err != nil {
+		return err
 	}
-
-	if len(sourceVC.Datacenters) == 0 {
-		return fmt.Errorf("source vCenter has no datacenters configured")
-	}
-	if len(sourceVC.Datacenters) > 1 {
-		return fmt.Errorf("source vCenter must have exactly one datacenter configured, found %d", len(sourceVC.Datacenters))
-	}
-	srcDC := sourceVC.Datacenters[0]
-	srcSession, err := getVSphereSession(vsphereCtx, sourceVC.Server, srcDC, srcUser, srcPass)
-	if err != nil {
-		return fmt.Errorf("connecting to source vCenter %s: %w", sourceVC.Server, err)
-	}
-	if _, err := srcSession.Finder.Datacenter(vsphereCtx, srcDC); err != nil {
-		return fmt.Errorf("source datacenter %q not accessible: %w", srcDC, err)
-	}
-	log.V(1).Info("source vCenter connectivity validated", "server", sourceVC.Server)
 
 	targetCredentialsByServer := make(map[string]credentials, len(migration.Spec.FailureDomains))
 
@@ -204,26 +360,26 @@ func (r *VmwareCloudFoundationMigrationReconciler) validatePreflightVSphere(ctx 
 		fd := &migration.Spec.FailureDomains[i]
 		r.setCondition(migration, condType, metav1.ConditionFalse, migrationv1alpha1.ReasonProgressing, fmt.Sprintf("Validating target failure domain %q", fd.Name))
 
-		creds, ok := targetCredentialsByServer[fd.Server]
-		if !ok {
-			username, password, err := getTargetCredentials(ctx, r.KubeClient, migration, fd.Server)
-			if err != nil {
-				return fmt.Errorf("getting credentials for target %s: %w", fd.Server, err)
+		if err := runPreflightStep(log, "target failure domain topology", func() error {
+			creds, ok := targetCredentialsByServer[fd.Server]
+			if !ok {
+				username, password, err := getTargetCredentials(ctx, r.KubeClient, migration, fd.Server)
+				if err != nil {
+					return fmt.Errorf("getting credentials for target %s: %w", fd.Server, err)
+				}
+				creds = credentials{username: username, password: password}
+				targetCredentialsByServer[fd.Server] = creds
 			}
-			creds = credentials{username: username, password: password}
-			targetCredentialsByServer[fd.Server] = creds
-		}
-
-		if err := validateFailureDomain(vsphereCtx, migration, fd, creds); err != nil {
+			return validateFailureDomain(vsphereCtx, fd, creds)
+		}, "failureDomain", fd.Name, "server", fd.Server); err != nil {
 			return err
 		}
-		log.V(1).Info("target failure domain validated", "name", fd.Name, "server", fd.Server)
 	}
 
 	return nil
 }
 
-func validateFailureDomain(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, fd *configv1.VSpherePlatformFailureDomainSpec, creds credentials) error {
+func validateFailureDomain(ctx context.Context, fd *configv1.VSpherePlatformFailureDomainSpec, creds credentials) error {
 	session, err := getVSphereSession(ctx, fd.Server, fd.Topology.Datacenter, creds.username, creds.password)
 	if err != nil {
 		return fmt.Errorf("connecting to target vCenter %s: %w", fd.Server, err)
@@ -255,122 +411,15 @@ func validateFailureDomain(ctx context.Context, migration *migrationv1alpha1.Vmw
 			return fmt.Errorf("target folder %q on %s not found: %w", fd.Topology.Folder, fd.Server, err)
 		}
 	}
-	// Template check: skip when spec.image is set and topology.template is
-	// empty — the template will be created by ensureDestinationImageImported. A
-	// missing template with spec.image unset is rejected earlier in
-	// runPreflightChecks.
-	if fd.Topology.Template != "" {
-		if _, err := session.Finder.VirtualMachine(ctx, fd.Topology.Template); err != nil {
-			return fmt.Errorf("target template %q on %s not found: %w", fd.Topology.Template, fd.Server, err)
-		}
+	// The required template must exist on the destination vCenter.
+	if _, err := session.Finder.VirtualMachine(ctx, fd.Topology.Template); err != nil {
+		return fmt.Errorf("target template %q on %s not found: %w", fd.Topology.Template, fd.Server, err)
 	}
 
 	if err := validateTargetPrivileges(ctx, session, datacenter, cluster); err != nil {
 		return fmt.Errorf("validating target privileges for failure domain %q: %w", fd.Name, err)
 	}
 
-	if migration.Spec.Image != nil && fd.Topology.Template == "" {
-		if err := validateImageImportPrivileges(ctx, session, datacenter, cluster, fd.Topology.ResourcePool, fd.Topology.Datastore, fd.Topology.Folder); err != nil {
-			return fmt.Errorf("validating image import privileges for failure domain %q: %w", fd.Name, err)
-		}
-	}
-
-	return nil
-}
-
-// imageImportPrivileges are the vCenter privileges required for OVA import.
-var imageImportPrivileges = []string{
-	"VApp.Import",
-	"VirtualMachine.Config.AddNewDisk",
-	"VirtualMachine.Inventory.CreateFromExisting",
-}
-
-// validateImageImportPrivileges checks that the authenticated user has the
-// privileges required for OVA import: the resource pool set on the effective
-// resource pool (the failure domain's pool when resourcePoolPath is non-empty,
-// otherwise the cluster's default pool), Datastore.AllocateSpace on the target
-// datastore (required by OvfManager.CreateImportSpec's datastore parameter),
-// and VirtualMachine.Provisioning.MarkAsTemplate on the VM folder the imported
-// template lands in (vmFolder, or the datacenter VM folder when empty). When
-// vmFolder is empty the effective target is /<datacenter>/vm/<infraID>, which
-// is created after preflight (ensureDestinationInitialized) and inherits its
-// privileges from the datacenter VM folder, so validating the parent here is
-// the equivalent check.
-func validateImageImportPrivileges(ctx context.Context, session *vsphere.Session, datacenter *object.Datacenter, cluster *object.ClusterComputeResource, resourcePoolPath, datastore, vmFolder string) error {
-	if session == nil || session.Client == nil || session.Client.Client == nil {
-		return fmt.Errorf("session client must not be nil")
-	}
-
-	userSession, err := session.Client.SessionManager.UserSession(ctx)
-	if err != nil {
-		return fmt.Errorf("getting current vSphere user session: %w", err)
-	}
-	if userSession == nil {
-		return fmt.Errorf("current vSphere user session not found")
-	}
-
-	authMgr := object.NewAuthorizationManager(session.Client.Client)
-
-	var rp *object.ResourcePool
-	if resourcePoolPath != "" {
-		rp, err = session.Finder.ResourcePool(ctx, resourcePoolPath)
-		if err != nil {
-			return fmt.Errorf("finding resource pool %q: %w", resourcePoolPath, err)
-		}
-	} else {
-		rp, err = cluster.ResourcePool(ctx)
-		if err != nil {
-			return fmt.Errorf("getting cluster resource pool: %w", err)
-		}
-	}
-
-	if err := checkPrivilegesOnEntity(ctx, authMgr, userSession.UserName, rp.Reference(), imageImportPrivileges, "resource pool"); err != nil {
-		return fmt.Errorf("missing required image import privileges: %w", err)
-	}
-
-	ds, err := session.Finder.Datastore(ctx, datastore)
-	if err != nil {
-		return fmt.Errorf("finding datastore %q: %w", datastore, err)
-	}
-	if err := checkPrivilegesOnEntity(ctx, authMgr, userSession.UserName, ds.Reference(),
-		[]string{"Datastore.AllocateSpace"}, fmt.Sprintf("datastore %q", datastore)); err != nil {
-		return err
-	}
-
-	var folder *object.Folder
-	if vmFolder != "" {
-		folder, err = session.Finder.Folder(ctx, vmFolder)
-		if err != nil {
-			return fmt.Errorf("finding folder %q: %w", vmFolder, err)
-		}
-	} else {
-		folder, err = dcVMFolder(ctx, datacenter)
-		if err != nil {
-			return err
-		}
-	}
-	if err := checkPrivilegesOnEntity(ctx, authMgr, userSession.UserName, folder.Reference(),
-		[]string{"VirtualMachine.Provisioning.MarkAsTemplate"}, fmt.Sprintf("VM folder %q", folder.InventoryPath)); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// checkPrivilegesOnEntity verifies the user has all the given privileges on a
-// single entity, returning an error naming the missing ones.
-func checkPrivilegesOnEntity(ctx context.Context, authMgr *object.AuthorizationManager, user string, ref types.ManagedObjectReference, privileges []string, label string) error {
-	results, err := authMgr.HasUserPrivilegeOnEntities(ctx, []types.ManagedObjectReference{ref}, user, privileges)
-	if err != nil {
-		return fmt.Errorf("checking privileges on %s: %w", label, err)
-	}
-	if len(results) == 0 {
-		return fmt.Errorf("no privilege check results returned for %s", label)
-	}
-	missing := missingPrivileges(results[0], privileges)
-	if len(missing) > 0 {
-		return fmt.Errorf("user %q is missing %s on %s", user, strings.Join(missing, ", "), label)
-	}
 	return nil
 }
 
@@ -632,6 +681,36 @@ func validateUniqueFailureDomainNames(failureDomains []configv1.VSpherePlatformF
 	}
 	sort.Strings(names)
 	return fmt.Errorf("duplicate failure domain names are not allowed: %s", strings.Join(names, ", "))
+}
+
+// validatePreflightSourceCoverage rejects a migration plan whose source
+// vCenter runs worker capacity that no source failure domain mapping covers,
+// before the mapping is published as immutable or any control plane mutation
+// starts. The recorded-names half of the coverage gate runs later, at
+// scale-down, once the destination MachineSets exist.
+func (r *VmwareCloudFoundationMigrationReconciler) validatePreflightSourceCoverage(ctx context.Context, mappings []migrationv1alpha1.FailureDomainMapping) error {
+	infraMgr := openshift.NewInfrastructureManager(r.ConfigClient)
+	sourceVC, err := infraMgr.GetSourceVCenter(ctx)
+	if err != nil {
+		return fmt.Errorf("getting source vCenter: %w", err)
+	}
+	infra, err := infraMgr.Get(ctx)
+	if err != nil {
+		return fmt.Errorf("getting infrastructure: %w", err)
+	}
+	var sourceFDs []configv1.VSpherePlatformFailureDomainSpec
+	if infra.Spec.PlatformSpec.VSphere != nil {
+		for _, fd := range infra.Spec.PlatformSpec.VSphere.FailureDomains {
+			if fd.Server == sourceVC.Server {
+				sourceFDs = append(sourceFDs, fd)
+			}
+		}
+	}
+	msList, err := openshift.NewMachineManager(r.KubeClient, r.MachineClient, r.DynamicClient).GetMachineSetsByVCenter(ctx, sourceVC.Server)
+	if err != nil {
+		return fmt.Errorf("getting source MachineSets: %w", err)
+	}
+	return validateSourceMachineSetMappingCoverage(ctx, msList, mappings, sourceFDs)
 }
 
 func listDynamicResourceNames(ctx context.Context, dynamicClient dynamic.Interface, gvr schema.GroupVersionResource) ([]string, error) {

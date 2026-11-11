@@ -404,7 +404,7 @@ func newMigrationForReadyTest(targetServers []string) *migrationv1alpha1.VmwareC
 	return &migrationv1alpha1.VmwareCloudFoundationMigration{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      migrationv1alpha1.SingletonName,
-			Namespace: "default",
+			Namespace: migrationv1alpha1.SingletonNamespace,
 		},
 		Spec: migrationv1alpha1.VmwareCloudFoundationMigrationSpec{
 			FailureDomains: fds,

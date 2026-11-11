@@ -8,6 +8,8 @@ import (
 	configclient "github.com/openshift/client-go/config/clientset/versioned"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
+
+	"github.com/openshift/vcf-migration-operator/internal/execution"
 )
 
 const (
@@ -63,6 +65,28 @@ func (m *InfrastructureManager) GetSourceFailureDomain(ctx context.Context) (*co
 	}
 
 	return &infra.Spec.PlatformSpec.VSphere.FailureDomains[0], nil
+}
+
+// GetVCenterByServer returns the VCenters entry whose server matches the
+// argument. Unlike GetSourceVCenter's VCenters[0], this lookup remains valid
+// after the destination vCenter has been appended to the Infrastructure.
+func (m *InfrastructureManager) GetVCenterByServer(ctx context.Context, server string) (*configv1.VSpherePlatformVCenterSpec, error) {
+	infra, err := m.Get(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if infra.Spec.PlatformSpec.VSphere == nil {
+		return nil, fmt.Errorf("no vCenters configured in infrastructure spec")
+	}
+
+	for i := range infra.Spec.PlatformSpec.VSphere.VCenters {
+		vc := &infra.Spec.PlatformSpec.VSphere.VCenters[i]
+		if vc.Server == server {
+			return vc, nil
+		}
+	}
+	return nil, fmt.Errorf("no vCenter entry for server %q in infrastructure spec", server)
 }
 
 // AddTargetVCenter adds target vCenter entries and failure domains to the Infrastructure
@@ -125,6 +149,9 @@ func (m *InfrastructureManager) AddTargetVCenter(ctx context.Context, infra *con
 		log.V(2).Info("added failure domain", "name", failureDomains[i].Name)
 	}
 
+	if err := execution.Check(ctx); err != nil {
+		return nil, err
+	}
 	updated, err := m.client.ConfigV1().Infrastructures().Update(ctx, infra, metav1.UpdateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("updating infrastructure with target vCenter: %w", err)
@@ -142,6 +169,12 @@ func (m *InfrastructureManager) RemoveSourceVCenter(ctx context.Context, infra *
 
 	if infra.Spec.PlatformSpec.VSphere == nil {
 		return nil, fmt.Errorf("infrastructure spec has no vSphere platform configuration")
+	}
+
+	// Refuse to remove the last configured vCenter; cleanup must leave the
+	// destination vCenters in place, and an empty list would break the cluster.
+	if len(infra.Spec.PlatformSpec.VSphere.VCenters) == 1 && infra.Spec.PlatformSpec.VSphere.VCenters[0].Server == sourceServer {
+		return nil, fmt.Errorf("refusing to remove the last configured vCenter %q", sourceServer)
 	}
 
 	// Remove the vCenter entry.
@@ -162,6 +195,9 @@ func (m *InfrastructureManager) RemoveSourceVCenter(ctx context.Context, infra *
 	}
 	infra.Spec.PlatformSpec.VSphere.FailureDomains = fds
 
+	if err := execution.Check(ctx); err != nil {
+		return nil, err
+	}
 	updated, err := m.client.ConfigV1().Infrastructures().Update(ctx, infra, metav1.UpdateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("updating infrastructure after removing source vCenter: %w", err)

@@ -43,7 +43,7 @@ metadata:
         }
       ]
     capabilities: Basic Install
-    createdAt: "2026-09-14T19:50:43Z"
+    createdAt: "2026-10-26T17:53:45Z"
     features.operators.openshift.io/disconnected: "true"
     features.operators.openshift.io/fips-compliant: "false"
     features.operators.openshift.io/proxy-aware: "false"
@@ -55,7 +55,7 @@ metadata:
       Platform Plus"]'
     operators.operatorframework.io/builder: operator-sdk-v1.42.0
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
-  name: vcf-migration-operator.v0.0.1
+  name: vcf-migration-operator.v0.1.0
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -94,19 +94,20 @@ spec:
         - apiGroups:
           - ""
           resources:
-          - events
-          verbs:
-          - create
-          - patch
-        - apiGroups:
-          - ""
-          resources:
           - nodes
           - persistentvolumes
           verbs:
           - get
           - list
           - watch
+        - apiGroups:
+          - ""
+          - events.k8s.io
+          resources:
+          - events
+          verbs:
+          - create
+          - patch
         - apiGroups:
           - apps
           resources:
@@ -213,6 +214,18 @@ spec:
           - patch
           - update
         - apiGroups:
+          - networking.k8s.io
+          resources:
+          - networkpolicies
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
           - operator.openshift.io
           resources:
           - clustercsidrivers
@@ -258,6 +271,7 @@ spec:
                 - --metrics-bind-address=:8443
                 - --leader-elect
                 - --health-probe-bind-address=:8081
+                - --zap-log-level=1
                 command:
                 - /manager
                 image: registry.ci.openshift.org/origin/vcf-migration-operator:latest
@@ -286,19 +300,12 @@ spec:
                   capabilities:
                     drop:
                     - ALL
-                volumeMounts:
-                - mountPath: /tmp/ova-scratch
-                  name: scratch
               securityContext:
                 runAsNonRoot: true
                 seccompProfile:
                   type: RuntimeDefault
               serviceAccountName: vcf-migration-operator-controller-manager
               terminationGracePeriodSeconds: 10
-              volumes:
-              - emptyDir:
-                  sizeLimit: 2Gi
-                name: scratch
       permissions:
       - rules:
         - apiGroups:
@@ -357,4 +364,4 @@ spec:
   maturity: alpha
   provider:
     name: Red Hat
-  version: 0.0.1
+  version: 0.1.0

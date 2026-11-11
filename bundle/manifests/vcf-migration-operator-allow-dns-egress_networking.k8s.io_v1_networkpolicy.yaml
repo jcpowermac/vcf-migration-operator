@@ -1,0 +1,33 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: vcf-migration-operator
+  name: vcf-migration-operator-allow-dns-egress
+spec:
+  egress:
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    - port: 5353
+      protocol: UDP
+    - port: 5353
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values:
+          - openshift-dns
+          - openshift-dns-2
+          - openshift-dns-3
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: vcf-migration-operator
+      control-plane: controller-manager
+  policyTypes:
+  - Egress

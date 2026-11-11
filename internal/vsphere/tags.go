@@ -10,6 +10,8 @@ import (
 	"github.com/vmware/govmomi/vapi/rest"
 	"github.com/vmware/govmomi/vapi/tags"
 	"k8s.io/klog/v2"
+
+	"github.com/openshift/vcf-migration-operator/internal/execution"
 )
 
 const (
@@ -207,6 +209,9 @@ func ensureTagCategory(ctx context.Context, s *Session, name, description, cardi
 		AssociableTypes: associableTypes,
 	}
 
+	if err := execution.Check(ctx); err != nil {
+		return "", err
+	}
 	id, err := s.TagManager.CreateCategory(ctx, &cat)
 	if err != nil {
 		if isAlreadyExists(err) {
@@ -296,6 +301,9 @@ func EnsureTag(ctx context.Context, s *Session, categoryID, name, description st
 		CategoryID:  categoryID,
 	}
 
+	if err := execution.Check(ctx); err != nil {
+		return "", err
+	}
 	id, err := s.TagManager.CreateTag(ctx, &tag)
 	if err != nil {
 		if isAlreadyExists(err) {
@@ -330,6 +338,9 @@ func AttachTag(ctx context.Context, s *Session, tagID string, obj object.Referen
 	ref := obj.Reference()
 	log.V(2).Info("attaching tag", "tagID", tagID, "object", ref)
 
+	if err := execution.Check(ctx); err != nil {
+		return false, err
+	}
 	if err := s.TagManager.AttachTag(ctx, tagID, ref); err != nil {
 		if isAlreadyExists(err) {
 			log.V(2).Info("tag already attached", "tagID", tagID, "object", ref)

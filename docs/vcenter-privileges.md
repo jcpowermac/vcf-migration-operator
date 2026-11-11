@@ -17,19 +17,13 @@ page (or, for property access, the per-property privilege on the object page).
 | `internal/vsphere/session.go:92`, `internal/vsphere/list.go:31` — client init | `ServiceInstance.RetrieveServiceContent` | `System.Anonymous` (none) |
 | `internal/vsphere/session.go:102`, `internal/vsphere/list.go:40` — login | `SessionManager.Login` | `System.Anonymous` (none) |
 | `internal/vsphere/session.go:131-143`, `internal/vsphere/list.go:43` — logout | `SessionManager.Logout` | **`System.View`** |
-| `internal/vsphere/session.go:108`, `internal/vsphere/list.go:46`, `internal/controller/preflight.go:187,223-256,302,318,329`, `internal/vsphere/image.go:265,298,464`, `internal/controller/vmwarecloudfoundationmigration_controller.go:378-383` — all `Finder.*` lookups (datacenter, cluster, datastore, network, resource pool, folder, template) | `PropertyCollector.RetrievePropertiesEx` (method: `System.Anonymous`; per-property access enforced) | **`System.View`** on traversed objects (`vim.ManagedEntity.name` / `parent` are documented as `System.View`) |
-| `internal/vsphere/folder.go:31`, `internal/controller/preflight.go:334,520`, `internal/vsphere/image.go:392` — `dc.Folders()` reads `Datacenter.configInfo` | `RetrievePropertiesEx` property access | **`System.View`** |
+| `internal/vsphere/session.go:108`, `internal/vsphere/list.go:46`, `internal/controller/preflight.go`, `internal/controller/vmwarecloudfoundationmigration_controller.go:378-383` — all `Finder.*` lookups (datacenter, cluster, datastore, network, resource pool, folder, template) | `PropertyCollector.RetrievePropertiesEx` (method: `System.Anonymous`; per-property access enforced) | **`System.View`** on traversed objects (`vim.ManagedEntity.name` / `parent` are documented as `System.View`) |
+| `internal/vsphere/folder.go:31`, `internal/controller/preflight.go` — `dc.Folders()` reads `Datacenter.configInfo` | `RetrievePropertiesEx` property access | **`System.View`** |
 | `internal/vsphere/folder.go:99` — `task.Wait` reads task `info` | `RetrievePropertiesEx` property access | **`System.View`** |
-| `internal/controller/preflight.go:291,511` — `UserSession` reads `SessionManager.currentSession` | property access | `System.Anonymous` (none; `vim.SessionManager.html` property table) |
-| `internal/controller/preflight.go:351,553` — privilege preflight | `AuthorizationManager.HasUserPrivilegeOnEntities` | method: `None`; `entities` param: **`System.View`** on root folder, vm folder, datacenter, cluster, resource pool, and datastore |
+| `internal/controller/preflight.go` — `UserSession` reads `SessionManager.currentSession` | property access | `System.Anonymous` (none; `vim.SessionManager.html` property table) |
+| `internal/controller/preflight.go` — privilege preflight | `AuthorizationManager.HasUserPrivilegeOnEntities` | method: `None`; `entities` param: **`System.View`** on the root folder, VM folder, datacenter, and cluster |
 | `internal/vsphere/folder.go:47` — `CreateVMFolder` | `Folder.CreateFolder` | **`Folder.Create`** on the parent folder |
 | `internal/vsphere/folder.go:94` — `DeleteVMFolder` | `ManagedEntity.Destroy_Task` | **`Folder.Delete`** when the object is a Folder |
-| `internal/vsphere/image.go:584-624` — OVA import spec (`OvfManager.CreateImportSpec`) | `OvfManager.CreateImportSpec` | **`System.View`**, plus **`Datastore.AllocateSpace`** on the target datastore (required by the `datastore` parameter; `vim.OvfManager.html`) |
-| `internal/vsphere/image.go:432` — OVA import, incl. NFC lease upload and `task.Wait` | `ResourcePool.ImportVApp` | **`VApp.Import`** on the resource pool (`vim.ResourcePool.html`) |
-| `internal/vsphere/image.go:475` — mark the imported VM as a template | `VirtualMachine.MarkAsTemplate_Task` | **`VirtualMachine.Provisioning.MarkAsTemplate`** on the imported VM (`vim.VirtualMachine.html`) |
-| `internal/vsphere/image.go:517-582` — `findAvailableHost` collects `ComputeResource.host` and `HostSystem` `name`/`runtime`/`datastore`/`network` | `RetrievePropertiesEx` property access | **`System.View`** (`vim.ComputeResource.html`, `vim.HostSystem.html` property tables) |
-| `internal/vsphere/image.go:665-692` — `ReconfigVM_Task` disables secure boot on imported template (boot options) | `VirtualMachine.ReconfigVM_Task` | **`VirtualMachine.Config.Settings`** on the imported VM, only when the OVF references secure boot (RHCOS OVAs do) (`vim.VirtualMachine.html`) |
-| `internal/vsphere/image.go:293-315` — `DeleteTemplate` on OVA URL change | `ManagedEntity.Destroy_Task` | **`VirtualMachine.Inventory.Delete`** on the template VM *and its parent folder* (`vim.ManagedEntity.html` per-type table) |
 
 ### REST (vapi tag API) calls
 
@@ -57,14 +51,9 @@ page (or, for property access, the per-property privilege on the object page).
 
 | Privilege | Scope | Why |
 |---|---|---|
-| `System.View` | root folder | every inventory lookup (finder), `Datacenter.configInfo` read, task wait, `Logout`, `HasUserPrivilegeOnEntities` entities param, OVA-import property collection (`findAvailableHost`), `OvfManager.CreateImportSpec` |
+| `System.View` | root folder | every inventory lookup (finder), `Datacenter.configInfo` read, task wait, `Logout`, `HasUserPrivilegeOnEntities` entities param |
 | `Folder.Create` | datacenter's VM folder | `CreateVMFolder` (nested parts need it on each parent created) |
 | `Folder.Delete` | VM folders the operator creates | `DeleteVMFolder` — **currently dead code in the controller path** (only exercised by tests), so optional until cleanup lands |
-| `VApp.Import` | the failure domain's resource pool | `ImportVApp` during OVA template import (`spec.image` set) |
-| `Datastore.AllocateSpace` | the failure domain's datastore | `OvfManager.CreateImportSpec` `datastore` parameter during OVA template import |
-| `VirtualMachine.Provisioning.MarkAsTemplate` | the VM folder the imported template lands in (preflight checks the FD folder, or the datacenter VM folder when `topology.folder` is empty) | `vm.MarkAsTemplate` after import (`image.go:475`) |
-| `VirtualMachine.Config.Settings` | the imported template VM | secure-boot disable after import; conditional on the OVF referencing secure boot (RHCOS OVAs do) |
-| `VirtualMachine.Inventory.Delete` | imported template VM + its folder | `DeleteTemplate` when the resolved OVA URL changes and the old template is re-imported |
 | `InventoryService.Tagging.Read` | root folder | category/tag/attachment reads happen on *every* reconcile (`ObjectHasTagInCategory`, `EnsureTagCategory`, `EnsureTag`) |
 | `InventoryService.Tagging.CreateCategory` | root folder | `EnsureTagCategory` |
 | `InventoryService.Tagging.CreateTag` | root folder | `EnsureTag` |
@@ -76,27 +65,12 @@ page (or, for property access, the per-property privilege on the object page).
 
 ## Gaps and notes
 
-1. **Preflight under-checks the real requirement set** (`preflight.go:46-57`). It
-   verifies the tag privileges + `ObjectAttachable` + `Folder.Create`, and — when
-   `spec.image` is set and `topology.template` is empty — the OVA import set:
-   `VApp.Import`, `VirtualMachine.Config.AddNewDisk`,
-   `VirtualMachine.Inventory.CreateFromExisting` on the resource pool, plus
-   `Datastore.AllocateSpace` on the datastore and
-   `VirtualMachine.Provisioning.MarkAsTemplate` on the VM folder
-   (`preflight.go:273-348`), but never checks `System.View` (needed for every
-   finder call and even `Logout`) nor `InventoryService.Tagging.Read` (used
-   unconditionally) nor `VirtualMachine.Config.Settings` / `VirtualMachine.Inventory.Delete`
-   (used on the imported VM). A user with only the preflight-checked set would
-   pass preflight, then fail on first reconcile. Note the import preflight also
-   *over*-checks: per the ReferenceGuide, `CreateImportSpec` needs `System.View`
-   plus `Datastore.AllocateSpace` on the datastore, and `ImportVApp` needs
-   `VApp.Import`, so `Config.AddNewDisk` and `Inventory.CreateFromExisting` are
-   defensive extras. The `ObjectAttachable`
-   check is also asymmetric: `validateTargetPrivileges` verifies it on the
-   datacenter and the cluster but not on the VM folder itself, even though
-   `AttachClusterOwnershipTag` attaches the tag to the folder
-   (`controller.go:530`); a role scoped to the datacenter/cluster would pass
-   preflight and then fail at destination init with a 403 from the folder attach.
+1. **Preflight under-checks the real requirement set.** It checks tag privileges,
+   `ObjectAttachable`, and `Folder.Create`, but does not check `System.View`
+   (needed for inventory lookups) or `InventoryService.Tagging.Read` (used
+   unconditionally). `ObjectAttachable` is checked on the datacenter and cluster,
+   but not on the VM folder even though the operator attaches an ownership tag
+   to that folder; insufficient folder privileges can fail destination initialization.
 2. `Folder.Delete` is required only once folder cleanup is actually wired in; the
    controller never calls `DeleteVMFolder`.
 3. Sourcing: the ReferenceGuide is SOAP-only — tag REST privileges are not
@@ -105,8 +79,7 @@ page (or, for property access, the per-property privilege on the object page).
    match the operator's own preflight constants (`preflight.go:46-57`) plus
    VMware's REST tag API privilege names; `AttachTag` on root folder is the one
    grounded in this doc set. SOAP rows above are grounded in the local SDK copy
-   at `vsphere-ws/docs/ReferenceGuide`; OVA-import rows were added for the RHCOS
-   OVA import work (merged 2026-09-03, after this doc's branch cut).
+   at `vsphere-ws/docs/ReferenceGuide`.
 4. Out of scope for "running the operator": the vSphere creds secret the operator
    writes into the *destination* cluster is consumed by that cluster's
    machine-api/cloud-controller, which needs the full VM-lifecycle privilege set

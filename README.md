@@ -2,12 +2,13 @@
 
 Kubernetes operator for migrating OpenShift clusters between VMware vCenters (e.g. VMware Cloud Foundation environments).
 
-The operator reconciles the `VmwareCloudFoundationMigration` custom resource through a multi-phase workflow: preflight validation, destination initialization, RHCOS image import, multi-site configuration, workload migration (workers + control plane), source cleanup, and final health checks.
+The operator reconciles the `VmwareCloudFoundationMigration` custom resource through a multi-phase workflow: preflight validation, destination initialization, multi-site configuration, workload migration (workers + control plane), source cleanup, and final health checks.
 
 ## Documentation
 
 - **User Guide**
   - [Install with OLM](docs/user/install-with-olm.md)
+  - [Install with Operator SDK](docs/user/install-with-operator-sdk.md)
   - [Install without OLM](docs/user/install-without-olm.md)
   - [Spec Examples](docs/user/spec-examples.md) — YAML examples of the migration spec
 - **Developer Guide**

@@ -33,6 +33,46 @@ const (
 	MigrationStatePaused MigrationState = "Paused"
 )
 
+// MigrationProgress contains real-time counters and details of resource migration.
+type MigrationProgress struct {
+	// Workers tracks worker machine and node migration progress.
+	// +optional
+	Workers *WorkerMigrationProgress `json:"workers,omitempty"`
+
+	// ControlPlane tracks ControlPlaneMachineSet rollout progress.
+	// +optional
+	ControlPlane *ControlPlaneProgress `json:"controlPlane,omitempty"`
+}
+
+// WorkerMigrationProgress surfaces worker machine and node counts across source and target.
+type WorkerMigrationProgress struct {
+	// targetMachinesTotal is the desired number of worker machines in target failure domains.
+	// +optional
+	TargetMachinesTotal int32 `json:"targetMachinesTotal,omitempty"`
+	// targetMachinesReady is the number of target worker machines in Running phase with a NodeRef.
+	// +optional
+	TargetMachinesReady int32 `json:"targetMachinesReady,omitempty"`
+	// targetNodesReady is the number of target worker nodes reporting NodeReady=True.
+	// +optional
+	TargetNodesReady int32 `json:"targetNodesReady,omitempty"`
+	// sourceMachinesRemaining is the number of source worker machines still existing.
+	// +optional
+	SourceMachinesRemaining int32 `json:"sourceMachinesRemaining,omitempty"`
+}
+
+// ControlPlaneProgress surfaces CPMS rollout counts.
+type ControlPlaneProgress struct {
+	// replicas is the total desired control plane replicas.
+	// +optional
+	Replicas int32 `json:"replicas,omitempty"`
+	// updatedReplicas is the number of control plane replicas matching the target spec.
+	// +optional
+	UpdatedReplicas int32 `json:"updatedReplicas,omitempty"`
+	// readyReplicas is the number of control plane replicas running and ready.
+	// +optional
+	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
+}
+
 // SingletonName is the only object name the operator will reconcile. Since a
 // single OpenShift cluster can only ever have one active vCenter migration,
 // this follows OpenShift's singleton resource pattern (e.g.
@@ -40,6 +80,24 @@ const (
 // whose singleton behavior is enforced at reconcile time via the Accepted
 // condition rather than cluster-scoped singleton=true.
 const SingletonName = "cluster"
+
+// SingletonNamespace is the only namespace the operator will reconcile the
+// singleton (SingletonName) from. It matches the namespace of the operator
+// deployment (config/default/kustomization.yaml), so the authoritative
+// migration record is openshift-vcf-migration/cluster.
+const SingletonNamespace = "openshift-vcf-migration"
+
+// FinalizerName is the finalizer that retains the VmwareCloudFoundationMigration
+// record once deletion is requested. Deletion stops new migration actions but
+// never cancels, powers off, deletes VMs, or rolls back; the record is held
+// until the migration is complete or an administrator releases it via
+// AnnotationAllowDeletion.
+const FinalizerName = "migration.openshift.io/record-retention"
+
+// AnnotationAllowDeletion is the administrator escape hatch that releases
+// FinalizerName on a migration whose work is not yet complete. The only
+// accepted value is "true".
+const AnnotationAllowDeletion = "migration.openshift.io/allow-deletion"
 
 // SecretReference references a secret by name and namespace.
 type SecretReference struct {
@@ -55,7 +113,29 @@ type SecretReference struct {
 	Namespace string `json:"namespace,omitempty"`
 }
 
+// FailureDomainMapping maps one source failure domain to one destination failure domain.
+type FailureDomainMapping struct {
+	// source is the name of the failure domain in the cluster's Infrastructure
+	// resource that this entry migrates workloads from.
+	// This field is required and must be a non-empty string.
+	// Must be between 1 and 256 characters in length.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	Source string `json:"source"`
+
+	// destination is the name of the entry in spec.failureDomains that receives
+	// the workloads migrated from source.
+	// This field is required and must be a non-empty string.
+	// Must be between 1 and 256 characters in length.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	Destination string `json:"destination"`
+}
+
 // VmwareCloudFoundationMigrationSpec defines the desired state of VmwareCloudFoundationMigration.
+// +kubebuilder:validation:XValidation:rule="!has(self.failureDomainMappings) || self.failureDomainMappings.all(m, m.destination in self.failureDomains.map(fd, fd.name))",message="every failureDomainMappings.destination must match a failureDomains[].name"
 type VmwareCloudFoundationMigrationSpec struct {
 	// state controls the workflow: Pending, Running, Paused.
 	// The migration workflow only executes when state is Running.
@@ -74,62 +154,41 @@ type VmwareCloudFoundationMigrationSpec struct {
 	// element type intentionally tracks config.openshift.io/v1 VSpherePlatformFailureDomainSpec
 	// (including Name, Region, Zone, Server, and Topology) to align with OpenShift API
 	// failure domain semantics; the schema is re-inlined on "make manifests" after
-	// dependency bumps.
+	// dependency bumps.  At most 64 failure domains are allowed.
 	// +required
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:XValidation:rule="self.all(fd, has(fd.topology.template) && fd.topology.template != '')",message="topology.template is required for every failure domain"
 	// +listType=atomic
 	FailureDomains []configv1.VSpherePlatformFailureDomainSpec `json:"failureDomains"`
 
-	// image controls RHCOS OVA resolution and import into destination vCenter.
-	// When set, the operator downloads and imports the OVA as a VM template
-	// for each failure domain and populates topology.template automatically.
-	// When omitted, topology.template must be set manually in each failure domain.
+	// failureDomainMappings maps source failure domains to destination failure domains by name.
+	// When omitted, exactly one source failure domain and one destination failure domain must exist, and they are mapped to each other implicitly.
+	// When used, must contain between 1 and 64 items.
+	// Each source and each destination must be unique; duplicate sources are also
+	// rejected by the list's map semantics.
 	// +optional
-	Image *ImageSpec `json:"image,omitempty"`
-}
-
-// DiskProvisioningMode defines the disk provisioning type for imported VM templates.
-type DiskProvisioningMode string
-
-const (
-	// DiskProvisioningModeThin allocates storage on demand as blocks are written.
-	DiskProvisioningModeThin DiskProvisioningMode = "thin"
-	// DiskProvisioningModeThick pre-allocates all storage at creation time.
-	DiskProvisioningModeThick DiskProvisioningMode = "thick"
-	// DiskProvisioningModeEagerZeroedThick pre-allocates all storage and zeroes blocks at creation time.
-	DiskProvisioningModeEagerZeroedThick DiskProvisioningMode = "eagerZeroedThick"
-)
-
-// ImageSpec controls RHCOS OVA import behavior.
-type ImageSpec struct {
-	// ovaUrl is a direct URL to the RHCOS OVA file. The URL must use https:// and
-	// end in .ova (an optional query string is allowed for proxy tokens or
-	// integrity digests appended by stream metadata tooling). When set, the operator
-	// downloads from this URL instead of resolving via the coreos-bootimages
-	// ConfigMap delivered by CVO.
-	// Required for air-gapped environments: point to an internal HTTPS mirror.
-	// +optional
-	// +kubebuilder:validation:Pattern=`^https://.*\.ova(\?.*)?$`
-	OVAUrl string `json:"ovaUrl,omitempty"`
-
-	// diskProvisioning controls the VMDK disk provisioning type when importing
-	// the OVA (thin, thick, eagerZeroedThick). Matches the installer's behavior.
-	// When omitted, vSphere defaults to the provisioning type specified in the
-	// OVF descriptor.
-	// +optional
-	// +kubebuilder:validation:Enum=thin;thick;eagerZeroedThick
-	DiskProvisioning DiskProvisioningMode `json:"diskProvisioning,omitempty"`
+	// +listType=map
+	// +listMapKey=source
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:XValidation:rule="self.all(m, self.exists_one(n, n.destination == m.destination))",message="destination must be unique across mappings"
+	FailureDomainMappings []FailureDomainMapping `json:"failureDomainMappings,omitempty"`
 }
 
 // VmwareCloudFoundationMigrationStatus defines the observed state of VmwareCloudFoundationMigration.
 type VmwareCloudFoundationMigrationStatus struct {
+	// progress surfaces real-time counts for worker and control-plane migration.
+	// +optional
+	Progress *MigrationProgress `json:"progress,omitempty"`
+
 	// conditions represent the current state of the migration.
 	// Known conditions are:
-	// - Accepted: admission gate; True is normal for the single reconciled instance (cluster),
-	//   while False indicates an unsupported object name.
+	// - Accepted: admission gate; True is normal for the single reconciled instance
+	//   (openshift-vcf-migration/cluster), while False indicates an unsupported
+	//   object name or namespace.
 	// - InfrastructurePrepared: preflight validation and migration path selection.
 	// - DestinationInitialized: destination vCenter folders and tags created.
-	// - DestinationImageImported: RHCOS OVA imported as a VM template on destination vCenter.
 	// - MultiSiteConfigured: cluster configured for both source and target vCenters.
 	// - WorkloadMigrated: workloads migrated to destination vCenter machine sets.
 	// - SourceCleaned: source vCenter references removed and cleaned up.
@@ -141,61 +200,54 @@ type VmwareCloudFoundationMigrationStatus struct {
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
+	// failureDomainMappings is the effective source-to-destination failure domain
+	// mapping resolved at preflight. When spec.failureDomainMappings is omitted it
+	// holds the single inferred pair. The controller treats this field as
+	// write-once: after preflight resolves the mappings it does not rewrite them.
+	// +optional
+	// +listType=atomic
+	FailureDomainMappings []FailureDomainMapping `json:"failureDomainMappings,omitempty"`
+
+	// workerMachineSetNames records the destination worker MachineSet names
+	// generated for the recorded mappings. Persisted before source cleanup so
+	// retries that re-enter workload migration after the source MachineSets
+	// were deleted still require these MachineSets to exist and be ready;
+	// mappings whose source failure domain had no MachineSets contribute no
+	// names and intentionally stay empty.
+	//
+	// Maximum items: 256.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=256
+	WorkerMachineSetNames []string `json:"workerMachineSetNames,omitempty"`
+
+	// sourceVCenter records the vCenter server removed during source cleanup.
+	// It is captured before any cleanup side effects so retries stay bound to
+	// the original source after it is removed from the Infrastructure
+	// vCenters list, where VCenters[0] would then be the destination.
+	// +optional
+	SourceVCenter string `json:"sourceVCenter,omitempty"`
+
 	// startTime is when the migration started.
 	// +optional
 	StartTime *metav1.Time `json:"startTime,omitempty"`
+
+	// lastUpdateTime is when the migration status was last updated.
+	// +optional
+	LastUpdateTime *metav1.Time `json:"lastUpdateTime,omitempty"`
 
 	// completionTime is when the migration completed.
 	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 
-	// image reports the RHCOS OVA import state.
+	// completionSpecHash is the lowercase hex SHA-256 of encoding/json.Marshal
+	// of the typed spec when Ready=True is established. With Ready=True and
+	// completionTime, a matching hash authorizes automatic record release even
+	// when deletion increments generation. When omitted, administrator handoff
+	// is required to release the record.
 	// +optional
-	Image *ImageStatus `json:"image,omitempty"`
-}
-
-// ImageURLSource describes how the resolved OVA URL was obtained.
-type ImageURLSource string
-
-const (
-	// ImageURLSourceUser indicates the OVA URL was user-specified in spec.image.ovaUrl.
-	ImageURLSourceUser ImageURLSource = "user"
-	// ImageURLSourceAuto indicates the OVA URL was auto-resolved from stream metadata.
-	ImageURLSourceAuto ImageURLSource = "auto"
-)
-
-// ImageStatus reports the RHCOS OVA import progress and results.
-type ImageStatus struct {
-	// resolvedOVAUrl is the URL from which the OVA was (or will be) downloaded.
-	// +optional
-	ResolvedOVAUrl string `json:"resolvedOVAUrl,omitempty"`
-
-	// resolvedSHA256 is the expected sha256 digest of the OVA file, when
-	// resolved from stream metadata. Empty for user-provided URLs.
-	// +optional
-	ResolvedSHA256 string `json:"resolvedSHA256,omitempty"`
-
-	// importedTemplates maps failure domain names to the inventory paths
-	// of imported VM templates.
-	// +optional
-	ImportedTemplates map[string]string `json:"importedTemplates,omitempty"`
-
-	// operatorImportedTemplates records the OVA URL each failure domain's
-	// template was imported from by the operator. It is populated only for
-	// operator imports; user-pre-configured templates are not recorded here.
-	// Used to detect a changed OVA URL and re-import only operator-managed
-	// templates without touching user-provided ones.
-	// +optional
-	OperatorImportedTemplates map[string]string `json:"operatorImportedTemplates,omitempty"`
-
-	// urlSource records how resolvedOVAUrl was populated: "" (unresolved / no opinion),
-	// "user" (user-specified), or "auto" (auto-resolved). The zero value ("")
-	// indicates no opinion or unresolved. Used to tell a deliberate user-clear
-	// of spec.image.ovaUrl apart from an empty auto-resolution when deciding
-	// whether to clear resolvedOVAUrl.
-	// +optional
-	// +kubebuilder:validation:Enum="";user;auto
-	URLSource ImageURLSource `json:"urlSource,omitempty"`
+	// +kubebuilder:validation:Pattern=`^[a-f0-9]{64}$`
+	CompletionSpecHash string `json:"completionSpecHash,omitempty"`
 }
 
 // Condition type constants for the migration workflow.
@@ -209,11 +261,6 @@ const (
 	// ConditionDestinationInitialized indicates the target vCenter has all required assets
 	// (VM folders, region/zone tags).
 	ConditionDestinationInitialized = "DestinationInitialized"
-
-	// ConditionDestinationImageImported indicates the RHCOS OVA has been
-	// downloaded and imported as a VM template on all target vCenters.
-	// When spec.image is nil, this condition is immediately set to True.
-	ConditionDestinationImageImported = "DestinationImageImported"
 
 	// ConditionMultiSiteConfigured indicates the cluster recognizes both vCenters
 	// (secrets, Infrastructure CRD, cloud-provider-config updated, pods restarted).
@@ -233,7 +280,7 @@ const (
 	ConditionReady = "Ready"
 
 	// ConditionAccepted indicates whether this object is the singleton instance
-	// (named SingletonName) that the operator will act on.
+	// (named SingletonName in SingletonNamespace) that the operator will act on.
 	ConditionAccepted = "Accepted"
 )
 
@@ -242,6 +289,11 @@ const (
 	ReasonProgressing = "Progressing"
 	ReasonCompleted   = "Completed"
 	ReasonFailed      = "Failed"
+	// ReasonMappingRejected indicates spec.failureDomainMappings was changed
+	// after preflight recorded the effective mapping. It is distinct from
+	// ReasonFailed so condition handling does not have to guess which entries a
+	// generic failure left behind.
+	ReasonMappingRejected = "MappingRejected"
 	// ReasonPaused indicates migration has been paused because spec.state is set to Paused.
 	ReasonPaused = "Paused"
 
@@ -253,6 +305,14 @@ const (
 	// ReasonUnsupportedName indicates the object's name is not SingletonName,
 	// so the operator is ignoring it.
 	ReasonUnsupportedName = "UnsupportedName"
+
+	// ReasonUnsupportedNamespace indicates the object's namespace is not
+	// SingletonNamespace, so the operator is ignoring it.
+	ReasonUnsupportedNamespace = "UnsupportedNamespace"
+
+	// ReasonDeletionBlocked indicates deletion was requested while migration
+	// work is outstanding; the record is retained behind FinalizerName.
+	ReasonDeletionBlocked = "DeletionBlocked"
 )
 
 // +kubebuilder:object:root=true
@@ -260,10 +320,12 @@ const (
 // +kubebuilder:resource:path=vmwarecloudfoundationmigrations,scope=Namespaced,shortName=vcfm,categories=migration
 // +kubebuilder:printcolumn:name="State",type=string,JSONPath=`.spec.state`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Completed",type=date,JSONPath=`.status.completionTime`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // VmwareCloudFoundationMigration is the Schema for the vmwarecloudfoundationmigrations API.
 // It orchestrates migration of an OpenShift cluster from one vCenter to another.
+// +kubebuilder:validation:XValidation:rule="has(self.spec.failureDomainMappings) || size(self.spec.failureDomains) == 1 || (has(self.status) && has(self.status.failureDomainMappings) && size(self.status.failureDomainMappings) > 0)",message="failureDomainMappings is required when more than one failureDomain is defined until effective mappings are recorded"
 type VmwareCloudFoundationMigration struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

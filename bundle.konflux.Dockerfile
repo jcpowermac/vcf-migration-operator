@@ -41,12 +41,13 @@ USER 1001:0
 # Labels from hack/patch-bundle-dockerfile.sh
 LABEL com.redhat.component="VCF Migration Operator"
 LABEL distribution-scope="public"
-LABEL name="vcf-migration/vcf-migration-operator-bundle"
-LABEL release="0.0.1"
-LABEL version="0.0.1"
+LABEL name="vcf-migration-operator-tech-preview/vcf-migration-operator-bundle"
+LABEL release="0.1.0"
+LABEL version="0.1.0"
 LABEL cpe="cpe:/a:redhat:vcf_migration_operator:0.1::el9"
 LABEL url="https://github.com/openshift/vcf-migration-operator"
 LABEL vendor="Red Hat, Inc."
+LABEL maintainer="AOS-SPLAT@redhat.com"
 LABEL description="The VCF Migration Operator automates migrating OpenShift clusters between VMware vCenters \
                    (e.g. VMware Cloud Foundation / VCF), orchestrating infrastructure preparation, multi-site \
                    configuration, machine migration, and source cleanup."

@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
+	"github.com/openshift/vcf-migration-operator/internal/execution"
 	"github.com/openshift/vcf-migration-operator/internal/openshift"
 	"github.com/openshift/vcf-migration-operator/internal/vsphere"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -90,6 +91,9 @@ func syncControllerConfig(ctx context.Context, kubeClient kubernetes.Interface) 
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		if len(pod.Name) >= len(mcoPodPrefix) && pod.Name[:len(mcoPodPrefix)] == mcoPodPrefix {
+			if err := execution.Check(ctx); err != nil {
+				return err
+			}
 			if err := kubeClient.CoreV1().Pods(mcoNamespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil {
 				log.V(2).Info("failed to delete MCO pod", "pod", pod.Name, "err", err)
 				continue

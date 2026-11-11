@@ -25,6 +25,9 @@ spec:
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
       type: string
+    - jsonPath: .status.completionTime
+      name: Completed
+      type: date
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -55,13 +58,55 @@ spec:
           spec:
             description: spec defines the desired state of VmwareCloudFoundationMigration.
             properties:
+              failureDomainMappings:
+                description: |-
+                  failureDomainMappings maps source failure domains to destination failure domains by name.
+                  When omitted, exactly one source failure domain and one destination failure domain must exist, and they are mapped to each other implicitly.
+                  When used, must contain between 1 and 64 items.
+                  Each source and each destination must be unique; duplicate sources are also
+                  rejected by the list's map semantics.
+                items:
+                  description: FailureDomainMapping maps one source failure domain
+                    to one destination failure domain.
+                  properties:
+                    destination:
+                      description: |-
+                        destination is the name of the entry in spec.failureDomains that receives
+                        the workloads migrated from source.
+                        This field is required and must be a non-empty string.
+                        Must be between 1 and 256 characters in length.
+                      maxLength: 256
+                      minLength: 1
+                      type: string
+                    source:
+                      description: |-
+                        source is the name of the failure domain in the cluster's Infrastructure
+                        resource that this entry migrates workloads from.
+                        This field is required and must be a non-empty string.
+                        Must be between 1 and 256 characters in length.
+                      maxLength: 256
+                      minLength: 1
+                      type: string
+                  required:
+                  - destination
+                  - source
+                  type: object
+                maxItems: 64
+                minItems: 1
+                type: array
+                x-kubernetes-list-map-keys:
+                - source
+                x-kubernetes-list-type: map
+                x-kubernetes-validations:
+                - message: destination must be unique across mappings
+                  rule: self.all(m, self.exists_one(n, n.destination == m.destination))
               failureDomains:
                 description: |-
                   failureDomains defines failure domains for the target vCenter. The embedded
                   element type intentionally tracks config.openshift.io/v1 VSpherePlatformFailureDomainSpec
                   (including Name, Region, Zone, Server, and Topology) to align with OpenShift API
                   failure domain semantics; the schema is re-inlined on "make manifests" after
-                  dependency bumps.
+                  dependency bumps.  At most 64 failure domains are allowed.
                 items:
                   description: VSpherePlatformFailureDomainSpec holds the region and
                     zone failure domain and the vCenter topology of that failure domain.
@@ -266,38 +311,14 @@ spec:
                   - topology
                   - zone
                   type: object
+                maxItems: 64
                 minItems: 1
                 type: array
                 x-kubernetes-list-type: atomic
-              image:
-                description: |-
-                  image controls RHCOS OVA resolution and import into destination vCenter.
-                  When set, the operator downloads and imports the OVA as a VM template
-                  for each failure domain and populates topology.template automatically.
-                  When omitted, topology.template must be set manually in each failure domain.
-                properties:
-                  diskProvisioning:
-                    description: |-
-                      diskProvisioning controls the VMDK disk provisioning type when importing
-                      the OVA (thin, thick, eagerZeroedThick). Matches the installer's behavior.
-                      When omitted, vSphere defaults to the provisioning type specified in the
-                      OVF descriptor.
-                    enum:
-                    - thin
-                    - thick
-                    - eagerZeroedThick
-                    type: string
-                  ovaUrl:
-                    description: |-
-                      ovaUrl is a direct URL to the RHCOS OVA file. The URL must use https:// and
-                      end in .ova (an optional query string is allowed for proxy tokens or
-                      integrity digests appended by stream metadata tooling). When set, the operator
-                      downloads from this URL instead of resolving via the coreos-bootimages
-                      ConfigMap delivered by CVO.
-                      Required for air-gapped environments: point to an internal HTTPS mirror.
-                    pattern: ^https://.*\.ova(\?.*)?$
-                    type: string
-                type: object
+                x-kubernetes-validations:
+                - message: topology.template is required for every failure domain
+                  rule: self.all(fd, has(fd.topology.template) && fd.topology.template
+                    != '')
               state:
                 default: Pending
                 description: |-
@@ -331,9 +352,22 @@ spec:
             - failureDomains
             - targetVCenterCredentialsSecret
             type: object
+            x-kubernetes-validations:
+            - message: every failureDomainMappings.destination must match a failureDomains[].name
+              rule: '!has(self.failureDomainMappings) || self.failureDomainMappings.all(m,
+                m.destination in self.failureDomains.map(fd, fd.name))'
           status:
             description: status defines the observed state of VmwareCloudFoundationMigration.
             properties:
+              completionSpecHash:
+                description: |-
+                  completionSpecHash is the lowercase hex SHA-256 of encoding/json.Marshal
+                  of the typed spec when Ready=True is established. With Ready=True and
+                  completionTime, a matching hash authorizes automatic record release even
+                  when deletion increments generation. When omitted, administrator handoff
+                  is required to release the record.
+                pattern: ^[a-f0-9]{64}$
+                type: string
               completionTime:
                 description: completionTime is when the migration completed.
                 format: date-time
@@ -342,11 +376,11 @@ spec:
                 description: |-
                   conditions represent the current state of the migration.
                   Known conditions are:
-                  - Accepted: admission gate; True is normal for the single reconciled instance (cluster),
-                    while False indicates an unsupported object name.
+                  - Accepted: admission gate; True is normal for the single reconciled instance
+                    (openshift-vcf-migration/cluster), while False indicates an unsupported
+                    object name or namespace.
                   - InfrastructurePrepared: preflight validation and migration path selection.
                   - DestinationInitialized: destination vCenter folders and tags created.
-                  - DestinationImageImported: RHCOS OVA imported as a VM template on destination vCenter.
                   - MultiSiteConfigured: cluster configured for both source and target vCenters.
                   - WorkloadMigrated: workloads migrated to destination vCenter machine sets.
                   - SourceCleaned: source vCenter references removed and cleaned up.
@@ -411,54 +445,128 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
-              image:
-                description: image reports the RHCOS OVA import state.
+              failureDomainMappings:
+                description: |-
+                  failureDomainMappings is the effective source-to-destination failure domain
+                  mapping resolved at preflight. When spec.failureDomainMappings is omitted it
+                  holds the single inferred pair. The controller treats this field as
+                  write-once: after preflight resolves the mappings it does not rewrite them.
+                items:
+                  description: FailureDomainMapping maps one source failure domain
+                    to one destination failure domain.
+                  properties:
+                    destination:
+                      description: |-
+                        destination is the name of the entry in spec.failureDomains that receives
+                        the workloads migrated from source.
+                        This field is required and must be a non-empty string.
+                        Must be between 1 and 256 characters in length.
+                      maxLength: 256
+                      minLength: 1
+                      type: string
+                    source:
+                      description: |-
+                        source is the name of the failure domain in the cluster's Infrastructure
+                        resource that this entry migrates workloads from.
+                        This field is required and must be a non-empty string.
+                        Must be between 1 and 256 characters in length.
+                      maxLength: 256
+                      minLength: 1
+                      type: string
+                  required:
+                  - destination
+                  - source
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+              lastUpdateTime:
+                description: lastUpdateTime is when the migration status was last
+                  updated.
+                format: date-time
+                type: string
+              progress:
+                description: progress surfaces real-time counts for worker and control-plane
+                  migration.
                 properties:
-                  importedTemplates:
-                    additionalProperties:
-                      type: string
-                    description: |-
-                      importedTemplates maps failure domain names to the inventory paths
-                      of imported VM templates.
+                  controlPlane:
+                    description: ControlPlane tracks ControlPlaneMachineSet rollout
+                      progress.
+                    properties:
+                      readyReplicas:
+                        description: readyReplicas is the number of control plane
+                          replicas running and ready.
+                        format: int32
+                        type: integer
+                      replicas:
+                        description: replicas is the total desired control plane replicas.
+                        format: int32
+                        type: integer
+                      updatedReplicas:
+                        description: updatedReplicas is the number of control plane
+                          replicas matching the target spec.
+                        format: int32
+                        type: integer
                     type: object
-                  operatorImportedTemplates:
-                    additionalProperties:
-                      type: string
-                    description: |-
-                      operatorImportedTemplates records the OVA URL each failure domain's
-                      template was imported from by the operator. It is populated only for
-                      operator imports; user-pre-configured templates are not recorded here.
-                      Used to detect a changed OVA URL and re-import only operator-managed
-                      templates without touching user-provided ones.
+                  workers:
+                    description: Workers tracks worker machine and node migration
+                      progress.
+                    properties:
+                      sourceMachinesRemaining:
+                        description: sourceMachinesRemaining is the number of source
+                          worker machines still existing.
+                        format: int32
+                        type: integer
+                      targetMachinesReady:
+                        description: targetMachinesReady is the number of target worker
+                          machines in Running phase with a NodeRef.
+                        format: int32
+                        type: integer
+                      targetMachinesTotal:
+                        description: targetMachinesTotal is the desired number of
+                          worker machines in target failure domains.
+                        format: int32
+                        type: integer
+                      targetNodesReady:
+                        description: targetNodesReady is the number of target worker
+                          nodes reporting NodeReady=True.
+                        format: int32
+                        type: integer
                     type: object
-                  resolvedOVAUrl:
-                    description: resolvedOVAUrl is the URL from which the OVA was
-                      (or will be) downloaded.
-                    type: string
-                  resolvedSHA256:
-                    description: |-
-                      resolvedSHA256 is the expected sha256 digest of the OVA file, when
-                      resolved from stream metadata. Empty for user-provided URLs.
-                    type: string
-                  urlSource:
-                    description: |-
-                      urlSource records how resolvedOVAUrl was populated: "" (unresolved / no opinion),
-                      "user" (user-specified), or "auto" (auto-resolved). The zero value ("")
-                      indicates no opinion or unresolved. Used to tell a deliberate user-clear
-                      of spec.image.ovaUrl apart from an empty auto-resolution when deciding
-                      whether to clear resolvedOVAUrl.
-                    enum:
-                    - ""
-                    - user
-                    - auto
-                    type: string
                 type: object
+              sourceVCenter:
+                description: |-
+                  sourceVCenter records the vCenter server removed during source cleanup.
+                  It is captured before any cleanup side effects so retries stay bound to
+                  the original source after it is removed from the Infrastructure
+                  vCenters list, where VCenters[0] would then be the destination.
+                type: string
               startTime:
                 description: startTime is when the migration started.
                 format: date-time
                 type: string
+              workerMachineSetNames:
+                description: |-
+                  workerMachineSetNames records the destination worker MachineSet names
+                  generated for the recorded mappings. Persisted before source cleanup so
+                  retries that re-enter workload migration after the source MachineSets
+                  were deleted still require these MachineSets to exist and be ready;
+                  mappings whose source failure domain had no MachineSets contribute no
+                  names and intentionally stay empty.
+
+                  Maximum items: 256.
+                items:
+                  type: string
+                maxItems: 256
+                type: array
+                x-kubernetes-list-type: atomic
             type: object
         type: object
+        x-kubernetes-validations:
+        - message: failureDomainMappings is required when more than one failureDomain
+            is defined until effective mappings are recorded
+          rule: has(self.spec.failureDomainMappings) || size(self.spec.failureDomains)
+            == 1 || (has(self.status) && has(self.status.failureDomainMappings) &&
+            size(self.status.failureDomainMappings) > 0)
     served: true
     storage: true
     subresources:

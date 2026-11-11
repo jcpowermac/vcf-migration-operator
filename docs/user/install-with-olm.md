@@ -13,13 +13,13 @@
 
 ```bash
 make operator-image operator-push IMG=<registry>/vcf-migration-operator:latest
-make bundle-build bundle-push BUNDLE_IMG=<registry>/vcf-migration-operator-bundle:v0.0.1
+make bundle-build bundle-push BUNDLE_IMG=<registry>/vcf-migration-operator-bundle:v0.1.0
 ```
 
 2. Build and push the catalog image:
 
 ```bash
-make catalog-build catalog-push CATALOG_IMG=<registry>/vcf-migration-operator-catalog:v0.0.1
+make catalog-build catalog-push CATALOG_IMG=<registry>/vcf-migration-operator-catalog:v0.1.0
 ```
 
 3. Create the `CatalogSource` on the cluster:
@@ -32,7 +32,7 @@ metadata:
   namespace: openshift-marketplace
 spec:
   sourceType: grpc
-  image: <registry>/vcf-migration-operator-catalog:v0.0.1
+  image: <registry>/vcf-migration-operator-catalog:v0.1.0
   displayName: VCF Migration Operator
 ```
 
@@ -129,11 +129,10 @@ Set `spec.state` to `Running` to begin the migration. The operator progresses th
 
 1. **InfrastructurePrepared** -- preflight validation
 2. **DestinationInitialized** -- target vCenter folders and topology tags created
-3. **DestinationImageImported** -- RHCOS OVA imported as a VM template (skipped when `spec.image` is unset)
-4. **MultiSiteConfigured** -- cluster recognizes both vCenters
-5. **WorkloadMigrated** -- workers created on target (ready counts reported in the condition message), control plane rolled out, source MachineSets scaled to 0 and deleted
-6. **SourceCleaned** -- source vCenter detached
-7. **Ready** -- migration complete; requires all operators and MachineConfigPools to be stable and sustained for ~3 minutes
+3. **MultiSiteConfigured** -- cluster recognizes both vCenters
+4. **WorkloadMigrated** -- workers created on target (ready counts reported in the condition message), control plane rolled out, source MachineSets scaled to 0 and deleted
+5. **SourceCleaned** -- source vCenter detached
+6. **Ready** -- migration complete; requires all operators and MachineConfigPools to be stable and sustained for ~3 minutes
 
 For YAML examples of the migration spec, see [Spec Examples](spec-examples.md).
 
