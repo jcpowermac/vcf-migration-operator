@@ -14,6 +14,16 @@
 #   --exclude-pr <num> can be given repeatedly (or as a space-separated list)
 # to drop specific PRs from the plan, e.g. --exclude-pr 105 --exclude-pr "17 42"
 #
+# Paths that no longer exist on the target branch are excluded by default
+# (.tekton/: a release branch renames its PipelineRun files after its own
+# stream, so cherry-picking main's build configuration would resurrect the
+# main-named files next to them and define the same PipelineRun twice). A
+# commit that touches only excluded paths is skipped and listed; a commit that
+# mixes excluded and other paths stops the run before anything is picked,
+# because the included half cannot be applied safely on its own. Override with
+# --exclude-path <prefix> (repeatable, added to the defaults) or
+# --no-path-excludes (apply everything).
+#
 # Determinism: candidates are taken from a first-parent walk of
 # TARGET_REF..upstream/main (oldest first), so the same upstream state
 # always produces the same ordered plan. A PR lookup that cannot be
@@ -51,12 +61,15 @@ target_branch=
 list_only=no
 confirm=yes
 exclude_prs=" "
+exclude_paths=(".tekton/")
 
 usage() {
     printf 'Usage: %s <target-branch> [--list|--yes] [--exclude-pr <num>...]\n' "$script_name" >&2
     printf '  --list         print the planned commits and exit\n' >&2
     printf '  --yes          skip the confirmation prompt\n' >&2
     printf '  --exclude-pr   PR number to skip; repeat or space-separate several\n' >&2
+    printf '  --exclude-path path prefix to skip; repeat for several (default: .tekton/)\n' >&2
+    printf '  --no-path-excludes  apply commits that touch excluded paths too\n' >&2
 }
 
 fail() {
@@ -73,6 +86,12 @@ while [ $# -gt 0 ]; do
             exclude_prs="$exclude_prs$2 "
             shift
             ;;
+        --exclude-path)
+            [ $# -ge 2 ] || fail "--exclude-path requires a path prefix"
+            exclude_paths+=("$2")
+            shift
+            ;;
+        --no-path-excludes) exclude_paths=() ;;
         -h|--help) usage; exit 0 ;;
         -*) usage; fail "unknown argument: $1" ;;
         *)
@@ -180,16 +199,65 @@ already_applied() {
     grep -qxF "$(git rev-parse "$1")" <<<"$applied_shas"
 }
 
+# Paths a commit touches, relative to the repository root.
+commit_paths() {
+    git diff-tree --no-commit-id --name-only -r --root "$1"
+}
+
+path_excluded() {
+    local path=$1 prefix
+    # empty array guard: "${arr[@]}" aborts under set -u on bash < 4.4 (macOS)
+    [ "${#exclude_paths[@]}" -gt 0 ] || return 1
+    for prefix in "${exclude_paths[@]}"; do
+        case $path in "$prefix"*) return 0 ;; esac
+    done
+    return 1
+}
+
+# Classifies a commit against the excluded paths:
+#   excluded  - every changed path is excluded, nothing to apply
+#   mixed     - excluded and other paths together, unsafe to apply partially
+#   included  - nothing excluded
+classify_paths() {
+    local sha=$1 path
+    local total=0 excluded=0
+    while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        total=$((total + 1))
+        if path_excluded "$path"; then excluded=$((excluded + 1)); fi
+    done < <(commit_paths "$sha")
+    if [ "$excluded" -eq 0 ]; then
+        printf 'included'
+    elif [ "$excluded" -eq "$total" ]; then
+        printf 'excluded'
+    else
+        printf 'mixed'
+    fi
+}
+
 plan=()
 skipped=()
 
+mixed_paths=()
+
 add_commit() {
-    local sha=$1
+    local sha=$1 classification
     if already_applied "$sha"; then
         printf 'already applied: %s %s\n' \
             "$(git rev-parse --short "$sha")" "$(git log -1 --format=%s "$sha")" >&2
         return
     fi
+    classification=$(classify_paths "$sha")
+    case $classification in
+        excluded)
+            skipped+=("$(git rev-parse --short "$sha") (excluded path) $(git log -1 --format=%s "$sha")")
+            return
+            ;;
+        mixed)
+            mixed_paths+=("$(git rev-parse --short "$sha") $(git log -1 --format=%s "$sha")")
+            return
+            ;;
+    esac
     plan+=("$sha")
 }
 
@@ -255,8 +323,25 @@ else
     done
 fi
 if [ "${#skipped[@]}" -gt 0 ]; then
-    printf '\nSkipped (konflux-nudge / chore(deps)):\n'
+    printf '\nSkipped (konflux-nudge / chore(deps) / excluded paths):\n'
     printf '  %s\n' "${skipped[@]}"
+fi
+
+if [ "${#mixed_paths[@]}" -gt 0 ]; then
+    printf '\nerror: these commits touch both excluded paths (%s) and other paths:\n' \
+        "${exclude_paths[*]}" >&2
+    printf '  %s\n' "${mixed_paths[@]}" >&2
+    cat >&2 <<'EOF'
+
+Applying them would either bring the excluded paths back or silently drop the
+rest of the commit. Choose one:
+  - cherry-pick it by hand in the sync worktree and record it (see the conflict
+    instructions below), or
+  - drop its PR with --exclude-pr, or
+  - rerun with --no-path-excludes to apply everything including the excluded
+    paths.
+EOF
+    exit 1
 fi
 
 if [ "$list_only" = yes ]; then

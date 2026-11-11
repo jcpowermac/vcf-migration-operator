@@ -306,6 +306,66 @@ exit 1
                          ["trailing change", "main clash", "second", "first"])
         self.assertEqual(self.git("branch", "--show-current"), "main")
 
+    def add_main_commit(self, files):
+        """Commit files on main, publish to the upstream fixture, return the short sha."""
+        for name, content in files.items():
+            path = self.repo / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        self.git("add", "-A")
+        self.git("commit", "-m", "touch " + ",".join(sorted(files)))
+        self.git("push", "upstream", "main")
+        return self.git("rev-parse", "--short", "HEAD")
+
+    def test_build_config_commit_is_skipped_by_default(self):
+        sha = self.add_main_commit({".tekton/build-push.yaml": "kind: PipelineRun\n"})
+
+        output = self.run_sync("--list")
+
+        self.assertIn("(excluded path)", output)
+        self.assertIn(sha, output)
+        planned = output.split("Skipped")[0]
+        self.assertNotIn(sha, planned)
+
+    def test_path_excludes_do_not_hide_the_other_commits(self):
+        self.add_main_commit({".tekton/build-push.yaml": "kind: PipelineRun\n"})
+        sha = self.add_main_commit({"internal/controller.go": "package internal\n"})
+
+        output = self.run_sync("--list")
+
+        self.assertIn(sha, output.split("Skipped")[0])
+
+    def test_mixed_commit_stops_before_picking(self):
+        sha = self.add_main_commit({
+            ".tekton/build-push.yaml": "kind: PipelineRun\n",
+            "internal/controller.go": "package internal\n",
+        })
+
+        result = self.run_sync_raw("--list")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("touch both excluded paths", result.stderr)
+        self.assertIn(sha, result.stderr)
+        self.assertIn("--no-path-excludes", result.stderr)
+        self.assertEqual(self.git("branch", "--show-current"), "main")
+
+    def test_no_path_excludes_applies_build_config(self):
+        sha = self.add_main_commit({".tekton/build-push.yaml": "kind: PipelineRun\n"})
+
+        output = self.run_sync("--list", "--no-path-excludes")
+
+        self.assertIn(sha, output.split("Skipped")[0] if "Skipped" in output else output)
+
+    def test_extra_excluded_path_is_honoured(self):
+        sha = self.add_main_commit({"docs/notes.md": "notes\n"})
+
+        default_output = self.run_sync("--list")
+        custom_output = self.run_sync("--list", "--exclude-path", "docs/")
+
+        self.assertIn(sha, default_output.split("Skipped")[0])
+        self.assertIn("(excluded path)", custom_output)
+        self.assertNotIn(sha, custom_output.split("Skipped")[0])
+
 
 if __name__ == "__main__":
     unittest.main()
