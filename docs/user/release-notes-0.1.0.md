@@ -35,16 +35,27 @@ migration.
   - no rollout resources are in flight that would interfere with the migration
   - the destination datacenter, compute cluster, datastore, networks, resource pool, and
     template are reachable, and the credentials hold the required vCenter privileges
-  - probe VMs can start on and reach the destination networks
+  - a probe VM started on each destination failure domain reports the same network settings
+    as the source node VMs
+
+  Preflight creates a probe VM on each destination failure domain, first removing stale probe
+  VMs that share the probe name prefix. Each probe VM is attached only to the first entry in
+  that failure domain's `topology.networks`. The check compares the subnet and default gateway
+  the probe VM reports with those of the source node VMs; it does not test connectivity to the
+  destination and does not check any other destination network. The Operator attempts to delete
+  each probe VM after its check, but a failed deletion leaves the probe VM behind for manual
+  cleanup.
 
 - **Explicit source-to-destination failure domain mapping.** You map each source failure
   domain to a destination failure domain. The mapping is resolved once during preflight,
-  recorded in `status.failureDomainMappings`, and reused for every later phase, so the plan
-  cannot drift mid-migration.
+  recorded in `status.failureDomainMappings`, and reused by every later phase, so the whole
+  migration follows one mapping.
 
-- **Destination preparation.** The Operator creates the target VM folder and the
-  `openshift-region` and `openshift-zone` topology tags, and tags the migrated inventory with
-  the destination cluster ownership tag.
+- **Destination preparation.** The Operator creates the target VM folder and tags the migrated
+  inventory with the destination cluster ownership tag. It also ensures the `openshift-region`
+  and `openshift-zone` tags exist and are attached, but only where the target datacenter or
+  compute cluster has no tag in that category yet. Existing tag values are not compared with
+  `spec.failureDomains`, so review the topology tags on the target vCenter before migrating.
 
 - **Multi-site configuration.** The Operator updates the vSphere credentials secret, the
   `Infrastructure` resource, and the cloud provider configuration so the cluster recognizes
@@ -87,9 +98,13 @@ migration.
   current spec, or until an administrator sets the
   `migration.openshift.io/allow-deletion: "true"` annotation.
 
-- **The failure domain mapping is immutable.** After preflight records the mapping, editing
-  `spec.failureDomains` or `spec.failureDomainMappings` is rejected. Prepare a new migration
-  if the destination topology changes.
+- **The recorded failure domain mapping is enforced.** After preflight records the mapping,
+  `spec.failureDomainMappings` is checked against the recorded source-to-destination pairs.
+  Reordering the list or clearing it is accepted, but changing an association, adding an entry,
+  or removing an entry sets `Accepted=False` with reason `MappingRejected`. The
+  `spec.failureDomains` list itself is not frozen: edits to it are accepted and do not change
+  the recorded mapping or the destination topology already in use. Prepare a new migration if
+  the destination topology must change.
 
 - **Prerequisites are enforced, not assumed.** The cluster must run an OpenShift version where
   the `VSphereMultiVCenterDay2` feature gate is enabled, with no upgrade in progress and all
