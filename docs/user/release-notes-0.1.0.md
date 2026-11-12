@@ -1,5 +1,6 @@
 # Release notes for VCF Migration Operator 0.1.0
 
+<!-- Add the errata advisory link here once 0.1.0 is published. -->
 Issued: 12 November 2026
 
 The VCF Migration Operator moves an OpenShift cluster running on VMware vSphere from one
@@ -15,43 +16,58 @@ for production use, do not come with a support commitment, and might change with
 Test this release on non-production clusters, and report issues before planning a production
 migration.
 
+## Prerequisites
+
+Prerequisites are enforced, not assumed. Preflight reports a clear error when a prerequisite is
+missing, and the migration does not start until all of them are satisfied.
+
+- The cluster must run an OpenShift version with the `VSphereMultiVCenterDay2` feature gate
+  enabled. The gate is enabled by default in OpenShift 5.0; a backport for OpenShift 4.20 through
+  4.22 is in progress, and migration of those versions becomes possible once the backport is
+  available.
+- The cluster must not be upgrading, and all ClusterOperators must be healthy.
+
 ## New features and enhancements
 
-- **Migration from a single custom resource.** One `VmwareCloudFoundationMigration` object
-  drives the entire migration, from validation through cleanup. You can pause the workflow
-  with `spec.state: Paused` and resume it with `spec.state: Running`.
+- **Migration from a single custom resource.** The VCF Migration Operator migrates an
+  OpenShift cluster from one vCenter to another by using a single
+  `VmwareCloudFoundationMigration` custom resource. The migration can be paused by setting
+  `spec.state: Paused` and resumed by setting `spec.state: Running`.
 
-- **Validation before anything changes.** Preflight checks the destination vCenter topology
-  and credentials, confirms that the cluster is healthy and not upgrading, catches storage
-  that cannot be migrated, and starts a test VM on each destination failure domain to compare
-  its network settings with the source nodes. The Operator changes nothing unless every check
-  passes.
+- **Validation before anything changes.** Before making any changes, the Operator runs preflight
+  checks that validate the destination vCenter topology and credentials, confirm cluster health
+  and upgrade status, identify unsupported storage configurations, and compare network settings
+  by starting a test VM on each destination failure domain. The migration does not proceed
+  unless all checks pass.
 
-- **Explicit source-to-destination failure domain mapping.** You decide which source failure
-  domain migrates to which destination failure domain. The Operator records that mapping and
-  follows it for the rest of the migration.
+- **Explicit source-to-destination failure domain mapping.** The `spec.failureDomainMappings`
+  field specifies which source failure domain maps to which destination failure domain. The
+  Operator records and enforces this mapping for the duration of the migration.
 
 - **Destination preparation.** The Operator creates the target VM folder, sets the
   `openshift-region` and `openshift-zone` topology tags, and marks the migrated inventory with
   the destination cluster ownership tag.
 
-- **Seamless vCenter handover.** The cluster recognizes both vCenters while the migration runs,
-  and the source vCenter is removed at the end, along with its credentials and cloud provider
-  configuration. The Operator writes an installer-compatible metadata secret so that later
-  cluster operations have a consistent view of the destination platform.
+- **Dual-vCenter operation and source vCenter removal.** The cluster is configured to recognize
+  both the source and destination vCenters during migration. At completion, the source vCenter
+  credentials and cloud provider configuration are removed. The Operator writes an
+  installer-compatible platform metadata secret, which `openshift-install destroy cluster` can
+  consume directly.
 
 - **Workers and control plane moved to the destination.** The Operator creates new machines on
-  the destination, waits for them to join, rolls out the control plane, and then removes the
-  source machines. Slow removal of old workers is reported as events rather than left hanging.
+  the destination vCenter, waits for them to join the cluster, rolls out the control plane, and
+  removes the source machines. If worker removal is delayed, the Operator reports progress as
+  Kubernetes events.
 
-- **Verified completion.** The migration does not report `Ready` until all ClusterOperators and
-  machine config pools have been stable for about three minutes, so a finished migration means
-  a healthy cluster.
+- **Completion stability check.** The `VmwareCloudFoundationMigration` resource does not
+  transition to `Ready` until all ClusterOperators and machine config pools have been stable for
+  approximately three minutes.
 
-- **Visible progress.** Ordered status conditions, phase messages with counts such as ready
-  workers, and Kubernetes events show where a migration is and why it stopped.
+- **Migration status reporting.** Migration status is reported through ordered status conditions,
+  phase messages with counts such as ready worker nodes, and Kubernetes events that indicate the
+  current phase and any blocking conditions.
 
-## Limitations in this release
+## Known issues and limitations
 
 - **Technology Preview only.** Do not use this release for production migrations.
 
@@ -87,12 +103,5 @@ migration.
   `openshift-region` and `openshift-zone` tags only where the destination datacenter or compute
   cluster has no tag in that category, and it does not compare existing tag values with
   `spec.failureDomains`. Review the topology tags on the target vCenter before migrating.
-
-- **Prerequisites are enforced, not assumed.** The cluster must run an OpenShift version with
-  the `VSphereMultiVCenterDay2` feature gate enabled, must not be upgrading, and must have
-  healthy ClusterOperators. The gate is enabled by default in OpenShift 5.0; a backport for
-  OpenShift 4.20 through 4.22 is in progress, and migration of those versions becomes possible
-  once the backport is available. Preflight reports a clear error when a prerequisite is
-  missing.
 
 - **No proxy or FIPS support.** The Operator is not proxy-aware and does not run in FIPS mode.

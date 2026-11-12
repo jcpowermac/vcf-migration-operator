@@ -7,7 +7,7 @@ The operator reconciles the `VmwareCloudFoundationMigration` custom resource thr
 ## Documentation
 
 - **User Guide**
-  - [Release notes 0.1.0](docs/user/release-notes-0.1.0.md)
+  - [Release notes 0.1.0](docs/user/release-notes-0.1.0.md) — includes [prerequisites](docs/user/release-notes-0.1.0.md#prerequisites)
   - [Install with OLM](docs/user/install-with-olm.md)
   - [Install with Operator SDK](docs/user/install-with-operator-sdk.md)
   - [Install without OLM](docs/user/install-without-olm.md)
@@ -30,6 +30,8 @@ make deploy IMG=<registry>/vcf-migration-operator:latest
 # Apply a sample migration
 kubectl apply -k config/samples/
 ```
+
+Before you migrate, review the [prerequisites](docs/user/release-notes-0.1.0.md#prerequisites): the cluster needs the `VSphereMultiVCenterDay2` feature gate, must not be upgrading, and must have healthy ClusterOperators.
 
 For full YAML examples of the migration spec, see [Spec Examples](docs/user/spec-examples.md). The operator attaches [destination cluster ownership tags](docs/user/install-with-olm.md) to the migrated inventory.
 
