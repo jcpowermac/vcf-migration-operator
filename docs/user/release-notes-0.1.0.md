@@ -26,6 +26,9 @@ missing, and the migration does not start until all of them are satisfied.
   4.22 is in progress, and migration of those versions becomes possible once the backport is
   available.
 - The cluster must not be upgrading, and all ClusterOperators must be healthy.
+- The vSphere CSI driver must be removed and no vSphere CSI persistent volumes may remain, or
+  preflight fails. Move workload data to another supported storage backend before migrating. See
+  [Known issues and limitations](#known-issues-and-limitations) for details.
 
 ## New features and enhancements
 
