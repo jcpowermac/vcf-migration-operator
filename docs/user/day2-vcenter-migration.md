@@ -129,16 +129,41 @@ oc get machineautoscaler -A      # none
 Delete user-defined health checks and autoscalers, and re-create them after Step 10.
 `machine-api-termination-handler` can stay — it reacts to cloud preemption signals, not node health.
 
-### 4. Credentials and permissions on the target vCenter
+### 4. Credentials and permissions on both vCenters
 
-The cluster already has credentials for the source in `vsphere-creds`. For the target you need a
-vCenter account with, at the target datacenter and compute cluster:
+Two accounts are in play here and they are easy to mix up: the **source** account is already in
+`vsphere-creds` and keeps working as it does today; the **target** account is new and is added in
+Step 2.
+
+Source (`vcenter1.example.com`) — already configured, do not rotate or narrow it during the migration:
+
+- it must still authenticate, and it must be able to delete and reconfigure VMs in the existing
+  resource pool, datastores and port groups — the machines removed in Steps 8 and 9 are destroyed
+  through it.
+
+Target (`vcenter2.example.com`) — new account, needs the following at the target datacenter and
+compute cluster:
 
 - tag create/attach (categories and tags)
 - folder create, VM clone and VM reconfigure
 - datastore and resource pool use, and port group use on the stretched network
 
-A practical check: clone a throwaway template into `/DC3/vm/<infra-id>` with that account and delete it.
+Check both, one check per vCenter:
+
+```bash
+# Source: today's credentials still authenticate
+export GOVC_URL='https://vcenter1.example.com/sdk'
+govc about | head -1
+
+# Target: the new account can clone into the cluster folder and delete again
+export GOVC_URL='https://vcenter2.example.com/sdk'
+govc vm.clone -vm /DC3/vm/<infra-id>-rhcos-us-west-us-west-1a \
+  -folder "/DC3/vm/<infra-id>" -on=false perm-check
+govc vm.destroy "/DC3/vm/<infra-id>/perm-check"
+```
+
+The tag create/attach permission on the target is exercised by Step 1a; a failure there is a
+permissions problem, not a tagging problem.
 
 ### 5. A failure domain shape that maps cleanly
 
