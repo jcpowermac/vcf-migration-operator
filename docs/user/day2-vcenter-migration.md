@@ -173,7 +173,7 @@ permissions problem, not a tagging problem.
 - no failure domain may use `regionAffinity.type: ComputeCluster` or `zoneAffinity.type: HostGroup`;
   those topologies are not supported for this operation;
 - if you will run more than one failure domain, each must be unambiguous: two failure domains sharing
-  a datacenter need distinct `topology.resourcePool` values, so a MachineSet matches exactly one;
+  a datacenter need distinct `topology.resourcePool` values, so a MachineSet matches exactly one.
 - decide now which source failure domain maps to which target failure domain. Each worker MachineSet
   is copied to the failure domain it maps to; one target failure domain may receive several source
   MachineSets.
