@@ -323,8 +323,10 @@ const (
 // +kubebuilder:printcolumn:name="Completed",type=date,JSONPath=`.status.completionTime`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// VmwareCloudFoundationMigration is the Schema for the vmwarecloudfoundationmigrations API.
-// It orchestrates migration of an OpenShift cluster from one vCenter to another.
+// VmwareCloudFoundationMigration defines a controlled migration of an OpenShift
+// cluster from its current VMware vCenter environment to a destination vCenter.
+// The operator reconciles only the singleton named "cluster" in the
+// "openshift-vcf-migration" namespace.
 // +kubebuilder:validation:XValidation:rule="has(self.spec.failureDomainMappings) || size(self.spec.failureDomains) == 1 || (has(self.status) && has(self.status.failureDomainMappings) && size(self.status.failureDomainMappings) > 0)",message="failureDomainMappings is required when more than one failureDomain is defined until effective mappings are recorded"
 type VmwareCloudFoundationMigration struct {
 	metav1.TypeMeta   `json:",inline"`

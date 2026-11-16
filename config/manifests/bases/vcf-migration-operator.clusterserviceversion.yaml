@@ -4,6 +4,8 @@ metadata:
   annotations:
     alm-examples: '[]'
     capabilities: Basic Install
+    description: Orchestrates migration of an OpenShift cluster between VMware vCenter
+      environments.
     features.operators.openshift.io/disconnected: "true"
     features.operators.openshift.io/fips-compliant: "false"
     features.operators.openshift.io/proxy-aware: "false"
@@ -11,8 +13,11 @@ metadata:
     features.operators.openshift.io/token-auth-aws: "false"
     features.operators.openshift.io/token-auth-azure: "false"
     features.operators.openshift.io/token-auth-gcp: "false"
+    operatorframework.io/suggested-namespace: openshift-vcf-migration
     operators.openshift.io/valid-subscription: '["OpenShift Container Platform", "OpenShift
       Platform Plus"]'
+    repository: https://github.com/openshift/vcf-migration-operator
+    support: Red Hat
   name: vcf-migration-operator.v0.0.0
   namespace: placeholder
 spec:
@@ -20,13 +25,51 @@ spec:
   customresourcedefinitions:
     owned:
     - description: |-
-        VmwareCloudFoundationMigration is the Schema for the vmwarecloudfoundationmigrations API.
-        It orchestrates migration of an OpenShift cluster from one vCenter to another.
+        VmwareCloudFoundationMigration defines a controlled migration of an OpenShift
+        cluster from its current VMware vCenter environment to a destination vCenter.
+        The operator reconciles only the singleton named "cluster" in the
+        "openshift-vcf-migration" namespace.
       displayName: Vmware Cloud Foundation Migration
       kind: VmwareCloudFoundationMigration
       name: vmwarecloudfoundationmigrations.migration.openshift.io
       version: v1alpha1
-  description: Migrate OCP from source to destination VCF workload
+  description: |-
+    The VCF Migration Operator orchestrates migration of an existing OpenShift
+    Container Platform cluster between VMware vCenter environments. It provides
+    a controlled, observable workflow for preparing destination infrastructure,
+    moving cluster machines, removing source configuration, and confirming that
+    the migrated cluster is healthy.
+
+    ## Migration workflow
+
+    The operator progresses through ordered stages:
+
+    * Validates cluster health, credentials, vCenter inventory, and migration
+      prerequisites.
+    * Prepares destination folders and topology tags.
+    * Configures the cluster to use both source and destination vCenters.
+    * Moves worker and control-plane machines to destination failure domains.
+    * Removes source vCenter configuration after workloads are ready.
+    * Verifies cluster operators and machine configuration pools before
+      reporting the migration as complete.
+
+    Migration progress is exposed through status conditions, Kubernetes events,
+    and worker and control-plane counters. Set `spec.state` to `Paused` to stop
+    advancement between operations and return it to `Running` to resume.
+
+    For custom resource fields, status, and condition types, see the
+    [API reference](https://github.com/openshift/vcf-migration-operator/blob/main/docs/dev/api.md).
+    For package layout, reconciliation flow, and requeue strategy, see the
+    [architecture guide](https://github.com/openshift/vcf-migration-operator/blob/main/docs/dev/architecture.md).
+
+    ## Before you begin
+
+    The current release requires vSphere CSI storage to be removed before
+    preflight validation. Review the [migration spec examples](https://github.com/openshift/vcf-migration-operator/blob/main/docs/user/spec-examples.md)
+    before starting. Create one `VmwareCloudFoundationMigration`
+    resource named `cluster` in the `openshift-vcf-migration` namespace. The
+    resource defaults to `Pending`; migration begins only after you set
+    `spec.state` to `Running`.
   displayName: VCF Migration Operator
   icon:
   - base64data: ""
@@ -45,17 +88,21 @@ spec:
   - supported: true
     type: AllNamespaces
   keywords:
-  - vcf
-  - vmware
-  - vsphere
-  - ocp
+  - OpenShift
+  - migration
+  - VMware
+  - vCenter
+  - vSphere
+  - VCF
   links:
-  - name: Vcf Migration Operator
-    url: https://vcf-migration-operator.domain
+  - name: Documentation
+    url: https://github.com/openshift/vcf-migration-operator/tree/main/docs/user
+  - name: Source Code
+    url: https://github.com/openshift/vcf-migration-operator
   maintainers:
   - email: ocp-splat-team@redhat.com
     name: SPLAT
   maturity: alpha
   provider:
-    name: Red Hat
+    name: Red Hat, Inc.
   version: 0.0.0
