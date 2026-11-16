@@ -186,7 +186,8 @@ found here costs minutes; found during the control plane step, a rollout.
 ## Step 1: Prepare the new vCenter
 
 Three things are needed on the target before it can host machines: the region/zone tags, the per-cluster
-VM folder with its ownership tag, and the RHCOS template.
+VM folder with its ownership tag, and the RHCOS template. The tags are also **read back on both
+vCenters** — the source keeps its pair until Step 9, and its values are what the target has to match.
 
 ### 1a. Region and zone tags
 
@@ -210,6 +211,47 @@ govc tags.attach -c openshift-zone us-west-1a /DC3/host/Cluster1
 Tag values must match the `region` and `zone` strings you will put in the failure domain
 (case-sensitive). They become the node topology labels.
 
+#### Confirm the attachments on both vCenters
+
+Do not assume the creates above worked, and do not assume the source is still tagged the way it was
+at install time. The migration needs **both** sides read back: the target datacenter carries the
+region tag and the target compute cluster the zone tag, and the source keeps its own pair until
+Step 9 removes that vCenter. The source values also have to match the `region` / `zone` already in the
+existing failure domain — they are what the nodes' topology labels were built from.
+
+```bash
+export GOVC_URL='https://vcenter2.example.com/sdk'
+
+# Target: region on the datacenter, zone on the compute cluster
+govc tags.attached.ls /DC3                 # includes us-west (openshift-region)
+govc tags.attached.ls /DC3/host/Cluster1   # includes us-west-1a (openshift-zone)
+
+export GOVC_URL='https://vcenter1.example.com/sdk'
+
+# Source: unchanged, one tag per category, still the values in the failure domain
+govc tags.attached.ls /DC1                 # includes us-east (openshift-region)
+govc tags.attached.ls /DC1/host/Cluster0   # includes us-east-1a (openshift-zone)
+```
+
+`govc tags.attached.ls` prints tag **names** only, so check the category as well — a tag with the right
+name in the wrong category is not picked up, and the asymmetric placement is the usual mistake:
+
+```bash
+# Run once per vCenter (switch GOVC_URL in between): each category must hold exactly the
+# values you expect, and nothing else
+govc tags.ls -c openshift-region
+govc tags.ls -c openshift-zone
+```
+
+A missing or misplaced attachment is a stop condition, on either side:
+
+- on the **target**, new machines come up without `topology.kubernetes.io/region` / `zone` labels;
+- on the **source**, the existing failure domain and its tags disagree, so the values you copy into the
+  target failure domain have nothing to match.
+
+Fix it before Step 3 — a wrong tree path (`/DC3` is the datacenter, `/DC3/host/Cluster1` the compute
+cluster) or a tag left in another category costs minutes now and a rollout later.
+
 ### 1b. VM folder and cluster ownership tag
 
 Machines are cloned into `/<datacenter>/vm/<infra-id>`, and that folder carries the installer-style
@@ -223,6 +265,16 @@ govc tags.category.create -t urn:vim25:VirtualMachine -t urn:vim25:ResourcePool 
 govc tags.create -c "openshift-<infra-id>" -d "Added by openshift-install do not remove" "<infra-id>"
 govc tags.attach -c "openshift-<infra-id>" "<infra-id>" "/DC3/vm/<infra-id>"
 ```
+
+Read the attachment back on the target — a category that already existed without `-t Folder` among its
+associable types looks created but the attach silently does nothing:
+
+```bash
+govc tags.attached.ls "/DC3/vm/<infra-id>"          # prints <infra-id>
+govc tags.category.info "openshift-<infra-id>"      # AssociableTypes includes Folder
+```
+
+The source folder already carries the same tag from install; leave it alone until Step 9.
 
 ### 1c. RHCOS template
 
@@ -866,6 +918,8 @@ feature gate is not enabled — return to Before you start; there is no supporte
 
 **Nodes on the new vCenter have no zone or region label**
 
+- Confirm the attachment on **both** vCenters as in Step 1a — the target is what is missing when new
+  nodes are unlabelled, the source is what the values were copied from.
 - The region tag must be attached to the **datacenter**, the zone tag to the **compute cluster**, under
   the exact category names `openshift-region` and `openshift-zone`.
 - Tag values must equal the failure domain's `region` / `zone` strings.
