@@ -311,6 +311,23 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileState(ctx context.Co
 	return false, nil
 }
 
+// markMigrationStarted persists the first StartTime and records the
+// MigrationStarted event. It is a no-op once StartTime is set.
+func (r *VmwareCloudFoundationMigrationReconciler) markMigrationStarted(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus) error {
+	if migration.Status.StartTime != nil {
+		return nil
+	}
+	now := metav1.Now()
+	migration.Status.StartTime = &now
+	if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
+		return err
+	}
+	if r.Recorder != nil {
+		r.Recorder.Eventf(migration, nil, "Normal", "MigrationStarted", "MigrationStarted", "Migration workflow started")
+	}
+	return nil
+}
+
 // reconcileWorkflow processes migration state only after singleton and deletion guards pass.
 func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus) (ctrl.Result, error) {
 	log := klog.FromContext(ctx)
@@ -380,14 +397,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 			return ctrl.Result{RequeueAfter: planningResync}, r.updateStatus(ctx, migration, baseStatus)
 		}
 		// Persist the execution boundary only after current-generation planning passes.
-		if !isPlanningCondition(condType) && migration.Status.StartTime == nil {
-			now := metav1.Now()
-			migration.Status.StartTime = &now
-			if err := r.updateStatus(ctx, migration, baseStatus); err != nil {
+		if !isPlanningCondition(condType) {
+			if err := r.markMigrationStarted(ctx, migration, baseStatus); err != nil {
 				return ctrl.Result{}, err
-			}
-			if r.Recorder != nil {
-				r.Recorder.Eventf(migration, nil, "Normal", "MigrationStarted", "MigrationStarted", "Migration workflow started")
 			}
 		}
 		result, err := conditionHandler(ctx, migration)

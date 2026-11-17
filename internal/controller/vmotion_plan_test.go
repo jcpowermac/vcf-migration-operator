@@ -455,7 +455,7 @@ func TestVMotionReconcileBlocksChangedMappingBeforeInventory(t *testing.T) {
 	}
 	h.reconcile(t)
 	condition := apimeta.FindStatusCondition(h.migration.Status.Conditions, migrationv1alpha1.ConditionAccepted)
-	if condition == nil || condition.Status != metav1.ConditionFalse || !strings.Contains(condition.Message, "immutable after preflight") {
+	if condition == nil || condition.Status != metav1.ConditionFalse || !strings.Contains(condition.Message, "immutable after the migration starts") {
 		t.Fatalf("Accepted = %+v, want changed mapping block", condition)
 	}
 	if h.inventoryCalls != 1 || h.migration.Status.NodeMigration.Workers.Total != 2 {
