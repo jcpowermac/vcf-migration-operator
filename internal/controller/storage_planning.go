@@ -15,10 +15,15 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
 	"github.com/openshift/vcf-migration-operator/internal/execution"
@@ -30,8 +35,10 @@ import (
 const planningResync = 5 * time.Minute
 const migrationUIDLabel = "migration.openshift.io/migration-uid"
 
+// maxStorageBlockerMessageBytes matches the API limit on blocker messages.
+const maxStorageBlockerMessageBytes = 1024
+
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list
 // +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list
 // +kubebuilder:rbac:groups=apps,resources=replicasets;statefulsets;daemonsets,verbs=get
 // +kubebuilder:rbac:groups=batch,resources=jobs;cronjobs,verbs=get
@@ -112,6 +119,66 @@ func checkStorageManagementForPlan(ctx context.Context, dyn dynamic.Interface, c
 	return "", nil
 }
 
+// mapPVCToStoragePlanning enqueues the singleton migration for a PVC event
+// only while a storage plan is being refreshed: storage migration is enabled,
+// the migration is planning or running, and execution has not started.
+func (r *VmwareCloudFoundationMigrationReconciler) mapPVCToStoragePlanning(ctx context.Context, _ client.Object) []reconcile.Request {
+	key := types.NamespacedName{Name: migrationv1alpha1.SingletonName, Namespace: migrationv1alpha1.SingletonNamespace}
+	request := []reconcile.Request{{NamespacedName: key}}
+
+	migration := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+	if err := r.Get(ctx, key, migration); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		// Enqueue on read errors; Reconcile reports the failure.
+		return request
+	}
+	if !isStoragePlanRefreshing(migration) {
+		return nil
+	}
+	return request
+}
+
+// isStoragePlanRefreshing reports whether PVC changes can affect the storage plan.
+func isStoragePlanRefreshing(m *migrationv1alpha1.VmwareCloudFoundationMigration) bool {
+	if !m.Spec.MigrateStorage {
+		return false
+	}
+	if m.Status.StartTime != nil {
+		return false
+	}
+	return m.Spec.State == migrationv1alpha1.MigrationStatePlanning || m.Spec.State == migrationv1alpha1.MigrationStateRunning
+}
+
+// pvcMetadataChangedPredicate ignores PVC updates that only change server-managed
+// metadata such as resourceVersion or managedFields. Generation alone is not
+// enough: the target-failure-domain override is an annotation.
+func pvcMetadataChangedPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			if e.ObjectOld == nil || e.ObjectNew == nil {
+				return true
+			}
+			return isPVCMetadataChanged(e.ObjectOld, e.ObjectNew)
+		},
+	}
+}
+
+// isPVCMetadataChanged compares the PVC metadata that storage planning reads.
+func isPVCMetadataChanged(old, updated client.Object) bool {
+	if old.GetGeneration() != updated.GetGeneration() {
+		return true
+	}
+	if !reflect.DeepEqual(old.GetAnnotations(), updated.GetAnnotations()) {
+		return true
+	}
+	if !reflect.DeepEqual(old.GetOwnerReferences(), updated.GetOwnerReferences()) {
+		return true
+	}
+	return !reflect.DeepEqual(old.GetDeletionTimestamp(), updated.GetDeletionTimestamp())
+}
+
 // storagePlanSummary aggregates volume counts across all planned namespaces.
 type storagePlanSummary struct {
 	namespaces        int
@@ -130,6 +197,10 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureStoragePlanned(ctx cont
 	defer r.recordStoragePlannedEvent(m, previous)
 
 	if !m.Spec.MigrateStorage {
+		// Plans written while storage migration was enabled no longer apply.
+		if err := r.deleteStaleStoragePlans(ctx, m, nil); err != nil {
+			return ctrl.Result{}, err
+		}
 		r.setCondition(m, migrationv1alpha1.ConditionStoragePlanned, metav1.ConditionTrue, migrationv1alpha1.ReasonNotConfigured, "Storage migration is not enabled")
 		r.clearStoragePlanBlocked(m)
 		return ctrl.Result{}, nil
@@ -251,39 +322,74 @@ func (r *VmwareCloudFoundationMigrationReconciler) getCSITopologyCategories(ctx 
 
 // writeNamespacePlans resolves storage consumers for each planned namespace,
 // writes its StorageWorkloadMigration, and summarizes volume and blocker counts.
-// Namespaces are processed in sorted order so writes are deterministic.
-func (r *VmwareCloudFoundationMigrationReconciler) writeNamespacePlans(ctx context.Context, m *migrationv1alpha1.VmwareCloudFoundationMigration, plan *storageplan.Plan, pods []corev1.Pod) (storagePlanSummary, error) {
-	namespaces := make([]string, 0, len(plan.Namespaces))
-	for ns := range plan.Namespaces {
-		namespaces = append(namespaces, ns)
+// Namespaces are processed in sorted order so writes are deterministic. A
+// failure in one namespace becomes a plan blocker so the other namespaces are
+// still planned; only a lost execution permission aborts the pass.
+func (r *VmwareCloudFoundationMigrationReconciler) writeNamespacePlans(
+	ctx context.Context,
+	m *migrationv1alpha1.VmwareCloudFoundationMigration,
+	plan *storageplan.Plan, pods []corev1.Pod) (storagePlanSummary, error) {
+
+	namespaceMigrationPlans := make([]string, 0, len(plan.NamespaceMigrationPlanInstances))
+	for ns := range plan.NamespaceMigrationPlanInstances {
+		namespaceMigrationPlans = append(namespaceMigrationPlans, ns)
 	}
-	sort.Strings(namespaces)
+	sort.Strings(namespaceMigrationPlans)
 
-	summary := storagePlanSummary{namespaces: len(namespaces)}
-	for _, namespace := range namespaces {
+	log := klog.FromContext(ctx)
 
-		nsPlan := plan.Namespaces[namespace]
+	podsByNamespace := map[string][]corev1.Pod{}
 
-		consumers, err := storageplan.Consumers(ctx, pods, namespace, nsPlan.Volumes, r.lookupStorageOwner)
-
-		if err != nil {
-			return storagePlanSummary{}, err
+	for i := range pods {
+		if plan.NamespaceMigrationPlanInstances[pods[i].Namespace] == nil {
+			continue
 		}
-		nsPlan.Consumers = consumers
+		podsByNamespace[pods[i].Namespace] = append(podsByNamespace[pods[i].Namespace], pods[i])
+	}
 
+	summary := storagePlanSummary{namespaces: len(namespaceMigrationPlans)}
+	for _, namespace := range namespaceMigrationPlans {
+		nsPlan := plan.NamespaceMigrationPlanInstances[namespace]
 		blocked := countBlockedVolumes(nsPlan.Volumes)
 		summary.volumes += len(nsPlan.Volumes)
 		summary.blockedVolumes += blocked
 
+		reason, err := r.writeNamespacePlan(ctx, m, namespace, nsPlan, podsByNamespace[namespace], blocked)
+		if err != nil {
+			if checkErr := execution.Check(ctx); checkErr != nil {
+				return storagePlanSummary{}, checkErr
+			}
+			log.Error(err, "storage planning blocked for namespace", "namespace", namespace, "reason", reason)
+			plan.Blockers = append(plan.Blockers, migrationv1alpha1.StorageWorkloadMigrationBlocker{
+				Reason:  reason,
+				Message: truncateToBytes(fmt.Sprintf("namespace %s: %v", namespace, err), maxStorageBlockerMessageBytes),
+			})
+			summary.blockedNamespaces++
+			continue
+		}
 		if blocked > 0 {
 			summary.blockedNamespaces++
 		}
-
-		if err := r.writeStoragePlan(ctx, m, namespace, nsPlan, blocked); err != nil {
-			return storagePlanSummary{}, err
-		}
 	}
 	return summary, nil
+}
+
+// writeNamespacePlan resolves consumers and writes the plan for one namespace.
+// On failure it returns the blocker reason describing which step failed.
+func (r *VmwareCloudFoundationMigrationReconciler) writeNamespacePlan(ctx context.Context, m *migrationv1alpha1.VmwareCloudFoundationMigration, namespace string, nsPlan *storageplan.NamespacePlan, pods []corev1.Pod, blocked int) (string, error) {
+	consumers, err := storageplan.Consumers(ctx, pods, namespace, nsPlan.Volumes, r.lookupStorageOwner)
+	if err != nil {
+		return "ConsumerResolutionFailed", err
+	}
+	nsPlan.Consumers = consumers
+
+	if err := r.writeStoragePlan(ctx, m, namespace, nsPlan, blocked); err != nil {
+		if apierrors.HasStatusCause(err, corev1.NamespaceTerminatingCause) {
+			return "NamespaceTerminating", err
+		}
+		return "StoragePlanWriteFailed", err
+	}
+	return "", nil
 }
 
 // countBlockedVolumes returns the number of volumes with at least one blocker.
@@ -337,14 +443,34 @@ func storagePlanName(m *migrationv1alpha1.VmwareCloudFoundationMigration) string
 	return "vcf-storage-" + uid
 }
 
-func (r *VmwareCloudFoundationMigrationReconciler) writeStoragePlan(ctx context.Context, m *migrationv1alpha1.VmwareCloudFoundationMigration, namespace string, plan *storageplan.NamespacePlan, blocked int) error {
+func (r *VmwareCloudFoundationMigrationReconciler) writeStoragePlan(
+	ctx context.Context,
+	m *migrationv1alpha1.VmwareCloudFoundationMigration,
+	namespace string,
+	plan *storageplan.NamespacePlan,
+	blocked int) error {
+
 	key := client.ObjectKey{Namespace: namespace, Name: storagePlanName(m)}
+
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		swm := &migrationv1alpha1.StorageWorkloadMigration{}
-		err := r.Get(ctx, key, swm)
+		// Read through the API server: a stale cached ResourceVersion would
+		// make every conflict retry fail the same way.
+		err := r.permissionReader().Get(ctx, key, swm)
 		ref := migrationv1alpha1.MigrationObjectReference{Name: m.Name, UID: m.UID}
 		if apierrors.IsNotFound(err) {
-			swm = &migrationv1alpha1.StorageWorkloadMigration{ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: namespace, Labels: map[string]string{migrationUIDLabel: string(m.UID)}}, Spec: migrationv1alpha1.StorageWorkloadMigrationSpec{MigrationRef: ref}}
+			swm = &migrationv1alpha1.StorageWorkloadMigration{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      key.Name,
+					Namespace: namespace,
+					Labels: map[string]string{
+						migrationUIDLabel: string(m.UID),
+					},
+				},
+				Spec: migrationv1alpha1.StorageWorkloadMigrationSpec{
+					MigrationRef: ref,
+				},
+			}
 			if err := execution.Check(ctx); err != nil {
 				return err
 			}
@@ -382,7 +508,13 @@ func (r *VmwareCloudFoundationMigrationReconciler) writeStoragePlan(ctx context.
 			reason = "Blocked"
 			message = fmt.Sprintf("%d of %d volumes blocked", blocked, len(plan.Volumes))
 		}
-		apimeta.SetStatusCondition(&swm.Status.Conditions, metav1.Condition{Type: migrationv1alpha1.StorageWorkloadMigrationConditionPlanned, Status: status, Reason: reason, Message: message, ObservedGeneration: swm.Generation})
+		apimeta.SetStatusCondition(&swm.Status.Conditions, metav1.Condition{
+			Type:               migrationv1alpha1.StorageWorkloadMigrationConditionPlanned,
+			Status:             status,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: swm.Generation,
+		})
 		if reflect.DeepEqual(*previous, swm.Status) {
 			return nil
 		}
@@ -396,14 +528,19 @@ func (r *VmwareCloudFoundationMigrationReconciler) writeStoragePlan(ctx context.
 	})
 }
 
+// deleteStaleStoragePlans deletes planning-phase StorageWorkloadMigrations
+// that the current plan no longer covers: plans for namespaces without volumes,
+// and plans left by an earlier migration object with a different UID. A nil
+// plan deletes every planning-phase plan, for use when storage migration is
+// disabled or the migration record is released.
 func (r *VmwareCloudFoundationMigrationReconciler) deleteStaleStoragePlans(ctx context.Context, m *migrationv1alpha1.VmwareCloudFoundationMigration, plan *storageplan.Plan) error {
 	var list migrationv1alpha1.StorageWorkloadMigrationList
-	if err := r.List(ctx, &list, client.MatchingLabels{migrationUIDLabel: string(m.UID)}); err != nil {
+	if err := r.List(ctx, &list, client.HasLabels{migrationUIDLabel}); err != nil {
 		return fmt.Errorf("listing SWMs: %w", err)
 	}
 	for i := range list.Items {
 		swm := &list.Items[i]
-		if swm.Spec.MigrationRef.UID != m.UID || swm.Status.Phase != migrationv1alpha1.StorageWorkloadMigrationPhasePlanning || plan.Namespaces[swm.Namespace] != nil {
+		if !isStaleStoragePlan(m, plan, swm) {
 			continue
 		}
 		if err := execution.Check(ctx); err != nil {
@@ -414,6 +551,27 @@ func (r *VmwareCloudFoundationMigrationReconciler) deleteStaleStoragePlans(ctx c
 		}
 	}
 	return nil
+}
+
+// isStaleStoragePlan reports whether swm is a planning record that plan no
+// longer covers. Plans past the planning phase are never deleted here.
+func isStaleStoragePlan(m *migrationv1alpha1.VmwareCloudFoundationMigration, plan *storageplan.Plan, swm *migrationv1alpha1.StorageWorkloadMigration) bool {
+	planning := swm.Status.Phase == "" || swm.Status.Phase == migrationv1alpha1.StorageWorkloadMigrationPhasePlanning
+	if !planning {
+		return false
+	}
+	// Only touch objects the operator wrote: the label and reference agree.
+	if swm.Labels[migrationUIDLabel] != string(swm.Spec.MigrationRef.UID) || swm.Spec.MigrationRef.Name != m.Name {
+		return false
+	}
+	// The migration is a singleton, so a different UID means a deleted predecessor.
+	if swm.Spec.MigrationRef.UID != m.UID {
+		return true
+	}
+	if plan == nil {
+		return true
+	}
+	return plan.NamespaceMigrationPlanInstances[swm.Namespace] == nil
 }
 
 func (r *VmwareCloudFoundationMigrationReconciler) checkPlanPolicies(ctx context.Context, m *migrationv1alpha1.VmwareCloudFoundationMigration, infra *configv1.Infrastructure, plan *storageplan.Plan, classes []storagev1.StorageClass, pvcs []corev1.PersistentVolumeClaim) error {
@@ -437,7 +595,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) checkPlanPolicies(ctx context
 	}
 
 	checker := newPolicyChecker(r, m)
-	for namespace, nsPlan := range plan.Namespaces {
+	for namespace, nsPlan := range plan.NamespaceMigrationPlanInstances {
 		for i := range nsPlan.Volumes {
 			v := &nsPlan.Volumes[i]
 			if v.TargetFailureDomain == "" {

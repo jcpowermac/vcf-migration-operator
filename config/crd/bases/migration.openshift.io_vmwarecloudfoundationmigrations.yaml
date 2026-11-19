@@ -326,6 +326,7 @@ spec:
                   with compute nodes. When false, vSphere CSI persistent volumes block the
                   migration during preflight.
                   When omitted, defaults to false.
+                  It cannot be enabled once status.startTime is set.
                 type: boolean
               nodeMigration:
                 description: |-
@@ -2042,6 +2043,9 @@ spec:
           rule: has(self.spec.failureDomainMappings) || size(self.spec.failureDomains)
             == 1 || (has(self.status) && has(self.status.failureDomainMappings) &&
             size(self.status.failureDomainMappings) > 0)
+        - message: migrateStorage cannot be enabled after the migration has started
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.startTime) || !has(self.spec.migrateStorage)
+            || !self.spec.migrateStorage || (has(oldSelf.spec.migrateStorage) && oldSelf.spec.migrateStorage)'
     served: true
     storage: true
     subresources:

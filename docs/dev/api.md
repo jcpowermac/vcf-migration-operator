@@ -9,7 +9,7 @@
 ## Spec
 
 - `state` (`MigrationState`, optional, default `Pending`): accepts `Pending`, `Planning`, `Running`, or `Paused`. `Planning` runs only the non-disruptive checks; the full migration workflow executes only when `Running`.
-- `migrateStorage` (`bool`, optional, default `false`): migrate vSphere CSI volumes along with compute nodes. When `false`, vSphere CSI persistent volumes block the migration during preflight. Only storage planning is implemented; when `true`, `Running` stops with `Ready=False`, reason `StorageExecutionUnsupported`, before any disruptive condition.
+- `migrateStorage` (`bool`, optional, default `false`): migrate vSphere CSI volumes along with compute nodes. When `false`, vSphere CSI persistent volumes block the migration during preflight. Only storage planning is implemented; when `true`, `Running` stops with `Ready=False`, reason `StorageExecutionUnsupported`, before any disruptive condition. It cannot be enabled once `status.startTime` is set; if a started migration somehow has it enabled, the reconciler still stops with `StorageExecutionUnsupported` instead of reporting completion.
 - `targetVCenterCredentialsSecret` (`SecretReference`, required): Secret with target vCenter credentials.
 - `failureDomains` (`[]VSpherePlatformFailureDomainSpec`, required, minimum one): target failure domains, using the OpenShift `configv1` type.
 - `failureDomainMappings` (`[]FailureDomainMapping`, optional): maps source failure domain names (from `Infrastructure`) to destination `failureDomains` entries. Required unless exactly one source and one destination failure domain exist; must cover every failure domain exactly once.
@@ -44,8 +44,10 @@ spec:
         target: thin-csi
 ```
 
-The API accepts and persists this field. Planning and execution do not yet apply
-the mapping or validate target StorageClass existence and suitability.
+Planning blocks the plan with `StorageClassMappingTargetMissing` when a mapped
+target StorageClass does not exist. Planning and execution do not yet apply the
+mapping or validate target StorageClass suitability, so per-volume StorageClass
+blockers still report the source class.
 
 ### MigrationState Enum
 
@@ -148,6 +150,24 @@ to completion. Even if external work later finishes, the retained record may req
 administrator to verify the outcome and explicitly authorize the handoff above. Deletion also
 stops new probe VM cleanup requests; any remaining probes must be handled during that handoff.
 
+## StorageWorkloadMigration Lifecycle
+
+When `migrateStorage` is `true`, storage planning writes one `StorageWorkloadMigration`
+named `vcf-storage-<first 8 characters of the migration UID>` in each workload namespace
+that has vSphere volumes. These objects carry the label
+`migration.openshift.io/migration-uid` and cannot be owned by the namespaced migration, so
+the operator removes planning-phase objects itself:
+
+- when a namespace no longer has planned volumes;
+- when `migrateStorage` is turned off before the migration starts;
+- when they were written by an earlier migration object with a different UID; and
+- when the migration record is released on deletion (see above).
+
+A failure to resolve consumers or write the plan for one namespace, for example because the
+namespace is terminating, becomes a plan blocker (`ConsumerResolutionFailed`,
+`NamespaceTerminating`, or `StoragePlanWriteFailed`) and the remaining namespaces are still
+planned. Generic ephemeral volumes are not planned because they are recreated with their Pod.
+
 ### VSpherePlatformFailureDomainSpec (from openshift/api configv1)
 
 | Field | Type | Required | Description |
@@ -190,9 +210,13 @@ stops new probe VM cleanup requests; any remaining probes must be handled during
 
 ### Condition Reasons
 
-`Progressing`, `Completed`, `Failed`, `Paused`, `UnsupportedName`, `UnsupportedNamespace`, `DeletionBlocked`, `MappingRejected`, `Planning`, `PlanComplete`, `PlanBlocked`, `PlanningAfterStart`, `NotConfigured`
+`Progressing`, `Completed`, `Failed`, `Paused`, `UnsupportedName`, `UnsupportedNamespace`, `DeletionBlocked`, `MappingRejected`, `Planning`, `PlanComplete`, `PlanBlocked`, `PlanningAfterStart`, `NotConfigured`, `StorageExecutionUnsupported`
 
 `Paused` is applied to the `Ready` condition while `spec.state` is `Paused` (message explains how to resume); it is cleared and replaced with `Progressing` when the migration is resumed.
+
+`PlanningAfterStart` is applied to `Ready` when `spec.state` is set to `Planning` or `Pending` after the migration has started, including after completion.
+
+`StorageExecutionUnsupported` is applied to `Ready` when `migrateStorage` is `true` and the workflow reaches the first disruptive condition, because storage migration execution is not implemented yet.
 
 ## Print Columns
 

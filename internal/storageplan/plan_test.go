@@ -10,7 +10,9 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 
@@ -120,6 +122,10 @@ func TestVolumeBlockers(t *testing.T) {
 			in.Migration.Spec.FailureDomains = append(in.Migration.Spec.FailureDomains, configv1.VSpherePlatformFailureDomainSpec{Name: "other"})
 		}},
 		{"invalid override", "TargetFailureDomainInvalid", func(in *Input) { in.PVCs[0].Annotations = map[string]string{TargetFailureDomainAnnotation: "invalid"} }},
+		{"missing handle", "SourceVolumeHandleMissing", func(in *Input) {
+			in.PVs[0].Spec.CSI = nil
+			in.PVs[0].Annotations = map[string]string{"pv.kubernetes.io/migrated-to": Driver}
+		}},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -162,6 +168,10 @@ func TestClusterBlockers(t *testing.T) {
 		{"platform namespace", "PlatformNamespaceUnsupported", func(in *Input) {
 			in.PVCs[0].Namespace = "openshift-user-workload-monitoring"
 			in.PVs[0].Spec.ClaimRef.Namespace = in.PVCs[0].Namespace
+		}},
+		{"missing infrastructure", "TopologyUnavailable", func(in *Input) { in.Infrastructure = nil }},
+		{"missing mapped class", "StorageClassMappingTargetMissing", func(in *Input) {
+			in.Migration.Spec.Storage.StorageClassMapping = []migrationv1alpha1.StorageClassMapping{{Source: "class", Target: "missing"}}
 		}},
 	}
 	for _, tt := range cases {
@@ -396,5 +406,53 @@ func TestAffinityAlternativeWithoutTopology(t *testing.T) {
 	}}}}}
 	if got := sourceFailureDomain(pv, sources); got != "" {
 		t.Fatalf("SourceFailureDomain ignored alternative: %s", got)
+	}
+}
+
+func TestStorageClassMappingExistingTarget(t *testing.T) {
+	in := validInput()
+	in.Migration.Spec.Storage.StorageClassMapping = []migrationv1alpha1.StorageClassMapping{{Source: "legacy", Target: "class"}}
+	if blockers := Build(in).Blockers; len(blockers) != 0 {
+		t.Fatalf("Build: unexpected blockers for an existing mapped target: %+v", blockers)
+	}
+	in.Migration.Spec.Storage = nil
+	if blockers := Build(in).Blockers; len(blockers) != 0 {
+		t.Fatalf("Build: unexpected blockers without storage settings: %+v", blockers)
+	}
+}
+
+func TestEphemeralVolumesAreNotPlanned(t *testing.T) {
+	in := validInput()
+	in.PVCs[0].OwnerReferences = []metav1.OwnerReference{{APIVersion: "v1", Kind: "Pod", Name: "pod", UID: "pod-uid", Controller: ptr.To(true)}}
+	plan := Build(in)
+	if len(plan.Namespaces) != 0 || len(plan.Blockers) != 0 {
+		t.Fatalf("Build: planned a generic ephemeral volume: %+v", plan)
+	}
+	// A non-controller Pod reference does not make the claim ephemeral.
+	in.PVCs[0].OwnerReferences[0].Controller = nil
+	if plan := Build(in); plan.Namespaces["app"] == nil {
+		t.Fatalf("Build: skipped a durable volume with an incidental Pod owner: %+v", plan)
+	}
+}
+
+func TestConsumersStopAtDeletedOwner(t *testing.T) {
+	in := validInput()
+	volumes := Build(in).Namespaces["app"].Volumes
+	rsRef := metav1.OwnerReference{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "rs", UID: "rs-uid", Controller: ptr.To(true)}
+	pod := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod", Namespace: "app", UID: "pod-uid", OwnerReferences: []metav1.OwnerReference{rsRef}},
+		Spec: corev1.PodSpec{Volumes: []corev1.Volume{{VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"},
+		}}}},
+	}
+	lookup := func(_ context.Context, _ string, ref metav1.OwnerReference) (metav1.Object, error) {
+		return nil, apierrors.NewNotFound(schema.GroupResource{Group: "apps", Resource: "replicasets"}, ref.Name)
+	}
+	got, err := Consumers(context.Background(), []corev1.Pod{pod}, "app", volumes, lookup)
+	if err != nil {
+		t.Fatalf("Consumers: %v", err)
+	}
+	if len(got) != 1 || got[0].Kind != rsRef.Kind || got[0].UID != rsRef.UID {
+		t.Fatalf("Consumers: %+v, want the deleted ReplicaSet reference", got)
 	}
 }

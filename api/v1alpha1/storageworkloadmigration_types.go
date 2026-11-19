@@ -69,10 +69,12 @@ type StorageWorkloadMigrationSourcePV struct {
 	// +kubebuilder:validation:Type=string
 	UID types.UID `json:"uid"`
 
-	// VolumeHandle identifies the source CSI volume.
-	// +required
+	// VolumeHandle identifies the source CSI volume. It is omitted when the
+	// PV has no CSI or in-tree vSphere source, and the volume is blocked with
+	// SourceVolumeHandleMissing.
+	// +optional
 	// +kubebuilder:validation:MinLength=1
-	VolumeHandle string `json:"volumeHandle"`
+	VolumeHandle string `json:"volumeHandle,omitempty"`
 }
 
 // StorageWorkloadMigrationConditionPlanned reports whether the inventory has blockers.

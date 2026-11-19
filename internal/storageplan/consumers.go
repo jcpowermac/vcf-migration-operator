@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -17,6 +18,7 @@ import (
 type OwnerLookup func(context.Context, string, metav1.OwnerReference) (metav1.Object, error)
 
 // Consumers follows controller references to the outermost supported controller or operator CR.
+// Callers should pass only the namespace's Pods; others are ignored.
 func Consumers(ctx context.Context, pods []corev1.Pod, namespace string, volumes []migrationv1alpha1.StorageWorkloadMigrationVolume, lookup OwnerLookup) ([]migrationv1alpha1.StorageWorkloadMigrationConsumer, error) {
 	found := map[types.UID]migrationv1alpha1.StorageWorkloadMigrationConsumer{}
 	for i := range pods {
@@ -48,35 +50,49 @@ func isVolumeConsumer(pod *corev1.Pod, namespace string, volumes []migrationv1al
 // resolveConsumer walks the Pod's controller owner chain and returns the outermost
 // owner. The walk stops at the first owner kind that cannot be fetched.
 func resolveConsumer(ctx context.Context, pod *corev1.Pod, lookup OwnerLookup) (migrationv1alpha1.StorageWorkloadMigrationConsumer, error) {
+
 	consumer := migrationv1alpha1.StorageWorkloadMigrationConsumer{APIVersion: "v1", Kind: "Pod", Name: pod.Name, UID: pod.UID}
 
 	var owned metav1.Object = pod
 	seen := map[types.UID]bool{pod.UID: true}
+
 	for {
 		owner := ControllerOwner(owned)
 		if owner == nil {
 			return consumer, nil
 		}
+
 		if seen[owner.UID] {
 			return migrationv1alpha1.StorageWorkloadMigrationConsumer{}, fmt.Errorf("following cyclic owner reference for Pod %s/%s", pod.Namespace, pod.Name)
 		}
+
 		seen[owner.UID] = true
 		consumer = consumerFromOwner(owner)
 
 		if !supportedOwner(*owner) {
 			return consumer, nil
 		}
+
 		next, err := fetchOwner(ctx, pod.Namespace, owner, lookup)
 		if err != nil {
 			return migrationv1alpha1.StorageWorkloadMigrationConsumer{}, err
+		}
+		// A deleted owner ends the walk; its reference is the consumer.
+		if next == nil {
+			return consumer, nil
 		}
 		owned = next
 	}
 }
 
 // fetchOwner reads an owner and verifies it is the object the reference points to.
+// It returns nil without an error when the owner no longer exists, which is
+// common while a deleted workload's Pods are still terminating.
 func fetchOwner(ctx context.Context, namespace string, owner *metav1.OwnerReference, lookup OwnerLookup) (metav1.Object, error) {
 	obj, err := lookup(ctx, namespace, *owner)
+	if apierrors.IsNotFound(err) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("getting %s %s/%s: %w", owner.Kind, namespace, owner.Name, err)
 	}

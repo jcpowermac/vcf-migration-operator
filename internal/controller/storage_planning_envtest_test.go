@@ -95,4 +95,35 @@ var _ = Describe("Storage planning against the API server", func() {
 		Expect(storage.ObservedGeneration).To(Equal(m.Generation))
 		Expect(m.Status.StartTime).To(BeNil())
 	})
+
+	It("rejects enabling migrateStorage after the migration has started", func() {
+		_, m := planningFixture(GinkgoT())
+		m.UID = ""
+		m.ResourceVersion = ""
+		m.Generation = 0
+		m.Spec.MigrateStorage = false
+		m.Spec.Storage = nil
+		m.Status = migrationv1alpha1.VmwareCloudFoundationMigrationStatus{}
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+		DeferCleanup(func() {
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(m), m)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+			releaseMigrationFinalizer(ctx, m)
+		})
+
+		// Before the start, storage migration can be toggled freely.
+		m.Spec.MigrateStorage = true
+		Expect(k8sClient.Update(ctx, m)).To(Succeed())
+		m.Spec.MigrateStorage = false
+		Expect(k8sClient.Update(ctx, m)).To(Succeed())
+
+		now := metav1.Now()
+		m.Status.StartTime = &now
+		Expect(k8sClient.Status().Update(ctx, m)).To(Succeed())
+
+		m.Spec.MigrateStorage = true
+		err := k8sClient.Update(ctx, m)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "Update error: %v", err)
+		Expect(err).To(MatchError(ContainSubstring("migrateStorage cannot be enabled after the migration has started")))
+	})
 })

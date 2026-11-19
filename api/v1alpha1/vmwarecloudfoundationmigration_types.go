@@ -155,6 +155,7 @@ type VmwareCloudFoundationMigrationSpec struct {
 	// with compute nodes. When false, vSphere CSI persistent volumes block the
 	// migration during preflight.
 	// When omitted, defaults to false.
+	// It cannot be enabled once status.startTime is set.
 	// +optional
 	// +kubebuilder:default=false
 	MigrateStorage bool `json:"migrateStorage,omitempty"`
@@ -1125,6 +1126,7 @@ const (
 // VmwareCloudFoundationMigration is the Schema for the vmwarecloudfoundationmigrations API.
 // It orchestrates migration of an OpenShift cluster from one vCenter to another.
 // +kubebuilder:validation:XValidation:rule="has(self.spec.failureDomainMappings) || size(self.spec.failureDomains) == 1 || (has(self.status) && has(self.status.failureDomainMappings) && size(self.status.failureDomainMappings) > 0)",message="failureDomainMappings is required when more than one failureDomain is defined until effective mappings are recorded"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.startTime) || !has(self.spec.migrateStorage) || !self.spec.migrateStorage || (has(oldSelf.spec.migrateStorage) && oldSelf.spec.migrateStorage)",message="migrateStorage cannot be enabled after the migration has started"
 type VmwareCloudFoundationMigration struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

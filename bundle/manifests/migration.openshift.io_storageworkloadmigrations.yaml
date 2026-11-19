@@ -233,13 +233,15 @@ spec:
                           minLength: 1
                           type: string
                         volumeHandle:
-                          description: VolumeHandle identifies the source CSI volume.
+                          description: |-
+                            VolumeHandle identifies the source CSI volume. It is omitted when the
+                            PV has no CSI or in-tree vSphere source, and the volume is blocked with
+                            SourceVolumeHandleMissing.
                           minLength: 1
                           type: string
                       required:
                       - name
                       - uid
-                      - volumeHandle
                       type: object
                     sourcePVC:
                       description: SourcePVC identifies the source PVC in this workload

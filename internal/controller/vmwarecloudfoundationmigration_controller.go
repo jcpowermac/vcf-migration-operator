@@ -37,7 +37,6 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/events"
@@ -246,6 +245,11 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 		}
 		adminAllowed := migration.Annotations[migrationv1alpha1.AnnotationAllowDeletion] == "true"
 		if complete || adminAllowed {
+			// StorageWorkloadMigrations live in workload namespaces and cannot be
+			// owned by this namespaced object, so release them explicitly.
+			if err := r.deleteStaleStoragePlans(ctx, migration, nil); err != nil {
+				return ctrl.Result{}, fmt.Errorf("releasing storage plans: %w", err)
+			}
 			if err := r.updateRetentionFinalizer(ctx, migration); err != nil {
 				return ctrl.Result{}, fmt.Errorf("removing finalizer %s: %w", migrationv1alpha1.FinalizerName, err)
 			}
@@ -367,6 +371,12 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 			return ctrl.Result{RequeueAfter: planningResync}, r.updateStatus(ctx, migration, baseStatus)
 		}
 
+		// Check before skipping completed conditions: storage enabled on a
+		// started or completed migration must not fall through to completion.
+		if r.blockUnsupportedStorageExecution(migration, condType) {
+			return ctrl.Result{RequeueAfter: planningResync}, r.updateStatus(ctx, migration, baseStatus)
+		}
+
 		// skip the current handler of condition for now if it is already complete
 		// TODO: We need to revisit this for storage migration again
 		skipCondition := isConditionComplete(migration, condType)
@@ -392,9 +402,6 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 				return ctrl.Result{}, nil
 			}
 			return ctrl.Result{}, err
-		}
-		if r.blockUnsupportedStorageExecution(migration, condType) {
-			return ctrl.Result{RequeueAfter: planningResync}, r.updateStatus(ctx, migration, baseStatus)
 		}
 		// Persist the execution boundary only after current-generation planning passes.
 		if !isPlanningCondition(condType) {
@@ -431,9 +438,6 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 
 		if err != nil {
 			return ctrl.Result{}, err
-		}
-		if isPlanningCondition(condType) && result.IsZero() {
-			result.RequeueAfter = time.Millisecond
 		}
 		return result, nil
 	}
@@ -1830,6 +1834,11 @@ func mergeStatusConditions(ctx context.Context, migration, latest *migrationv1al
 			}
 		}
 
+		// A newer spec rejected on a completed migration must stay visible.
+		if keepExistingSuccess && isReadyRejectionOfNewerSpec(cond, *existingCond) {
+			keepExistingSuccess = false
+		}
+
 		if keepExistingSuccess {
 			log.V(1).Info("keeping committed condition success over stale update", "condition", cond.Type)
 			continue
@@ -1840,6 +1849,25 @@ func mergeStatusConditions(ctx context.Context, migration, latest *migrationv1al
 		apimeta.SetStatusCondition(&latest.Status.Conditions, cond)
 	}
 	return hasChanges
+}
+
+// isReadyRejectionOfNewerSpec reports whether cond rejects a spec generation
+// newer than the one that recorded existing Ready success. Such rejections
+// (Planning after start, or enabling storage after start) are not stale
+// failures and must replace the committed success.
+func isReadyRejectionOfNewerSpec(cond, existing metav1.Condition) bool {
+	if cond.Type != migrationv1alpha1.ConditionReady {
+		return false
+	}
+	if cond.ObservedGeneration <= existing.ObservedGeneration {
+		return false
+	}
+	switch cond.Reason {
+	case migrationv1alpha1.ReasonPlanningAfterStart, migrationv1alpha1.ReasonStorageExecutionUnsupported:
+		return true
+	default:
+		return false
+	}
 }
 
 // updateWorkloadProgress calculates and populates migration.Status.Progress with
@@ -1952,11 +1980,8 @@ func (r *VmwareCloudFoundationMigrationReconciler) updateWorkloadProgress(
 func (r *VmwareCloudFoundationMigrationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&migrationv1alpha1.VmwareCloudFoundationMigration{}).
-		Watches(&corev1.PersistentVolumeClaim{}, handler.EnqueueRequestsFromMapFunc(func(_ context.Context, _ client.Object) []reconcile.Request {
-			return []reconcile.Request{{NamespacedName: types.NamespacedName{
-				Name: migrationv1alpha1.SingletonName, Namespace: migrationv1alpha1.SingletonNamespace,
-			}}}
-		}), builder.OnlyMetadata).
+		Watches(&corev1.PersistentVolumeClaim{}, handler.EnqueueRequestsFromMapFunc(r.mapPVCToStoragePlanning),
+			builder.OnlyMetadata, builder.WithPredicates(pvcMetadataChangedPredicate())).
 		Named("vmwarecloudfoundationmigration").
 		WithOptions(controller.Options{
 			RateLimiter: workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](5*time.Second, 5*time.Minute),

@@ -48,8 +48,8 @@ type NamespacePlan struct {
 
 // Plan contains namespace inventories and cluster-wide blockers.
 type Plan struct {
-	Namespaces map[string]*NamespacePlan
-	Blockers   []migrationv1alpha1.StorageWorkloadMigrationBlocker
+	NamespaceMigrationPlanInstances map[string]*NamespacePlan
+	Blockers                        []migrationv1alpha1.StorageWorkloadMigrationBlocker
 }
 
 // AddBlocker adds one message per reason, matching the API's list-map semantics.
@@ -73,7 +73,7 @@ func blocker(reason, message string) migrationv1alpha1.StorageWorkloadMigrationB
 
 // Build computes volume blockers, target placement, and Pod topology compatibility.
 func Build(in Input) *Plan {
-	plan := &Plan{Namespaces: map[string]*NamespacePlan{}}
+	plan := &Plan{NamespaceMigrationPlanInstances: map[string]*NamespacePlan{}}
 	pvcs := map[string]*corev1.PersistentVolumeClaim{}
 	for i := range in.PVCs {
 		p := &in.PVCs[i]
@@ -86,7 +86,10 @@ func Build(in Input) *Plan {
 	}
 
 	var sources []configv1.VSpherePlatformFailureDomainSpec
-	if in.Infrastructure.Spec.PlatformSpec.VSphere != nil {
+	switch {
+	case in.Infrastructure == nil:
+		plan.Blockers = append(plan.Blockers, blocker("TopologyUnavailable", "source Infrastructure is unavailable; source failure domains cannot be resolved"))
+	case in.Infrastructure.Spec.PlatformSpec.VSphere != nil:
 		sources = in.Infrastructure.Spec.PlatformSpec.VSphere.FailureDomains
 	}
 
@@ -97,6 +100,7 @@ func Build(in Input) *Plan {
 			}
 		}
 	}
+	checkStorageClassMapping(plan, in.Migration.Spec.Storage, classes)
 	if len(in.Migration.Spec.FailureDomains) == 1 && len(in.TopologyCategories) > 0 && !standardCategories(in.TopologyCategories) {
 		plan.Blockers = append(plan.Blockers, blocker("TopologyCategoriesConflict", "use topology categories openshift-zone and openshift-region"))
 	}
@@ -119,11 +123,16 @@ func Build(in Input) *Plan {
 			plan.Blockers = append(plan.Blockers, blocker("PVCBindingMismatch", fmt.Sprintf("PV %s does not have a matching PVC binding and UID", pv.Name)))
 			continue
 		}
+		// Generic ephemeral volumes are deleted with their Pod and recreated
+		// on reschedule, so they hold no data to migrate.
+		if isEphemeralVolumeClaim(pvc) {
+			continue
+		}
 
-		nsPlan := plan.Namespaces[pvc.Namespace]
+		nsPlan := plan.NamespaceMigrationPlanInstances[pvc.Namespace]
 		if nsPlan == nil {
 			nsPlan = &NamespacePlan{}
-			plan.Namespaces[pvc.Namespace] = nsPlan
+			plan.NamespaceMigrationPlanInstances[pvc.Namespace] = nsPlan
 			if PlatformNamespaceUnsupported(pvc.Namespace) {
 				plan.Blockers = append(plan.Blockers, blocker("PlatformNamespaceUnsupported", fmt.Sprintf("namespace %s requires an unsupported platform quiesce procedure", pvc.Namespace)))
 			}
@@ -134,7 +143,7 @@ func Build(in Input) *Plan {
 	}
 
 	checkPodTopology(plan, in.Pods)
-	for _, nsPlan := range plan.Namespaces {
+	for _, nsPlan := range plan.NamespaceMigrationPlanInstances {
 		sort.Slice(nsPlan.Volumes, func(i, j int) bool { return nsPlan.Volumes[i].SourcePVC.Name < nsPlan.Volumes[j].SourcePVC.Name })
 	}
 	sort.Slice(plan.Blockers, func(i, j int) bool {
@@ -146,6 +155,28 @@ func Build(in Input) *Plan {
 // IsVSphereVolume identifies native CSI, in-tree, and CSI-migrated vSphere volumes for inventory.
 func IsVSphereVolume(pv *corev1.PersistentVolume) bool {
 	return pv.Spec.CSI != nil && pv.Spec.CSI.Driver == Driver || pv.Spec.VsphereVolume != nil || pv.Annotations["pv.kubernetes.io/migrated-to"] == Driver
+}
+
+// checkStorageClassMapping blocks the plan when a mapped target StorageClass
+// does not exist. Planning does not apply the mapping yet; this only ensures
+// that a configured mapping refers to classes that can provision targets.
+func checkStorageClassMapping(plan *Plan, storage *migrationv1alpha1.StorageMigrationSpec, classes map[string]*storagev1.StorageClass) {
+	if storage == nil {
+		return
+	}
+	for _, mapping := range storage.StorageClassMapping {
+		if classes[mapping.Target] != nil {
+			continue
+		}
+		plan.Blockers = append(plan.Blockers, blocker("StorageClassMappingTargetMissing", fmt.Sprintf("target StorageClass %s for source StorageClass %s does not exist", mapping.Target, mapping.Source)))
+	}
+}
+
+// isEphemeralVolumeClaim reports whether a PVC was created for a Pod's generic
+// ephemeral volume, which the Pod controls.
+func isEphemeralVolumeClaim(pvc *corev1.PersistentVolumeClaim) bool {
+	owner := ControllerOwner(pvc)
+	return owner != nil && owner.APIVersion == "v1" && owner.Kind == "Pod"
 }
 
 // supportedPlatformNamespaces lists platform namespaces that have a quiesce plan.
@@ -296,6 +327,10 @@ func planVolume(m *migrationv1alpha1.VmwareCloudFoundationMigration, pv *corev1.
 		},
 	}
 
+	if handle == "" {
+		AddBlocker(&v, "SourceVolumeHandleMissing", fmt.Sprintf("PV %s has no CSI volume handle or in-tree vSphere volume path", pv.Name))
+	}
+
 	target, err := targetFailureDomain(m, pvc, sourceFailureDomain(pv, sources))
 
 	v.TargetFailureDomain = target
@@ -335,7 +370,7 @@ func checkPodTopology(plan *Plan, pods []corev1.Pod) {
 		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
 			continue
 		}
-		nsPlan := plan.Namespaces[pod.Namespace]
+		nsPlan := plan.NamespaceMigrationPlanInstances[pod.Namespace]
 		if nsPlan == nil {
 			continue
 		}
