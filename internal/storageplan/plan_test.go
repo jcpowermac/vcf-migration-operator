@@ -132,7 +132,7 @@ func TestVolumeBlockers(t *testing.T) {
 			in := validInput()
 			tt.change(&in)
 			plan := Build(in)
-			v := plan.Namespaces["app"].Volumes[0]
+			v := plan.NamespaceMigrationPlanInstances["app"].Volumes[0]
 			if tt.reason == "" {
 				if len(v.Blockers) != 0 || v.TargetFailureDomain != "target" {
 					t.Fatalf("Build: unexpected plan %+v", v)
@@ -277,7 +277,7 @@ func TestIncompatiblePodTopology(t *testing.T) {
 				},
 			}
 			plan := Build(in)
-			for _, v := range plan.Namespaces["app"].Volumes {
+			for _, v := range plan.NamespaceMigrationPlanInstances["app"].Volumes {
 				blocked := len(v.Blockers) > 0
 				want := phase != corev1.PodSucceeded && phase != corev1.PodFailed
 				if blocked != want {
@@ -290,7 +290,7 @@ func TestIncompatiblePodTopology(t *testing.T) {
 
 func TestConsumers(t *testing.T) {
 	in := validInput()
-	volumes := Build(in).Namespaces["app"].Volumes
+	volumes := Build(in).NamespaceMigrationPlanInstances["app"].Volumes
 	owner := func(api, kind, name, uid string) metav1.OwnerReference {
 		return metav1.OwnerReference{APIVersion: api, Kind: kind, Name: name, UID: types.UID(uid), Controller: ptr.To(true)}
 	}
@@ -350,7 +350,7 @@ func TestConsumerOwnerChains(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			in := validInput()
-			volumes := Build(in).Namespaces["app"].Volumes
+			volumes := Build(in).NamespaceMigrationPlanInstances["app"].Volumes
 			ref := metav1.OwnerReference{APIVersion: tt.api, Kind: tt.kind, Name: "owner", UID: "owner-uid", Controller: ptr.To(true)}
 			pod := corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
@@ -425,19 +425,19 @@ func TestEphemeralVolumesAreNotPlanned(t *testing.T) {
 	in := validInput()
 	in.PVCs[0].OwnerReferences = []metav1.OwnerReference{{APIVersion: "v1", Kind: "Pod", Name: "pod", UID: "pod-uid", Controller: ptr.To(true)}}
 	plan := Build(in)
-	if len(plan.Namespaces) != 0 || len(plan.Blockers) != 0 {
+	if len(plan.NamespaceMigrationPlanInstances) != 0 || len(plan.Blockers) != 0 {
 		t.Fatalf("Build: planned a generic ephemeral volume: %+v", plan)
 	}
 	// A non-controller Pod reference does not make the claim ephemeral.
 	in.PVCs[0].OwnerReferences[0].Controller = nil
-	if plan := Build(in); plan.Namespaces["app"] == nil {
+	if plan := Build(in); plan.NamespaceMigrationPlanInstances["app"] == nil {
 		t.Fatalf("Build: skipped a durable volume with an incidental Pod owner: %+v", plan)
 	}
 }
 
 func TestConsumersStopAtDeletedOwner(t *testing.T) {
 	in := validInput()
-	volumes := Build(in).Namespaces["app"].Volumes
+	volumes := Build(in).NamespaceMigrationPlanInstances["app"].Volumes
 	rsRef := metav1.OwnerReference{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "rs", UID: "rs-uid", Controller: ptr.To(true)}
 	pod := corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "pod", Namespace: "app", UID: "pod-uid", OwnerReferences: []metav1.OwnerReference{rsRef}},
