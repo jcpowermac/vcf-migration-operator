@@ -271,13 +271,15 @@ func (r *VmwareCloudFoundationMigrationReconciler) Reconcile(ctx context.Context
 	return r.reconcileWorkflow(ctx, migration, baseStatus)
 }
 
-// reconcileState handles planning, pause, and resume conditions before the workflow runs.
+// runStateGuard handles planning, pause, and resume conditions before the workflow runs.
 // It reports whether processing must stop, including when persisting status fails.
-func (r *VmwareCloudFoundationMigrationReconciler) reconcileState(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus) (bool, error) {
+func (r *VmwareCloudFoundationMigrationReconciler) runStateGuard(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus) (bool, error) {
 	log := klog.FromContext(ctx)
+
 	state := migration.Spec.State
-	if (state == migrationv1alpha1.MigrationStatePlanning || state == migrationv1alpha1.MigrationStatePending || state == "") && migration.Status.StartTime != nil {
-		r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPlanningAfterStart, "Migration has started; set spec.state to Running or Paused")
+
+	if isMigrationResetAfterStart(migration) {
+		r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPlanningAfterStart, "To start migration; set spec.state to Running")
 		return true, r.updateStatus(ctx, migration, baseStatus)
 	}
 
@@ -296,6 +298,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileState(ctx context.Co
 		}
 		return true, nil
 	}
+
 	if state == migrationv1alpha1.MigrationStatePlanning {
 		r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPlanning, "Running non-disruptive migration checks")
 	}
@@ -313,6 +316,15 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileState(ctx context.Co
 	}
 
 	return false, nil
+}
+
+func isMigrationResetAfterStart(migration *migrationv1alpha1.VmwareCloudFoundationMigration) bool {
+	state := migration.Spec.State
+
+	if (state == migrationv1alpha1.MigrationStatePlanning || state == migrationv1alpha1.MigrationStatePending || state == "") && migration.Status.StartTime != nil {
+		return true
+	}
+	return false
 }
 
 // markMigrationStarted persists the first StartTime and records the
@@ -336,7 +348,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) markMigrationStarted(ctx cont
 func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context.Context, migration *migrationv1alpha1.VmwareCloudFoundationMigration, baseStatus migrationv1alpha1.VmwareCloudFoundationMigrationStatus) (ctrl.Result, error) {
 	log := klog.FromContext(ctx)
 
-	if stop, err := r.reconcileState(ctx, migration, baseStatus); stop {
+	if stop, err := r.runStateGuard(ctx, migration, baseStatus); stop {
 		return ctrl.Result{}, err
 	}
 	state := migration.Spec.State
