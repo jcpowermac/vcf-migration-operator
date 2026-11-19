@@ -42,7 +42,7 @@ var _ = Describe("Storage planning against the API server", func() {
 		Expect(result.RequeueAfter).To(Equal(planningResync))
 		Expect(k8sClient.Get(ctx, req.NamespacedName, m)).To(Succeed())
 		Expect(m.Status.StartTime).To(BeNil())
-		Expect(apimeta.FindStatusCondition(m.Status.Conditions, migrationv1alpha1.ConditionReady).Reason).To(Equal(migrationv1alpha1.ReasonPlanComplete))
+		Expect(apimeta.FindStatusCondition(m.Status.Conditions, migrationv1alpha1.ConditionReady).Reason).To(Equal(migrationv1alpha1.ReasonWaitingOnRunningAfterPlanning))
 		Expect(apimeta.FindStatusCondition(m.Status.Conditions, migrationv1alpha1.ConditionDestinationInitialized)).To(BeNil())
 		swm := &migrationv1alpha1.StorageWorkloadMigration{}
 		swmKey := client.ObjectKey{Namespace: "app", Name: storagePlanName(m)}

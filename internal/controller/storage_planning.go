@@ -47,7 +47,7 @@ const maxStorageBlockerMessageBytes = 1024
 
 func isPlanningOrPausedReason(reason string) bool {
 	switch reason {
-	case migrationv1alpha1.ReasonPaused, migrationv1alpha1.ReasonPlanning, migrationv1alpha1.ReasonPlanComplete, migrationv1alpha1.ReasonPlanBlocked, migrationv1alpha1.ReasonPlanningAfterStart:
+	case migrationv1alpha1.ReasonPaused, migrationv1alpha1.ReasonPlanning, migrationv1alpha1.ReasonWaitingOnRunningAfterPlanning, migrationv1alpha1.ReasonPlanBlocked, migrationv1alpha1.ReasonPlanningAfterStart:
 		return true
 	default:
 		return false

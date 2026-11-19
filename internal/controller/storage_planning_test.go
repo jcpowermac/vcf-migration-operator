@@ -142,7 +142,7 @@ func requirePlanCondition(t *testing.T, m *migrationv1alpha1.VmwareCloudFoundati
 func TestPlanningBoundaryAndRefresh(t *testing.T) {
 	r, m := planningFixture(t)
 	got := reconcilePlan(t, r, m)
-	requirePlanCondition(t, got, migrationv1alpha1.ConditionReady, migrationv1alpha1.ReasonPlanComplete, metav1.ConditionFalse)
+	requirePlanCondition(t, got, migrationv1alpha1.ConditionReady, migrationv1alpha1.ReasonWaitingOnRunningAfterPlanning, metav1.ConditionFalse)
 	if got.Status.StartTime != nil || apimeta.FindStatusCondition(got.Status.Conditions, migrationv1alpha1.ConditionDestinationInitialized) != nil {
 		t.Fatal("Planning crossed disruptive boundary")
 	}
@@ -174,7 +174,7 @@ func TestPlanningBoundaryAndRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	got = reconcilePlan(t, r, m)
-	requirePlanCondition(t, got, migrationv1alpha1.ConditionReady, migrationv1alpha1.ReasonPlanComplete, metav1.ConditionFalse)
+	requirePlanCondition(t, got, migrationv1alpha1.ConditionReady, migrationv1alpha1.ReasonWaitingOnRunningAfterPlanning, metav1.ConditionFalse)
 }
 
 func TestPlanningStopsWhenPermissionChanges(t *testing.T) {
@@ -396,7 +396,7 @@ func TestRunningStorageExecutionUnsupported(t *testing.T) {
 			}
 			if tt.planFirst {
 				m = reconcilePlan(t, r, m)
-				requirePlanCondition(t, m, migrationv1alpha1.ConditionReady, migrationv1alpha1.ReasonPlanComplete, metav1.ConditionFalse)
+				requirePlanCondition(t, m, migrationv1alpha1.ConditionReady, migrationv1alpha1.ReasonWaitingOnRunningAfterPlanning, metav1.ConditionFalse)
 			}
 			m.Spec.State = migrationv1alpha1.MigrationStateRunning
 			if err := r.Update(ctx, m); err != nil {

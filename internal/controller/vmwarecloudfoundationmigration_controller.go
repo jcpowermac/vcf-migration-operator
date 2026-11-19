@@ -379,7 +379,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) reconcileWorkflow(ctx context
 	for _, condType := range conditionOrder {
 
 		if state == migrationv1alpha1.MigrationStatePlanning && !isPlanningCondition(condType) {
-			r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPlanComplete, "Plan has no blockers; set spec.state to Running to start")
+			r.setCondition(migration, migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonWaitingOnRunningAfterPlanning, "Plan has no blockers; set spec.state to Running to start")
 			return ctrl.Result{RequeueAfter: planningResync}, r.updateStatus(ctx, migration, baseStatus)
 		}
 

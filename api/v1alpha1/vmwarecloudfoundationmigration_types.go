@@ -1076,8 +1076,8 @@ const (
 const (
 	// ReasonPlanning indicates non-disruptive checks are running.
 	ReasonPlanning = "Planning"
-	// ReasonPlanComplete indicates the plan is ready for customer review.
-	ReasonPlanComplete = "PlanComplete"
+	// ReasonWaitingOnRunningAfterPlanning indicates the plan is ready for customer review.
+	ReasonWaitingOnRunningAfterPlanning = "WaitingOnRunningAfterPlanning"
 	// ReasonPlanBlocked indicates storage blockers prevent migration.
 	ReasonPlanBlocked = "PlanBlocked"
 	// ReasonStorageExecutionUnsupported indicates storage planning is available but execution is not implemented.

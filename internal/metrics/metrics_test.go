@@ -21,7 +21,7 @@ func TestPhaseFromConditions(t *testing.T) {
 		want       string
 	}{
 		{name: "no conditions is Pending", want: "Pending"},
-		{name: "planning review pause", conditions: []metav1.Condition{cond(migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPlanComplete)}, want: "PlanComplete"},
+		{name: "planning review pause", conditions: []metav1.Condition{cond(migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonWaitingOnRunningAfterPlanning)}, want: "WaitingOnRunningAfterPlanning"},
 		{name: "planning checks", conditions: []metav1.Condition{cond(migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPlanning)}, want: "Planning"},
 		{name: "planning after start", conditions: []metav1.Condition{cond(migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPlanningAfterStart)}, want: "Planning"},
 		{

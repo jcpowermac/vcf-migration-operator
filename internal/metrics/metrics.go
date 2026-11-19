@@ -160,8 +160,8 @@ func PhaseFromConditions(status *migrationv1alpha1.VmwareCloudFoundationMigratio
 			return "Paused"
 		case migrationv1alpha1.ReasonPlanning, migrationv1alpha1.ReasonPlanningAfterStart:
 			return "Planning"
-		case migrationv1alpha1.ReasonPlanComplete:
-			return "PlanComplete"
+		case migrationv1alpha1.ReasonWaitingOnRunningAfterPlanning:
+			return "WaitingOnRunningAfterPlanning"
 		case migrationv1alpha1.ReasonPlanBlocked, migrationv1alpha1.ReasonStorageExecutionUnsupported:
 			// Storage execution has not started, so later stages never ran.
 			return migrationv1alpha1.ConditionStoragePlanned
