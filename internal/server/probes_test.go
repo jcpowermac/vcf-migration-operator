@@ -32,10 +32,13 @@ func TestNewProbeHandlerSetsContentTypeOptions(t *testing.T) {
 
 			handler.ServeHTTP(rec, req)
 
-			if rec.Code != http.StatusOK {
-				t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+			res := rec.Result()
+			defer func() { _ = res.Body.Close() }()
+
+			if res.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusOK)
 			}
-			if got := rec.Header().Get(contentTypeOptionsHeader); got != contentTypeOptionsValue {
+			if got := res.Header.Get(contentTypeOptionsHeader); got != contentTypeOptionsValue {
 				t.Fatalf("%s = %q, want %q", contentTypeOptionsHeader, got, contentTypeOptionsValue)
 			}
 			if got := rec.Body.String(); got != "ok" {
@@ -67,10 +70,13 @@ func TestNewProbeHandlerSetsHeaderOnFailure(t *testing.T) {
 
 			handler.ServeHTTP(rec, req)
 
-			if rec.Code != http.StatusInternalServerError {
-				t.Fatalf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+			res := rec.Result()
+			defer func() { _ = res.Body.Close() }()
+
+			if res.StatusCode != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusInternalServerError)
 			}
-			if got := rec.Header().Get(contentTypeOptionsHeader); got != contentTypeOptionsValue {
+			if got := res.Header.Get(contentTypeOptionsHeader); got != contentTypeOptionsValue {
 				t.Fatalf("%s = %q, want %q", contentTypeOptionsHeader, got, contentTypeOptionsValue)
 			}
 		})
@@ -88,7 +94,10 @@ func TestNewProbeHandlerUnknownPath(t *testing.T) {
 
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	res := rec.Result()
+	defer func() { _ = res.Body.Close() }()
+
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusNotFound)
 	}
 }

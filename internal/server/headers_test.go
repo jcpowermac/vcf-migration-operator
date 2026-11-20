@@ -35,10 +35,13 @@ func TestWithContentTypeOptions(t *testing.T) {
 
 			WithContentTypeOptions(tt.handler).ServeHTTP(rec, req)
 
-			if got := rec.Code; got != tt.want {
-				t.Fatalf("status = %d, want %d", got, tt.want)
+			res := rec.Result()
+			defer func() { _ = res.Body.Close() }()
+
+			if res.StatusCode != tt.want {
+				t.Fatalf("status = %d, want %d", res.StatusCode, tt.want)
 			}
-			if got := rec.Header().Get(contentTypeOptionsHeader); got != contentTypeOptionsValue {
+			if got := res.Header.Get(contentTypeOptionsHeader); got != contentTypeOptionsValue {
 				t.Fatalf("%s = %q, want %q", contentTypeOptionsHeader, got, contentTypeOptionsValue)
 			}
 		})
@@ -59,6 +62,10 @@ func TestWithStrictTransportSecurity(t *testing.T) {
 			want: http.StatusOK,
 		},
 		{
+			// Mirrors the production ordering in cmd's metricsAuthWithHSTS, where the
+			// HSTS middleware wraps the authentication filter: the header must be
+			// flushed to the client even when the inner handler short-circuits with
+			// a 401 before any body is written.
 			name: "sets header on unauthorized response",
 			handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -74,10 +81,13 @@ func TestWithStrictTransportSecurity(t *testing.T) {
 
 			WithStrictTransportSecurity(tt.handler).ServeHTTP(rec, req)
 
-			if got := rec.Code; got != tt.want {
-				t.Fatalf("status = %d, want %d", got, tt.want)
+			res := rec.Result()
+			defer func() { _ = res.Body.Close() }()
+
+			if res.StatusCode != tt.want {
+				t.Fatalf("status = %d, want %d", res.StatusCode, tt.want)
 			}
-			if got := rec.Header().Get(strictTransportSecurityHeader); got != strictTransportSecurityValue {
+			if got := res.Header.Get(strictTransportSecurityHeader); got != strictTransportSecurityValue {
 				t.Fatalf("%s = %q, want %q", strictTransportSecurityHeader, got, strictTransportSecurityValue)
 			}
 		})
