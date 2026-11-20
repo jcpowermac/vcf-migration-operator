@@ -19,6 +19,7 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -265,13 +266,26 @@ func main() {
 			map[string]healthz.Checker{"healthz": healthz.Ping},
 			map[string]healthz.Checker{"readyz": healthz.Ping},
 		)
+		// Bind the listener during setup so an occupied probe port fails fast,
+		// matching the manager's built-in behavior, rather than deferring the bind
+		// error until the runnable starts after cache sync.
+		probeListener, err := net.Listen("tcp", probeAddr)
+		if err != nil {
+			setupLog.Error(err, "unable to create health probe listener")
+			os.Exit(1)
+		}
 		if err := mgr.Add(&manager.Server{
 			Name: "health probe",
+			// Timeouts mirror controller-runtime's httpserver defaults so idle
+			// keep-alive connections remain bounded (ReadHeaderTimeout alone does
+			// not close idle connections).
 			Server: &http.Server{
-				Addr:              probeAddr,
 				Handler:           probeHandler,
+				MaxHeaderBytes:    1 << 20,
+				IdleTimeout:       90 * time.Second,
 				ReadHeaderTimeout: 32 * time.Second,
 			},
+			Listener: probeListener,
 		}); err != nil {
 			setupLog.Error(err, "unable to set up health probe server")
 			os.Exit(1)
