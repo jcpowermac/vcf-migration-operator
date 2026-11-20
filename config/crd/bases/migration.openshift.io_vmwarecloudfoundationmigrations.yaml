@@ -35,8 +35,10 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          VmwareCloudFoundationMigration is the Schema for the vmwarecloudfoundationmigrations API.
-          It orchestrates migration of an OpenShift cluster from one vCenter to another.
+          VmwareCloudFoundationMigration defines a controlled migration of an OpenShift
+          cluster from its current VMware vCenter environment to a destination vCenter.
+          The operator reconciles only the singleton named "cluster" in the
+          "openshift-vcf-migration" namespace.
         properties:
           apiVersion:
             description: |-
