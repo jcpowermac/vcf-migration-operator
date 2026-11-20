@@ -19,13 +19,17 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	"github.com/go-logr/logr"
 	configclient "github.com/openshift/client-go/config/clientset/versioned"
 	machineclient "github.com/openshift/client-go/machine/clientset/versioned"
 	machineconfigclient "github.com/openshift/client-go/machineconfiguration/clientset/versioned"
@@ -34,15 +38,18 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
 	"github.com/openshift/vcf-migration-operator/internal/controller"
+	"github.com/openshift/vcf-migration-operator/internal/server"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -124,7 +131,11 @@ func main() {
 		// These configurations ensure that only authorized users and service accounts
 		// can access the metrics endpoint. The RBAC are configured in 'config/rbac/kustomization.yaml'. More info:
 		// https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.21.0/pkg/metrics/filters#WithAuthenticationAndAuthorization
-		metricsServerOptions.FilterProvider = filters.WithAuthenticationAndAuthorization
+		//
+		// metricsAuthWithHSTS additionally sets the Strict-Transport-Security header
+		// on every HTTPS metrics response, including the authentication-denied
+		// responses, without altering the authn/authz behavior.
+		metricsServerOptions.FilterProvider = metricsAuthWithHSTS
 	}
 
 	// If the certificate is not specified, controller-runtime will automatically
@@ -155,9 +166,13 @@ func main() {
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsServerOptions,
-		HealthProbeBindAddress: probeAddr,
+		Scheme:  scheme,
+		Metrics: metricsServerOptions,
+		// The manager's built-in health probe server is disabled so that the probe
+		// endpoints can be served by a dedicated server that adds the
+		// X-Content-Type-Options header to all responses, including the named
+		// sub-check paths. See the server.NewProbeHandler wiring below.
+		HealthProbeBindAddress: "0",
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "951fca85.openshift.io",
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
@@ -241,13 +256,40 @@ func main() {
 		}
 	}
 
-	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		setupLog.Error(err, "unable to set up health check")
-		os.Exit(1)
-	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		setupLog.Error(err, "unable to set up ready check")
-		os.Exit(1)
+	// Serve the liveness and readiness probes from a dedicated server rather than
+	// the manager's built-in one, so that every probe response — including the
+	// named sub-check paths (e.g. /healthz/healthz, /readyz/readyz) — carries the
+	// X-Content-Type-Options: nosniff header. controller-runtime only sets that
+	// header on the aggregated probe responses.
+	if probeAddr != "" && probeAddr != "0" {
+		probeHandler := server.NewProbeHandler(
+			map[string]healthz.Checker{"healthz": healthz.Ping},
+			map[string]healthz.Checker{"readyz": healthz.Ping},
+		)
+		// Bind the listener during setup so an occupied probe port fails fast,
+		// matching the manager's built-in behavior, rather than deferring the bind
+		// error until the runnable starts after cache sync.
+		probeListener, err := net.Listen("tcp", probeAddr)
+		if err != nil {
+			setupLog.Error(err, "unable to create health probe listener")
+			os.Exit(1)
+		}
+		if err := mgr.Add(&manager.Server{
+			Name: "health probe",
+			// Timeouts mirror controller-runtime's httpserver defaults so idle
+			// keep-alive connections remain bounded (ReadHeaderTimeout alone does
+			// not close idle connections).
+			Server: &http.Server{
+				Handler:           probeHandler,
+				MaxHeaderBytes:    1 << 20,
+				IdleTimeout:       90 * time.Second,
+				ReadHeaderTimeout: 32 * time.Second,
+			},
+			Listener: probeListener,
+		}); err != nil {
+			setupLog.Error(err, "unable to set up health probe server")
+			os.Exit(1)
+		}
 	}
 
 	setupLog.Info("starting manager")
@@ -255,4 +297,29 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// metricsAuthWithHSTS returns a metrics server FilterProvider that applies the
+// controller-runtime authentication and authorization filter and additionally
+// sets the Strict-Transport-Security (HSTS) header on every response.
+//
+// HSTS is applied even though the metrics endpoint is a machine-to-machine
+// ClusterIP surface: advertising it is a harmless hardening that remediates the
+// missing-header finding, and because the header is set before the auth filter
+// runs it is also present on the 401/403 responses returned to unauthenticated
+// or unauthorized callers. The authentication and authorization behavior is
+// unchanged.
+func metricsAuthWithHSTS(c *rest.Config, httpClient *http.Client) (metricsserver.Filter, error) {
+	authFilter, err := filters.WithAuthenticationAndAuthorization(c, httpClient)
+	if err != nil {
+		return nil, err
+	}
+
+	return func(log logr.Logger, handler http.Handler) (http.Handler, error) {
+		authHandler, err := authFilter(log, handler)
+		if err != nil {
+			return nil, err
+		}
+		return server.WithStrictTransportSecurity(authHandler), nil
+	}, nil
 }
