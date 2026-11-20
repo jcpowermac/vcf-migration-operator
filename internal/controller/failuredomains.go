@@ -91,12 +91,18 @@ func sourceVCenterServer(infraFDs []configv1.VSpherePlatformFailureDomainSpec, m
 }
 
 // ensureMappingImmutable enforces the immutability of the effective failure
-// domain mapping recorded in status at preflight. It deliberately does not
+// domain mapping recorded in status once the migration has started. Before
+// that, during Pending or Planning, the mapping stays editable: preflight
+// re-runs for every spec generation and records the newly resolved mapping, so
+// an edit is revalidated rather than rejected. It deliberately does not
 // re-resolve from Infrastructure: the Infrastructure legitimately changes
 // during migration (destination failure domains added, source ones removed).
-// Clearing spec.failureDomainMappings after preflight is allowed because the
+// Clearing spec.failureDomainMappings after the start is allowed because the
 // recorded effective mapping keeps driving every later phase.
 func (r *VmwareCloudFoundationMigrationReconciler) ensureMappingImmutable(migration *migrationv1alpha1.VmwareCloudFoundationMigration) error {
+	if migration.Status.StartTime == nil {
+		return nil
+	}
 	recorded := migration.Status.FailureDomainMappings
 	if len(recorded) == 0 || len(migration.Spec.FailureDomainMappings) == 0 {
 		return nil
@@ -106,15 +112,15 @@ func (r *VmwareCloudFoundationMigrationReconciler) ensureMappingImmutable(migrat
 	requested := mappingBySource(migration.Spec.FailureDomainMappings)
 	bySource := mappingBySource(recorded)
 	if len(requested) != len(bySource) {
-		return fmt.Errorf("failureDomainMappings are immutable after preflight: got %d mappings, want %d as recorded in status", len(requested), len(bySource))
+		return fmt.Errorf("failureDomainMappings are immutable after the migration starts: got %d mappings, want %d as recorded in status", len(requested), len(bySource))
 	}
 	for source, dest := range requested {
 		want, ok := bySource[source]
 		if !ok {
-			return fmt.Errorf("failureDomainMappings are immutable after preflight: source failure domain %q is not part of the recorded mapping", source)
+			return fmt.Errorf("failureDomainMappings are immutable after the migration starts: source failure domain %q is not part of the recorded mapping", source)
 		}
 		if want != dest {
-			return fmt.Errorf("failureDomainMappings are immutable after preflight: source failure domain %q is mapped to %q, want %q as recorded in status", source, dest, want)
+			return fmt.Errorf("failureDomainMappings are immutable after the migration starts: source failure domain %q is mapped to %q, want %q as recorded in status", source, dest, want)
 		}
 	}
 	return nil

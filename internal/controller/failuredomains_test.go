@@ -518,12 +518,14 @@ func TestEnsureMappingImmutable(t *testing.T) {
 	sourceFDsRemoved.Spec.PlatformSpec.VSphere.FailureDomains = sourceFDsRemoved.Spec.PlatformSpec.VSphere.FailureDomains[:1]
 
 	tests := []struct {
-		name       string
-		status     []migrationv1alpha1.FailureDomainMapping
-		spec       []migrationv1alpha1.FailureDomainMapping
-		infra      *configv1.Infrastructure
-		wantErr    bool
-		wantSubstr string
+		name   string
+		status []migrationv1alpha1.FailureDomainMapping
+		spec   []migrationv1alpha1.FailureDomainMapping
+		infra  *configv1.Infrastructure
+		// beforeStart leaves status.startTime unset, as during Pending or Planning.
+		beforeStart bool
+		wantErr     bool
+		wantSubstr  string
 	}{
 		{
 			name:  "status unset",
@@ -584,6 +586,20 @@ func TestEnsureMappingImmutable(t *testing.T) {
 			spec:   explicit,
 			infra:  sourceFDsRemoved,
 		},
+		{
+			name:        "edited spec before start",
+			status:      explicit,
+			spec:        mappingList([2]string{"s1", "d1"}, [2]string{"s2", "d3"}),
+			infra:       newInfrastructureForPreflight("vc.example.com", "DC0"),
+			beforeStart: true,
+		},
+		{
+			name:        "renamed source failure domain before start",
+			status:      explicit,
+			spec:        mappingList([2]string{"s1", "d1"}, [2]string{"s3", "d2"}),
+			infra:       newInfrastructureForPreflight("vc.example.com", "DC0"),
+			beforeStart: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -591,6 +607,10 @@ func TestEnsureMappingImmutable(t *testing.T) {
 			migration := &migrationv1alpha1.VmwareCloudFoundationMigration{
 				Spec:   migrationv1alpha1.VmwareCloudFoundationMigrationSpec{FailureDomainMappings: tt.spec},
 				Status: migrationv1alpha1.VmwareCloudFoundationMigrationStatus{FailureDomainMappings: tt.status},
+			}
+			if !tt.beforeStart {
+				started := metav1.Now()
+				migration.Status.StartTime = &started
 			}
 			reconciler := &VmwareCloudFoundationMigrationReconciler{
 				ConfigClient: configfake.NewClientset(tt.infra),

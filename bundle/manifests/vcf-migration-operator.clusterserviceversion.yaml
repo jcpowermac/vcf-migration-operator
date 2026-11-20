@@ -19,21 +19,21 @@ metadata:
               {
                 "name": "target-fd-1",
                 "region": "target-region",
-                "server": "vcenter-target.example.com",
+                "server": "vc01-lab2.devqe.ibmc.devcluster.openshift.com",
                 "topology": {
-                  "computeCluster": "/TargetDC/host/TargetCluster",
-                  "datacenter": "TargetDC",
-                  "datastore": "/TargetDC/datastore/TargetDatastore",
-                  "folder": "/TargetDC/vm/my-cluster-infra-id",
+                  "computeCluster": "/vsphere9-lab2-dc/host/vsphere9-lab2-cluster",
+                  "datacenter": "vsphere9-lab2-dc",
+                  "datastore": "/vsphere9-lab2-dc/datastore/vsanDatastore",
                   "networks": [
                     "VM Network"
                   ],
-                  "resourcePool": "/TargetDC/host/TargetCluster/Resources",
-                  "template": "/TargetDC/vm/rhcos-template"
+                  "resourcePool": "/vsphere9-lab2-dc/host/vsphere9-lab2-cluster/Resources",
+                  "template": "/vsphere9-lab2-dc/vm/rhcos-9.8.20260428-0-vmware.x86_64"
                 },
                 "zone": "target-zone-1"
               }
             ],
+            "migrateStorage": true,
             "state": "Pending",
             "targetVCenterCredentialsSecret": {
               "name": "target-vcenter-creds",
@@ -43,7 +43,7 @@ metadata:
         }
       ]
     capabilities: Basic Install
-    createdAt: "2026-10-26T17:53:45Z"
+    createdAt: "2026-11-19T21:46:46Z"
     features.operators.openshift.io/disconnected: "true"
     features.operators.openshift.io/fips-compliant: "false"
     features.operators.openshift.io/proxy-aware: "false"
@@ -61,6 +61,12 @@ spec:
   apiservicedefinitions: {}
   customresourcedefinitions:
     owned:
+    - description: StorageWorkloadMigration tracks customer-coordinated storage migration
+        in one namespace.
+      displayName: Storage Workload Migration
+      kind: StorageWorkloadMigration
+      name: storageworkloadmigrations.migration.openshift.io
+      version: v1alpha1
     - description: |-
         VmwareCloudFoundationMigration is the Schema for the vmwarecloudfoundationmigrations API.
         It orchestrates migration of an OpenShift cluster from one vCenter to another.
@@ -95,6 +101,7 @@ spec:
           - ""
           resources:
           - nodes
+          - persistentvolumeclaims
           - persistentvolumes
           verbs:
           - get
@@ -108,6 +115,14 @@ spec:
           verbs:
           - create
           - patch
+        - apiGroups:
+          - apps
+          resources:
+          - daemonsets
+          - replicasets
+          - statefulsets
+          verbs:
+          - get
         - apiGroups:
           - apps
           resources:
@@ -127,6 +142,13 @@ spec:
           - get
           - list
           - watch
+        - apiGroups:
+          - batch
+          resources:
+          - cronjobs
+          - jobs
+          verbs:
+          - get
         - apiGroups:
           - config.openshift.io
           resources:
@@ -192,6 +214,26 @@ spec:
         - apiGroups:
           - migration.openshift.io
           resources:
+          - storageworkloadmigrations
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - update
+          - watch
+        - apiGroups:
+          - migration.openshift.io
+          resources:
+          - storageworkloadmigrations/status
+          - vmwarecloudfoundationmigrations/status
+          verbs:
+          - get
+          - patch
+          - update
+        - apiGroups:
+          - migration.openshift.io
+          resources:
           - vmwarecloudfoundationmigrations
           verbs:
           - get
@@ -204,14 +246,6 @@ spec:
           resources:
           - vmwarecloudfoundationmigrations/finalizers
           verbs:
-          - update
-        - apiGroups:
-          - migration.openshift.io
-          resources:
-          - vmwarecloudfoundationmigrations/status
-          verbs:
-          - get
-          - patch
           - update
         - apiGroups:
           - networking.k8s.io
@@ -232,6 +266,13 @@ spec:
           - storages
           verbs:
           - get
+        - apiGroups:
+          - storage.k8s.io
+          resources:
+          - storageclasses
+          verbs:
+          - get
+          - list
         - apiGroups:
           - authentication.k8s.io
           resources:

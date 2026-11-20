@@ -21,6 +21,27 @@ func TestPhaseFromConditions(t *testing.T) {
 		want       string
 	}{
 		{name: "no conditions is Pending", want: "Pending"},
+		{name: "planning review pause", conditions: []metav1.Condition{cond(migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonWaitingOnRunningAfterPlanning)}, want: "WaitingOnRunningAfterPlanning"},
+		{name: "planning checks", conditions: []metav1.Condition{cond(migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPlanning)}, want: "Planning"},
+		{name: "planning after start", conditions: []metav1.Condition{cond(migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPlanningAfterStart)}, want: "Planning"},
+		{
+			name: "storage plan blocked",
+			conditions: []metav1.Condition{
+				cond(migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted),
+				cond(migrationv1alpha1.ConditionStoragePlanned, metav1.ConditionFalse, migrationv1alpha1.ReasonPlanBlocked),
+				cond(migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonPlanBlocked),
+			},
+			want: "StoragePlanned",
+		},
+		{
+			name: "storage execution unsupported",
+			conditions: []metav1.Condition{
+				cond(migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted),
+				cond(migrationv1alpha1.ConditionStoragePlanned, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted),
+				cond(migrationv1alpha1.ConditionReady, metav1.ConditionFalse, migrationv1alpha1.ReasonStorageExecutionUnsupported),
+			},
+			want: "StoragePlanned",
+		},
 		{
 			name: "first stage in progress",
 			conditions: []metav1.Condition{
@@ -33,7 +54,7 @@ func TestPhaseFromConditions(t *testing.T) {
 			conditions: []metav1.Condition{
 				cond(migrationv1alpha1.ConditionInfrastructurePrepared, metav1.ConditionTrue, migrationv1alpha1.ReasonCompleted),
 			},
-			want: "DestinationInitialized",
+			want: "StoragePlanned",
 		},
 		{
 			name: "multi-site stage after destination initialized",
@@ -215,6 +236,7 @@ func TestPhaseFromConditionsCompleted(t *testing.T) {
 	status := &migrationv1alpha1.VmwareCloudFoundationMigrationStatus{
 		Conditions: []metav1.Condition{
 			cond(migrationv1alpha1.ConditionInfrastructurePrepared),
+			cond(migrationv1alpha1.ConditionStoragePlanned),
 			cond(migrationv1alpha1.ConditionDestinationInitialized),
 			cond(migrationv1alpha1.ConditionMultiSiteConfigured),
 			cond(migrationv1alpha1.ConditionWorkloadMigrated),

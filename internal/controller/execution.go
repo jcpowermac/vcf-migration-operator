@@ -12,7 +12,9 @@ import (
 
 var errExecutionStopped = fmt.Errorf("stopping new migration actions")
 
-func (r *VmwareCloudFoundationMigrationReconciler) executionContext(ctx context.Context, m *migrationv1alpha1.VmwareCloudFoundationMigration) context.Context {
+// stateContext guards work against deletion, replacement, and state or generation
+// changes. Planning callers must restrict work to the planning conditions.
+func (r *VmwareCloudFoundationMigrationReconciler) stateContext(ctx context.Context, m *migrationv1alpha1.VmwareCloudFoundationMigration, state migrationv1alpha1.MigrationState) context.Context {
 	return execution.WithCheck(ctx, func(ctx context.Context) error {
 		latest := &migrationv1alpha1.VmwareCloudFoundationMigration{}
 		if err := r.permissionReader().Get(ctx, client.ObjectKeyFromObject(m), latest); err != nil {
@@ -21,7 +23,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) executionContext(ctx context.
 			}
 			return fmt.Errorf("reading migration execution permission: %w", err)
 		}
-		if !latest.DeletionTimestamp.IsZero() || latest.UID != m.UID || latest.Generation != m.Generation || latest.Spec.State != migrationv1alpha1.MigrationStateRunning {
+		if !latest.DeletionTimestamp.IsZero() || latest.UID != m.UID || latest.Generation != m.Generation || latest.Spec.State != state {
 			return errExecutionStopped
 		}
 		return nil

@@ -75,7 +75,7 @@ func TestExecutionStopsAfterDeletionDuringPreparation(t *testing.T) {
 			}
 			done := make(chan error, 1)
 			go func() {
-				_, err := r.ensureWorkloadMigratedRolloutAndScaleDown(r.executionContext(ctx, m), m)
+				_, err := r.ensureWorkloadMigratedRolloutAndScaleDown(r.stateContext(ctx, m, migrationv1alpha1.MigrationStateRunning), m)
 				done <- err
 			}()
 			if !between {
@@ -178,7 +178,7 @@ func TestExecutionContextCheckOutcomes(t *testing.T) {
 				}})
 			}
 			r := &VmwareCloudFoundationMigrationReconciler{Client: liveClient, APIReader: liveClient}
-			err := execution.Check(r.executionContext(ctx, stale))
+			err := execution.Check(r.stateContext(ctx, stale, migrationv1alpha1.MigrationStateRunning))
 			if tt.readErr == nil {
 				// Drift stops execution silently; no error is surfaced.
 				if !errors.Is(err, errExecutionStopped) {
@@ -263,7 +263,7 @@ func TestPodRestartStopsBetweenDeletes(t *testing.T) {
 	}
 	deletes := 0
 	kube.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, runtime.Object, error) { deletes++; return false, nil, c.Delete(ctx, m) })
-	_, _ = openshift.NewPodManager(kube).DeletePodsByLabel(r.executionContext(ctx, m), "test", map[string]string{"app": "test"})
+	_, _ = openshift.NewPodManager(kube).DeletePodsByLabel(r.stateContext(ctx, m, migrationv1alpha1.MigrationStateRunning), "test", map[string]string{"app": "test"})
 	if deletes != 1 {
 		t.Fatalf("submitted %d pod deletions, want 1", deletes)
 	}

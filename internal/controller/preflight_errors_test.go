@@ -255,7 +255,7 @@ func TestPreflightCheckNoVSphereCSIPersistentVolumes(t *testing.T) {
 			},
 		}
 		kube := fakekube.NewClientset(pv)
-		if err := checkNoVSphereCSIPersistentVolumes(e.ctx, kube); err == nil || !strings.Contains(err.Error(), "vSphere CSI-backed persistent volumes are not supported") {
+		if err := checkNoVSphereCSIPersistentVolumes(e.ctx, kube); err == nil || !strings.Contains(err.Error(), "vSphere CSI-backed persistent volumes block migration") {
 			t.Fatalf("err = %v, want blocked-vsphere-pv error", err)
 		}
 	})

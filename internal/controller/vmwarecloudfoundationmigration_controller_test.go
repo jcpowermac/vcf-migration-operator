@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,6 +116,96 @@ var _ = Describe("required failure-domain template admission", func() {
 		}
 		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, resource)).To(Succeed()) })
+		Expect(resource.Spec.State).To(Equal(migrationv1alpha1.MigrationStatePending))
+
+		By("accepting Planning on update and create")
+		resource.Spec.State = migrationv1alpha1.MigrationStatePlanning
+		Expect(k8sClient.Update(ctx, resource)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: resource.Name, Namespace: resource.Namespace}, resource)).To(Succeed())
+		Expect(resource.Spec.State).To(Equal(migrationv1alpha1.MigrationStatePlanning))
+
+		planned := resource.DeepCopy()
+		planned.Name = ""
+		planned.ResourceVersion = ""
+		planned.UID = ""
+		Expect(k8sClient.Create(ctx, planned)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, planned)).To(Succeed()) })
+		Expect(planned.Spec.State).To(Equal(migrationv1alpha1.MigrationStatePlanning))
+	})
+})
+
+var _ = Describe("storage configuration admission", func() {
+	newResource := func() *migrationv1alpha1.VmwareCloudFoundationMigration {
+		return &migrationv1alpha1.VmwareCloudFoundationMigration{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: "storage-admission-", Namespace: "default"},
+			Spec: migrationv1alpha1.VmwareCloudFoundationMigrationSpec{
+				TargetVCenterCredentialsSecret: migrationv1alpha1.SecretReference{Name: "target-vcenter-creds"},
+				Storage:                        &migrationv1alpha1.StorageMigrationSpec{},
+				FailureDomains: []configv1.VSpherePlatformFailureDomainSpec{{
+					Name: "fd-a", Region: "region-a", Zone: "zone-a", Server: "vcenter.example.com",
+					Topology: configv1.VSpherePlatformTopology{Datacenter: "DC1", ComputeCluster: "/DC1/host/Cluster1", Datastore: "/DC1/datastore/DS1", Networks: []string{"VM Network"}, Template: "/DC1/vm/template-a"},
+				}},
+			},
+		}
+	}
+
+	It("rejects storage when migrateStorage is not enabled", func() {
+		Expect(k8sClient.Create(ctx, newResource())).To(MatchError(ContainSubstring("storage can only be set when migrateStorage is true")))
+	})
+
+	It("accepts storage when migrateStorage is enabled and rejects disabling it", func() {
+		resource := newResource()
+		resource.Spec.MigrateStorage = true
+		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, resource)).To(Succeed()) })
+
+		resource.Spec.MigrateStorage = false
+		Expect(k8sClient.Update(ctx, resource)).To(MatchError(ContainSubstring("storage can only be set when migrateStorage is true")))
+	})
+
+	It("validates storage class mappings and preserves accepted entries", func() {
+		for _, tt := range []struct {
+			name     string
+			mappings []migrationv1alpha1.StorageClassMapping
+			invalid  bool
+		}{
+			{name: "omitted"},
+			{name: "empty", mappings: []migrationv1alpha1.StorageClassMapping{}},
+			{name: "legacy source", mappings: []migrationv1alpha1.StorageClassMapping{{Source: "legacy-vsphere", Target: "thin-csi"}}},
+			{name: "shared target", mappings: []migrationv1alpha1.StorageClassMapping{
+				{Source: "legacy-vsphere", Target: "thin-csi"}, {Source: "pinned.vsphere", Target: "thin-csi"},
+			}},
+			{name: "identity mapping", mappings: []migrationv1alpha1.StorageClassMapping{{Source: "thin-csi", Target: "thin-csi"}}},
+			{name: "duplicate source", invalid: true, mappings: []migrationv1alpha1.StorageClassMapping{
+				{Source: "legacy", Target: "thin-csi"}, {Source: "legacy", Target: "other-csi"},
+			}},
+			{name: "empty source", invalid: true, mappings: []migrationv1alpha1.StorageClassMapping{{Target: "thin-csi"}}},
+			{name: "empty target", invalid: true, mappings: []migrationv1alpha1.StorageClassMapping{{Source: "legacy"}}},
+			{name: "invalid source", invalid: true, mappings: []migrationv1alpha1.StorageClassMapping{{Source: "Invalid_Name", Target: "thin-csi"}}},
+			{name: "invalid target", invalid: true, mappings: []migrationv1alpha1.StorageClassMapping{{Source: "legacy", Target: "bad/name"}}},
+			{name: "long source", invalid: true, mappings: []migrationv1alpha1.StorageClassMapping{{Source: strings.Repeat("a", 254), Target: "thin-csi"}}},
+			{name: "long target", invalid: true, mappings: []migrationv1alpha1.StorageClassMapping{{Source: "legacy", Target: strings.Repeat("a", 254)}}},
+		} {
+			By(tt.name)
+			resource := newResource()
+			resource.Spec.MigrateStorage = true
+			resource.Spec.Storage.StorageClassMapping = tt.mappings
+			err := k8sClient.Create(ctx, resource)
+			if tt.invalid {
+				Expect(errors.IsInvalid(err)).To(BeTrue(), "expected invalid storageClassMapping: %v", err)
+				continue
+			}
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, resource)).To(Succeed()) })
+			if len(tt.mappings) == 0 {
+				Expect(resource.Spec.Storage.StorageClassMapping).To(BeEmpty())
+			} else {
+				Expect(resource.Spec.Storage.StorageClassMapping).To(Equal(tt.mappings))
+			}
+			stored := &migrationv1alpha1.VmwareCloudFoundationMigration{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(resource), stored)).To(Succeed())
+			Expect(stored.Spec.Storage.StorageClassMapping).To(Equal(resource.Spec.Storage.StorageClassMapping))
+		}
 	})
 })
 
@@ -1256,6 +1348,7 @@ func TestUpdateStatusSkipsStaleMappingPublication(t *testing.T) {
 	}
 
 	mappings := []migrationv1alpha1.FailureDomainMapping{{Source: "source-fd-1", Destination: "target-fd-1"}}
+	previous := []migrationv1alpha1.FailureDomainMapping{{Source: "source-fd-1", Destination: "target-fd-0"}}
 	// inFlight is the copy this reconcile fetched and validated: generation 1.
 	inFlight := &migrationv1alpha1.VmwareCloudFoundationMigration{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1270,17 +1363,30 @@ func TestUpdateStatusSkipsStaleMappingPublication(t *testing.T) {
 		name           string
 		latestGen      int64
 		latestMappings []migrationv1alpha1.FailureDomainMapping
-		wantPublished  bool
+		latestStarted  bool
+		want           []migrationv1alpha1.FailureDomainMapping
 	}{
 		{
-			name:          "same generation publishes mapping",
-			latestGen:     1,
-			wantPublished: true,
+			name:      "same generation publishes mapping",
+			latestGen: 1,
+			want:      mappings,
 		},
 		{
-			name:          "newer generation does not receive stale mapping",
-			latestGen:     2,
-			wantPublished: false,
+			name:      "newer generation does not receive stale mapping",
+			latestGen: 2,
+		},
+		{
+			name:           "replanning before start replaces recorded mapping",
+			latestGen:      1,
+			latestMappings: previous,
+			want:           mappings,
+		},
+		{
+			name:           "started migration keeps recorded mapping",
+			latestGen:      1,
+			latestMappings: previous,
+			latestStarted:  true,
+			want:           previous,
 		},
 	}
 	for _, tt := range tests {
@@ -1294,6 +1400,10 @@ func TestUpdateStatusSkipsStaleMappingPublication(t *testing.T) {
 				Status: migrationv1alpha1.VmwareCloudFoundationMigrationStatus{
 					FailureDomainMappings: tt.latestMappings,
 				},
+			}
+			if tt.latestStarted {
+				started := metav1.Now()
+				latest.Status.StartTime = &started
 			}
 			fakeClient := clientfake.NewClientBuilder().
 				WithScheme(scheme).
@@ -1316,9 +1426,8 @@ func TestUpdateStatusSkipsStaleMappingPublication(t *testing.T) {
 			if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(latest), persisted); err != nil {
 				t.Fatalf("getting persisted migration: %v", err)
 			}
-			got := len(persisted.Status.FailureDomainMappings) > 0
-			if got != tt.wantPublished {
-				t.Fatalf("mapping published = %v, want %v (persisted status %+v)", got, tt.wantPublished, persisted.Status)
+			if got := persisted.Status.FailureDomainMappings; !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("persisted mappings = %+v, want %+v", got, tt.want)
 			}
 		})
 	}

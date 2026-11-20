@@ -149,6 +149,26 @@ func TestVMotionPlanningInitializesLifecycleStatus(t *testing.T) {
 	}
 }
 
+func TestVMotionPlanningStateFreezesPlanWithoutStartTime(t *testing.T) {
+	h := newVMotionPlanHarness(t)
+	h.migration.Spec.State = migrationv1alpha1.MigrationStatePlanning
+	if err := h.apiClient.Update(context.Background(), h.migration); err != nil {
+		t.Fatal(err)
+	}
+	h.reconcileUntilFrozen(t)
+	if h.migration.Status.StartTime != nil {
+		t.Fatal("Planning state started the migration clock")
+	}
+	h.migration.Spec.State = migrationv1alpha1.MigrationStateRunning
+	if err := h.apiClient.Update(context.Background(), h.migration); err != nil {
+		t.Fatal(err)
+	}
+	h.reconcile(t)
+	if h.migration.Status.StartTime == nil {
+		t.Fatal("Running state did not set StartTime after VMotion planning")
+	}
+}
+
 func TestVMotionInventoryIgnoresNodeListOrder(t *testing.T) {
 	h := newVMotionPlanHarness(t)
 	h.reconcile(t)

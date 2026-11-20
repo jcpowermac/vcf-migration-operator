@@ -21,6 +21,7 @@ import (
 
 	migrationv1alpha1 "github.com/openshift/vcf-migration-operator/api/v1alpha1"
 	"github.com/openshift/vcf-migration-operator/internal/openshift"
+	"github.com/openshift/vcf-migration-operator/internal/util"
 	"github.com/openshift/vcf-migration-operator/internal/vsphere"
 )
 
@@ -254,6 +255,9 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 	}
 
 	if err := runPreflightStep(log, "vSphere CSI persistent volumes", func() error {
+		if migration.Spec.MigrateStorage {
+			return nil
+		}
 		return checkNoVSphereCSIPersistentVolumes(ctx, r.KubeClient)
 	}); err != nil {
 		return "", err
@@ -261,7 +265,7 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 	var storageWarning string
 	if err := runPreflightStep(log, "storage management state", func() error {
 		var err error
-		storageWarning, err = checkVSphereStorageManagement(ctx, r.DynamicClient)
+		storageWarning, err = checkStorageManagementForPlan(ctx, r.DynamicClient, migration.Spec.MigrateStorage)
 		return err
 	}); err != nil {
 		return "", err
@@ -308,7 +312,8 @@ func (r *VmwareCloudFoundationMigrationReconciler) runPreflightChecks(ctx contex
 	}
 
 	// Record the effective mapping so later phases and immutability checks use
-	// the pairs resolved at preflight.
+	// the pairs resolved at preflight. Before the migration starts, a re-run for
+	// an edited spec replaces the previously recorded mapping.
 	migration.Status.FailureDomainMappings = mappings
 
 	message := "Preflight validation passed"
@@ -480,7 +485,7 @@ func checkNoVSphereCSIPersistentVolumes(ctx context.Context, kubeClient kubernet
 	}
 
 	sort.Strings(blocked)
-	return fmt.Errorf("vSphere CSI-backed persistent volumes are not supported for migration; remove PersistentVolumes using driver %q: %s", vsphereCSIDriverName, strings.Join(blocked, ", "))
+	return fmt.Errorf("vSphere CSI-backed persistent volumes block migration; set spec.migrateStorage to true or remove PersistentVolumes using driver %q: %s", vsphereCSIDriverName, strings.Join(blocked, ", "))
 }
 
 func checkVSphereStorageManagement(ctx context.Context, dynamicClient dynamic.Interface) (string, error) {
@@ -726,11 +731,7 @@ func listDynamicResourceNames(ctx context.Context, dynamicClient dynamic.Interfa
 	names := make([]string, 0, len(resourceList.Items))
 	for i := range resourceList.Items {
 		item := &resourceList.Items[i]
-		name := item.GetName()
-		if namespace := item.GetNamespace(); namespace != "" {
-			name = namespace + "/" + name
-		}
-		names = append(names, name)
+		names = append(names, util.GetObjectKey(item.GetName(), item.GetNamespace()))
 	}
 
 	sort.Strings(names)

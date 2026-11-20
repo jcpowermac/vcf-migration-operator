@@ -3,6 +3,7 @@
 # It should be run by config/default
 resources:
 - bases/migration.openshift.io_vmwarecloudfoundationmigrations.yaml
+- bases/migration.openshift.io_storageworkloadmigrations.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix.

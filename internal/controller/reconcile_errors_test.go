@@ -32,13 +32,17 @@ import (
 	"github.com/openshift/vcf-migration-operator/internal/openshift"
 )
 
-// reconcileScheme builds a scheme with only the migration type registered,
-// which is all the plain (non-envtest) Reconcile tests need.
+// reconcileScheme builds a scheme with the migration type and the core types
+// the controller watches, which is all the plain (non-envtest) Reconcile tests need.
 func reconcileScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
 	if err := migrationv1alpha1.AddToScheme(s); err != nil {
 		t.Fatalf("adding migration to scheme: %v", err)
+	}
+	// SetupWithManager watches PVC metadata to refresh storage plans.
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatalf("adding core/v1 to scheme: %v", err)
 	}
 	return s
 }

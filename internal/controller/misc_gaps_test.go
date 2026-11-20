@@ -259,10 +259,12 @@ func TestSourceVCenterServer(t *testing.T) {
 
 func TestEnsureMappingImmutableGaps(t *testing.T) {
 	r := &VmwareCloudFoundationMigrationReconciler{}
+	// Mappings are only immutable once the migration has started.
+	startTime := metav1.Now()
 	newMigration := func(spec, recorded []migrationv1alpha1.FailureDomainMapping) *migrationv1alpha1.VmwareCloudFoundationMigration {
 		return &migrationv1alpha1.VmwareCloudFoundationMigration{
 			Spec:   migrationv1alpha1.VmwareCloudFoundationMigrationSpec{FailureDomainMappings: spec},
-			Status: migrationv1alpha1.VmwareCloudFoundationMigrationStatus{FailureDomainMappings: recorded},
+			Status: migrationv1alpha1.VmwareCloudFoundationMigrationStatus{FailureDomainMappings: recorded, StartTime: &startTime},
 		}
 	}
 	both := mappingList([2]string{"s1", "d1"}, [2]string{"s2", "d2"})

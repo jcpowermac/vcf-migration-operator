@@ -20,4 +20,12 @@ resources:
   kind: VmwareCloudFoundationMigration
   path: github.com/openshift/vcf-migration-operator/api/v1alpha1
   version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: openshift.io
+  group: migration
+  kind: StorageWorkloadMigration
+  path: github.com/openshift/vcf-migration-operator/api/v1alpha1
+  version: v1alpha1
 version: "3"

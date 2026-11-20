@@ -85,6 +85,12 @@ Standard aliases: `apierrors`, `apimeta`, `metav1`, `corev1`, `ctrl`, `migration
 
 Go default formatting (`gofmt`). No `.editorconfig`. Golangci-lint enforces `gofmt` and `goimports` as formatters.
 
+### Conditional Readability
+
+- Prefer simple guard clauses and explicit steps over dense compound boolean expressions. Split independent eligibility, lifecycle, and concurrency checks into separate decisions.
+- Use meaningful boolean names that state the decision directly, such as `skipCondition` or `keepExistingSuccess`. Avoid double negatives and negated compound expressions.
+- Favor a few extra readable lines over compressed logic. Explain non-obvious reasons for a check; preserve behavior when simplifying existing code.
+
 ### Naming Conventions
 
 - **Types**: PascalCase. Manager pattern: `SecretManager`, `InfrastructureManager`, `PodManager`.

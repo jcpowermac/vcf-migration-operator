@@ -28,6 +28,10 @@ type MigrationState string
 const (
 	// MigrationStatePending indicates the migration has not started.
 	MigrationStatePending MigrationState = "Pending"
+
+	// MigrationStatePlanning indicates the cluster administrator has requested migration planning.
+	MigrationStatePlanning MigrationState = "Planning"
+
 	// MigrationStateRunning indicates the migration is actively progressing.
 	MigrationStateRunning MigrationState = "Running"
 	// MigrationStatePaused indicates the migration is paused by the user.
@@ -137,14 +141,24 @@ type FailureDomainMapping struct {
 
 // VmwareCloudFoundationMigrationSpec defines the desired state of VmwareCloudFoundationMigration.
 // +kubebuilder:validation:XValidation:rule="!has(self.failureDomainMappings) || self.failureDomainMappings.all(m, m.destination in self.failureDomains.map(fd, fd.name))",message="every failureDomainMappings.destination must match a failureDomains[].name"
+// +kubebuilder:validation:XValidation:rule="!has(self.storage) || (has(self.migrateStorage) && self.migrateStorage)",message="storage can only be set when migrateStorage is true"
 type VmwareCloudFoundationMigrationSpec struct {
-	// state controls the workflow: Pending, Running, Paused.
-	// The migration workflow only executes when state is Running.
+	// state controls the workflow: Pending, Planning, Running, Paused.
+	// Planning runs non-disruptive checks; Running proceeds when the plan has no blockers.
 	// When omitted, defaults to Pending.
 	// +optional
-	// +kubebuilder:validation:Enum=Pending;Running;Paused
+	// +kubebuilder:validation:Enum=Pending;Planning;Running;Paused
 	// +kubebuilder:default=Pending
 	State MigrationState `json:"state,omitempty"`
+
+	// migrateStorage indicates whether vSphere CSI volumes are migrated along
+	// with compute nodes. When false, vSphere CSI persistent volumes block the
+	// migration during preflight.
+	// When omitted, defaults to false.
+	// It cannot be enabled once status.startTime is set.
+	// +optional
+	// +kubebuilder:default=false
+	MigrateStorage bool `json:"migrateStorage,omitempty"`
 
 	// targetVCenterCredentialsSecret references the secret containing target vCenter credentials.
 	// The secret must contain keys: {target-vcenter-fqdn}.username and {target-vcenter-fqdn}.password.
@@ -181,6 +195,11 @@ type VmwareCloudFoundationMigrationSpec struct {
 	// When set, both roles select the same migration engine.
 	// +optional
 	NodeMigration *NodeMigrationSpec `json:"nodeMigration,omitempty"`
+
+	// storage configures CNS volume data migration. It can only be set when
+	// migrateStorage is true.
+	// +optional
+	Storage *StorageMigrationSpec `json:"storage,omitempty"`
 }
 
 // NodeMigrationType is the cluster-wide engine used to move nodes to the
@@ -314,6 +333,7 @@ type VmwareCloudFoundationMigrationStatus struct {
 	//   (openshift-vcf-migration/cluster), while False indicates an unsupported
 	//   object name or namespace.
 	// - InfrastructurePrepared: preflight validation and migration path selection.
+	// - StoragePlanned: storage inventory and target resolution have no blockers.
 	// - DestinationInitialized: destination vCenter folders and tags created.
 	// - MultiSiteConfigured: cluster configured for both source and target vCenters.
 	// - WorkloadMigrated: workloads migrated to destination vCenter machine sets.
@@ -328,8 +348,9 @@ type VmwareCloudFoundationMigrationStatus struct {
 
 	// failureDomainMappings is the effective source-to-destination failure domain
 	// mapping resolved at preflight. When spec.failureDomainMappings is omitted it
-	// holds the single inferred pair. The controller treats this field as
-	// write-once: after preflight resolves the mappings it does not rewrite them.
+	// holds the single inferred pair. Until the migration starts, each preflight
+	// run replaces it with the mapping resolved for the current spec. Once the
+	// migration has started the controller treats this field as write-once.
 	// +optional
 	// +listType=atomic
 	FailureDomainMappings []FailureDomainMapping `json:"failureDomainMappings,omitempty"`
@@ -962,6 +983,58 @@ type NodeMigrationProgress struct {
 	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
 }
 
+// VolumeDataMigrationStrategy selects how CNS volume data is migrated.
+// CnsNative is reserved for future support and cannot currently be selected.
+// +kubebuilder:validation:Enum=Auto;Rsync
+type VolumeDataMigrationStrategy string
+
+const (
+	// VolumeDataMigrationStrategyAuto lets VMO choose the migration strategy.
+	VolumeDataMigrationStrategyAuto VolumeDataMigrationStrategy = "Auto"
+
+	// VolumeDataMigrationStrategyRsync copies volume data with rsync.
+	VolumeDataMigrationStrategyRsync VolumeDataMigrationStrategy = "Rsync"
+
+	// VolumeDataMigrationStrategyCnsNative reserves CNS native migration, which is currently unsupported.
+	VolumeDataMigrationStrategyCnsNative VolumeDataMigrationStrategy = "CnsNative"
+)
+
+// StorageMigrationSpec configures storage for CNS volume migration.
+type StorageMigrationSpec struct {
+	// DataMigrationStrategy defines how VMO will move the data.
+	// When omitted, defaults to Auto. CnsNative is not currently supported.
+	// +optional
+	// +kubebuilder:default=Auto
+	DataMigrationStrategy VolumeDataMigrationStrategy `json:"dataMigrationStrategy,omitempty"`
+
+	// StorageClassMapping maps source StorageClasses to target StorageClasses for
+	// provisioning destination PVCs. An unmapped source uses the same StorageClass.
+	// This allows in-tree or datastore-pinned source classes to use a suitable
+	// vSphere CSI target class. Each source may appear only once; multiple sources
+	// may share a target. Existing source PVCs and StorageClasses are not modified.
+	// +optional
+	// +listType=map
+	// +listMapKey=source
+	StorageClassMapping []StorageClassMapping `json:"storageClassMapping,omitempty"`
+}
+
+// StorageClassMapping maps a source StorageClass to a target StorageClass.
+type StorageClassMapping struct {
+	// Source is the name of the source PVC's StorageClass.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	Source string `json:"source"`
+
+	// Target is the name of the vSphere CSI StorageClass for destination PVCs.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	Target string `json:"target"`
+}
+
 // Condition type constants for the migration workflow.
 // The reconciler checks conditions in this order; if a condition is not True,
 // it executes the work for that condition and returns with RequeueAfter.
@@ -969,6 +1042,9 @@ const (
 	// ConditionInfrastructurePrepared indicates preflight checks passed and the
 	// migration path has been selected.
 	ConditionInfrastructurePrepared = "InfrastructurePrepared"
+
+	// ConditionStoragePlanned indicates storage inventory has no migration blockers.
+	ConditionStoragePlanned = "StoragePlanned"
 
 	// ConditionDestinationInitialized indicates the target vCenter has all required assets
 	// (VM folders, region/zone tags).
@@ -998,11 +1074,24 @@ const (
 
 // Condition reason constants.
 const (
-	ReasonProgressing = "Progressing"
-	ReasonCompleted   = "Completed"
-	ReasonFailed      = "Failed"
+	// ReasonPlanning indicates non-disruptive checks are running.
+	ReasonPlanning = "Planning"
+	// ReasonWaitingOnRunningAfterPlanning indicates the plan is ready for customer review.
+	ReasonWaitingOnRunningAfterPlanning = "WaitingOnRunningAfterPlanning"
+	// ReasonPlanBlocked indicates storage blockers prevent migration.
+	ReasonPlanBlocked = "PlanBlocked"
+	// ReasonStorageExecutionUnsupported indicates storage planning is available but execution is not implemented.
+	ReasonStorageExecutionUnsupported = "StorageExecutionUnsupported"
+
+	// ReasonPlanningAfterStart indicates planning cannot restart a migration.
+	ReasonPlanningAfterStart = "PlanningAfterStart"
+	// ReasonNotConfigured indicates storage migration was not requested.
+	ReasonNotConfigured = "NotConfigured"
+	ReasonProgressing   = "Progressing"
+	ReasonCompleted     = "Completed"
+	ReasonFailed        = "Failed"
 	// ReasonMappingRejected indicates spec.failureDomainMappings was changed
-	// after preflight recorded the effective mapping. It is distinct from
+	// after the migration started with the recorded mapping. It is distinct from
 	// ReasonFailed so condition handling does not have to guess which entries a
 	// generic failure left behind.
 	ReasonMappingRejected = "MappingRejected"
@@ -1038,6 +1127,7 @@ const (
 // VmwareCloudFoundationMigration is the Schema for the vmwarecloudfoundationmigrations API.
 // It orchestrates migration of an OpenShift cluster from one vCenter to another.
 // +kubebuilder:validation:XValidation:rule="has(self.spec.failureDomainMappings) || size(self.spec.failureDomains) == 1 || (has(self.status) && has(self.status.failureDomainMappings) && size(self.status.failureDomainMappings) > 0)",message="failureDomainMappings is required when more than one failureDomain is defined until effective mappings are recorded"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.startTime) || !has(self.spec.migrateStorage) || !self.spec.migrateStorage || (has(oldSelf.spec.migrateStorage) && oldSelf.spec.migrateStorage)",message="migrateStorage cannot be enabled after the migration has started"
 type VmwareCloudFoundationMigration struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

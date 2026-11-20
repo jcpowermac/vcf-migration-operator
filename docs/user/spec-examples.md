@@ -6,6 +6,11 @@ The `VmwareCloudFoundationMigration` spec requires:
 - `failureDomains`: one or more target failure domains (uses the OpenShift `configv1` `VSpherePlatformFailureDomainSpec` type). Every failure domain requires `topology.template` for this release, including VMotion selections.
 
 `state` is optional (defaults to `Pending`; set to `Running` to start the migration).
+
+The API also accepts `Planning` and `Paused`. `Planning` runs only the non-disruptive preflight and storage planning checks and never starts migration work; set `state` to `Running` once the plan has no blockers.
+With `migrateStorage: true`, only planning is available: `Running` stops with
+`StorageExecutionUnsupported` before disruptive work, even when the plan has no
+blockers.
 See the full field reference in the [API reference](../dev/api.md).
 
 ## Single Target Failure Domain

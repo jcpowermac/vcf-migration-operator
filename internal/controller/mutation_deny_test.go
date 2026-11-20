@@ -218,7 +218,7 @@ func TestDeniedExecutionBlocksHandlerMutations(t *testing.T) {
 			live := m.DeepCopy()
 			live.UID = types.UID("replacement-live-uid")
 			r.APIReader = retentionTestClient(t, live)
-			if err := tt.call(r.executionContext(ctx, m), r, m); !errors.Is(err, errExecutionStopped) {
+			if err := tt.call(r.stateContext(ctx, m, migrationv1alpha1.MigrationStateRunning), r, m); !errors.Is(err, errExecutionStopped) {
 				t.Fatalf("handler did not stop on denied execution: %v", err)
 			}
 			if len(*writes) != 0 {
