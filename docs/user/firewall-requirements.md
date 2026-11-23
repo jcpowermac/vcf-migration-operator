@@ -3,7 +3,8 @@
 Open the rules that apply to your migration **before** you set `spec.state: Running`. Rules
 that are opened mid-migration fail the node being migrated, not the migration object, so a
 missing rule shows up as a machine that never becomes `Ready`. Section 4 applies only to
-migrations that select `type: VMotion`.
+migrations that select `type: VMotion`. In this revision, selecting VMotion and setting
+`state: Running` only freezes a plan: no node moves and VM-changing actions stay disabled.
 
 This document covers a migration that is **partly complete**: some nodes already
 run on the target vCenter while the rest still run on the source vCenter. Traffic
@@ -29,10 +30,13 @@ between those two halves is where most mid-migration failures come from.
   additional networks by hand.
 - vCenter listens on the default **TCP 443**. If it does not, use the same rule with your port;
   the operator connects to the FQDN you configure.
-- `spec.migrateStorage` is **false**, so you have set the `managementState` of
-  `ClusterCSIDriver/csi.vsphere.vmware.com` to `Removed` yourself. The operator does not remove
-  the driver; preflight fails until the state is `Removed`. If you set `migrateStorage` to
-  `true`, see section 2 instead.
+- `spec.migrateStorage` is **false** and `spec.nodeMigration` is omitted or `Recreate`, so you
+  have set the `managementState` of `ClusterCSIDriver/csi.vsphere.vmware.com` to `Removed`
+  yourself. The operator does not remove the driver; preflight fails until the state is
+  `Removed`. A `VMotion` selection skips this preflight check.
+- Setting `spec.migrateStorage` to `true` gives you storage **planning only**. The workflow stops
+  with `StorageExecutionUnsupported` before any storage execution, and section 2 does not enable
+  it.
 
 ## Direction convention
 
@@ -161,8 +165,9 @@ you set `state: Running`.
 
 1. From a control plane node on the source side: `nc -vz <source-vcenter-fqdn> 443` and `nc -vz <target-vcenter-fqdn> 443`.
 2. From that same node: `nc -vz <test-vm-target-ip> 6443` and `nc -vz <test-vm-target-ip> 10250`.
-3. Overlay delivery: start a UDP listener on the test VM and send from a source node to `<test-vm-target-ip>:6081`, in both directions, capturing packets on each side. `nc -vzu` proves nothing on UDP: success only means no ICMP unreachable came back.
-4. `ping <test-vm-target-ip>`, to confirm ICMP is not filtered.
+3. From the target test VM: `nc -vz <source-control-plane-ip> 6443`. Firewalls are often asymmetric, so test the return direction too.
+4. Overlay delivery: start a UDP listener on the test VM and send from a source node to `<test-vm-target-ip>:6081`, in both directions, capturing packets on each side. `nc -vzu` proves nothing on UDP: success only means no ICMP unreachable came back.
+5. `ping <test-vm-target-ip>`, to confirm ICMP is not filtered.
 
 ## Verify after the first nodes have moved
 
