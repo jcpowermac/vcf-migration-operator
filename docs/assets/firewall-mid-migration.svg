@@ -27,6 +27,12 @@
 <polyline points="280,410 280,380 700,380 700,230 810,217" fill="none" stroke="#ee0000" stroke-width="2.2" stroke-dasharray="7 5" marker-end="url(#ar)"/>
 <rect x="363" y="368" width="255" height="24" rx="5" fill="#ffffff" stroke="#ee0000" stroke-width="1"/>
 <text x="490" y="384" font-size="12.5" text-anchor="middle" fill="#ee0000" font-weight="600">443 machine-api / cloud provider</text>
+<polyline points="350,244 300,290" fill="none" stroke="#6a6e73" stroke-width="1.7" marker-end="url(#ag)" marker-start="url(#ag)"/>
+<rect x="283" y="255" width="85" height="24" rx="5" fill="#ffffff" stroke="#6a6e73" stroke-width="1"/>
+<text x="325" y="271" font-size="12.5" text-anchor="middle" fill="#6a6e73" font-weight="600">443 / 902</text>
+<polyline points="910,244 960,290" fill="none" stroke="#6a6e73" stroke-width="1.7" marker-end="url(#ag)" marker-start="url(#ag)"/>
+<rect x="893" y="255" width="85" height="24" rx="5" fill="#ffffff" stroke="#6a6e73" stroke-width="1"/>
+<text x="935" y="271" font-size="12.5" text-anchor="middle" fill="#6a6e73" font-weight="600">443 / 902</text>
 <rect x="500" y="24" width="260" height="64" rx="9" fill="#151515" stroke="#151515" stroke-width="1.8"/>
 <text x="630.0" y="53" font-size="15" font-weight="600" text-anchor="middle" fill="#ffffff">vcf-migration-operator</text>
 <text x="630.0" y="69" font-size="11" font-weight="500" text-anchor="middle" fill="#ffffff">namespace openshift-vcf-migration</text>

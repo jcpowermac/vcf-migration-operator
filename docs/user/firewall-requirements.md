@@ -1,8 +1,9 @@
 # Firewall and Network Requirements
 
-Open every rule in this document **before** you set `spec.state: Running`. Rules
-that are opened mid-migration fail the node being migrated, not the migration
-object, so a missing rule shows up as a machine that never becomes `Ready`.
+Open the rules that apply to your migration **before** you set `spec.state: Running`. Rules
+that are opened mid-migration fail the node being migrated, not the migration object, so a
+missing rule shows up as a machine that never becomes `Ready`. Section 4 applies only to
+migrations that select `type: VMotion`.
 
 This document covers a migration that is **partly complete**: some nodes already
 run on the target vCenter while the rest still run on the source vCenter. Traffic
@@ -28,10 +29,10 @@ between those two halves is where most mid-migration failures come from.
   additional networks by hand.
 - vCenter listens on the default **TCP 443**. If it does not, use the same rule with your port;
   the operator connects to the FQDN you configure.
-- `spec.migrateStorage` is **false**, so you have set
-  `ClusterCSIDriver/vsphere.spec.managementState` to `Removed` yourself. The operator does not
-  remove the driver; preflight fails until the state is `Removed`. If you set `migrateStorage`
-  to `true`, see section 2 instead.
+- `spec.migrateStorage` is **false**, so you have set the `managementState` of
+  `ClusterCSIDriver/csi.vsphere.vmware.com` to `Removed` yourself. The operator does not remove
+  the driver; preflight fails until the state is `Removed`. If you set `migrateStorage` to
+  `true`, see section 2 instead.
 
 ## Direction convention
 
@@ -77,7 +78,9 @@ state, because new VMs are cloned and powered on during it.
 | Protocol | Port | Source | Destination | Purpose |
 | --- | --- | --- | --- | --- |
 | TCP | 443 | ESXi host (source and target) | Own vCenter | Host management, host agent, guest tools reporting |
+| TCP | 443 | Own vCenter | ESXi host (source and target) | Host management and configuration, including placement of a cloned VM |
 | UDP | 902 | ESXi host (source and target) | Own vCenter | Host heartbeat and status |
+| TCP | 902 | Own vCenter | ESXi host (source and target) | Provisioning and NFC traffic that vCenter drives during clone and power-on |
 | TCP | 902 | ESXi host | ESXi host | Provisioning and NFC: template clone, disk copy, cold relocation |
 | TCP | 443 | ESXi host | ESXi host | Host-to-host migration and provisioning |
 
@@ -118,9 +121,13 @@ traffic and must permit it.
 | ICMP | n/a | Every node | Every node | Reachability checks |
 
 Control plane nodes split across datacenters keep a single etcd cluster, so `2379-2380` must
-work between the migrated control plane node and both of the others. Blocking it never "just
-slows down" the migration: etcd loses quorum and the cluster stops serving the API, which is
-unrecoverable from inside the cluster.
+work between the migrated control plane node and both of the others. With three control plane
+nodes, isolating one of them (master-3 in the diagram) leaves master-1 and master-2 with
+quorum, so the API keeps serving from the source side. The API stops serving only when a
+partition leaves no quorum on the side that has to serve. Losing quorum is transient and
+recovers as soon as connectivity returns, but it is still the failure to design against: it
+happens mid-rollout, while the operator keeps moving nodes and the surviving side keeps
+shrinking.
 
 If you use `NodePort` services, also open `30000-32767` TCP and UDP between the two networks.
 If you enabled IPsec, open ESP plus UDP `500` and `4500`.
@@ -135,7 +142,7 @@ New VMs on the target network have no cluster configuration until they reach the
 | UDP | 67/68 | Preflight probe VM and new nodes | DHCP server | Address assignment on the target network |
 | UDP | 123 | Every node and ESXi host | NTP servers | Clock sync; etcd rejects a node whose clock drifts |
 | TCP | 443 | Every node | Image registry or mirror | Image pulls for new nodes |
-| TCP | 443 | Every node | HTTP proxy, if configured | Egress for cluster components |
+| TCP | Proxy port from the configured proxy URL (443 by default) | Every node | HTTP proxy | Egress for cluster components |
 
 The **preflight probe VM** is cloned from `topology.template` onto the destination network and
 powered on before any node moves. It must obtain an address through DHCP — a static
@@ -146,17 +153,23 @@ The probe runs only when `spec.nodeMigration` is omitted or `type: Recreate`. A 
 selection skips it, so a VMotion migration gets no network compatibility check from the
 operator. Verify the rules in section 5 by hand in that case.
 
-## Verify before you start
+## Verify before the first migration
 
-Run these checks from a machine that routes like the operator pod, once per vCenter. Each
-command must succeed before you set `state: Running`.
+No cluster node exists on the target yet, so check the destination side from a temporary test
+VM on each destination network that runs a known listener. Each command must succeed before
+you set `state: Running`.
 
-1. `nc -vz <source-vcenter-fqdn> 443` and `nc -vz <target-vcenter-fqdn> 443`.
-2. From a **control plane** node on the source side: `nc -vz <target-vcenter-fqdn> 443`, to cover section 2.
-3. From a node on the source network: `nc -vz <already-migrated-node-ip> 6443` and `nc -vz <already-migrated-node-ip> 10250`.
-4. From a node on the source network: `nc -vzu <already-migrated-node-ip> 6081`, to confirm the overlay.
-5. From a control plane node on the source side: `nc -vz <migrated-control-plane-ip> 2379`.
-6. `ping <already-migrated-node-ip>`, to confirm ICMP is not filtered.
+1. From a control plane node on the source side: `nc -vz <source-vcenter-fqdn> 443` and `nc -vz <target-vcenter-fqdn> 443`.
+2. From that same node: `nc -vz <test-vm-target-ip> 6443` and `nc -vz <test-vm-target-ip> 10250`.
+3. Overlay delivery: start a UDP listener on the test VM and send from a source node to `<test-vm-target-ip>:6081`, in both directions, capturing packets on each side. `nc -vzu` proves nothing on UDP: success only means no ICMP unreachable came back.
+4. `ping <test-vm-target-ip>`, to confirm ICMP is not filtered.
+
+## Verify after the first nodes have moved
+
+1. From a control plane node on the source side: `nc -vz <migrated-control-plane-ip> 6443`.
+2. From a source-side node: `nc -vz <migrated-node-ip> 10250`, where `<migrated-node-ip>` is any node that has already moved.
+3. From a source-side control plane node: `nc -vz <migrated-control-plane-ip> 2379`.
+4. Repeat the UDP listener and packet capture test between a source-side node and a migrated node, in both directions.
 
 ## What a missing rule looks like
 
@@ -165,9 +178,10 @@ command must succeed before you set `state: Running`.
 | Operator to target vCenter `443` | Preflight fails with a vCenter login or inventory error; nothing is created |
 | Cluster to target vCenter `443` | No VM is created at all, or VMs are created and the nodes never become `Ready` |
 | ESXi to ESXi `902` | New machines stay in `Provisioning`; the clone task never completes |
+| vCenter to ESXi `902` | The clone or power-on task stalls and the new VM never powers on |
 | Cross-vCenter `443` | VMotion fails to start with a connection error to the target vCenter |
 | ESXi to ESXi `8000` | Hot migration starts and then times out moving the memory image |
-| `2379-2380` between control plane nodes | etcd loses quorum; the API server stops responding cluster-wide |
+| `2379-2380` between control plane nodes | etcd loses quorum on the serving side; the API stops responding until quorum returns |
 | `6081/udp` between datacenters | Nodes are `Ready` but pods on one side cannot reach pods on the other |
 | `22623` from the target network | New nodes never fetch their machine config and stay `NotReady` |
 

@@ -7,7 +7,7 @@
 - Cluster admin privileges
 - `oc` CLI authenticated to the cluster
 - vSphere CSI storage removed from the cluster (required by preflight; see [Preflight: vSphere CSI storage](#preflight-vsphere-csi-storage) below)
-- Every firewall rule in [Firewall and Network Requirements](firewall-requirements.md) opened before the migration starts
+- The [firewall and network rules](firewall-requirements.md) that apply to your migration opened before it starts
 
 ## Install the Operator
 
