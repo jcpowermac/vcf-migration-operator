@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1260" height="800" viewBox="0 0 1260 800" font-family="Red Hat Text, Helvetica, Arial, sans-serif" role="img" aria-label="Mid-migration network flows between source and target vCenter">
+<defs><marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6a6e73"/></marker><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#ee0000"/></marker></defs>
+<rect width="1260" height="800" fill="#ffffff"/>
+<rect x="30" y="120" width="540" height="560" rx="14" fill="#f7f8fa" stroke="#c7ccd1" stroke-width="1.5"/>
+<text x="50" y="154" font-size="17" font-weight="600" fill="#6a6e73">Source datacenter</text>
+<rect x="690" y="120" width="540" height="560" rx="14" fill="#f7f8fa" stroke="#c7ccd1" stroke-width="1.5"/>
+<text x="710" y="154" font-size="17" font-weight="600" fill="#6a6e73">Target datacenter</text>
+<polyline points="500,56 450,217" fill="none" stroke="#6a6e73" stroke-width="1.7" marker-end="url(#ag)"/>
+<rect x="455" y="124" width="40" height="24" rx="5" fill="#ffffff" stroke="#6a6e73" stroke-width="1"/>
+<text x="475" y="140" font-size="12.5" text-anchor="middle" fill="#6a6e73" font-weight="600">443</text>
+<polyline points="760,56 810,217" fill="none" stroke="#ee0000" stroke-width="2.2" marker-end="url(#ar)"/>
+<rect x="765" y="124" width="40" height="24" rx="5" fill="#ffffff" stroke="#ee0000" stroke-width="1"/>
+<text x="785" y="140" font-size="12.5" text-anchor="middle" fill="#ee0000" font-weight="600">443</text>
+<polyline points="450,217 810,217" fill="none" stroke="#ee0000" stroke-width="2.2" marker-end="url(#ar)" marker-start="url(#ar)"/>
+<rect x="528" y="205" width="203" height="24" rx="5" fill="#ffffff" stroke="#ee0000" stroke-width="1"/>
+<text x="630" y="221" font-size="12.5" text-anchor="middle" fill="#ee0000" font-weight="600">443 cross-vCenter vMotion</text>
+<polyline points="530,325 730,325" fill="none" stroke="#ee0000" stroke-width="2.2" marker-end="url(#ar)" marker-start="url(#ar)"/>
+<rect x="551" y="313" width="159" height="24" rx="5" fill="#ffffff" stroke="#ee0000" stroke-width="1"/>
+<text x="630" y="329" font-size="12.5" text-anchor="middle" fill="#ee0000" font-weight="600">8000 hot / 902 cold</text>
+<polyline points="730,434 515,455" fill="none" stroke="#ee0000" stroke-width="2.2" stroke-dasharray="7 5" marker-end="url(#ar)"/>
+<rect x="525" y="432" width="196" height="24" rx="5" fill="#ffffff" stroke="#ee0000" stroke-width="1"/>
+<text x="622" y="448" font-size="12.5" text-anchor="middle" fill="#ee0000" font-weight="600">6443 · 22623 · 2379-2380</text>
+<polyline points="730,544 200,544" fill="none" stroke="#ee0000" stroke-width="2.2" stroke-dasharray="7 5" marker-end="url(#ar)"/>
+<rect x="349" y="532" width="233" height="24" rx="5" fill="#ffffff" stroke="#ee0000" stroke-width="1"/>
+<text x="465" y="548" font-size="12.5" text-anchor="middle" fill="#ee0000" font-weight="600">6081 Geneve · every node pair</text>
+<polyline points="200,434 365,455" fill="none" stroke="#6a6e73" stroke-width="1.7" marker-end="url(#ag)"/>
+<polyline points="280,410 280,380 700,380 700,230 810,217" fill="none" stroke="#ee0000" stroke-width="2.2" stroke-dasharray="7 5" marker-end="url(#ar)"/>
+<rect x="363" y="368" width="255" height="24" rx="5" fill="#ffffff" stroke="#ee0000" stroke-width="1"/>
+<text x="490" y="384" font-size="12.5" text-anchor="middle" fill="#ee0000" font-weight="600">443 machine-api / cloud provider</text>
+<rect x="500" y="24" width="260" height="64" rx="9" fill="#151515" stroke="#151515" stroke-width="1.8"/>
+<text x="630.0" y="53" font-size="15" font-weight="600" text-anchor="middle" fill="#ffffff">vcf-migration-operator</text>
+<text x="630.0" y="69" font-size="11" font-weight="500" text-anchor="middle" fill="#ffffff">namespace openshift-vcf-migration</text>
+<rect x="250" y="190" width="200" height="54" rx="9" fill="#e8f0fe" stroke="#3b6fb6" stroke-width="1.8"/>
+<text x="350.0" y="222" font-size="15" font-weight="600" text-anchor="middle" fill="#151515">vCenter (source)</text>
+<rect x="810" y="190" width="200" height="54" rx="9" fill="#e8f0fe" stroke="#3b6fb6" stroke-width="1.8"/>
+<text x="910.0" y="222" font-size="15" font-weight="600" text-anchor="middle" fill="#151515">vCenter (target)</text>
+<rect x="70" y="290" width="460" height="70" rx="9" fill="#eef2f7" stroke="#6a6e73" stroke-width="1.8"/>
+<text x="300.0" y="330" font-size="15" font-weight="600" text-anchor="middle" fill="#151515">ESXi cluster (source)</text>
+<rect x="730" y="290" width="460" height="70" rx="9" fill="#eef2f7" stroke="#6a6e73" stroke-width="1.8"/>
+<text x="960.0" y="330" font-size="15" font-weight="600" text-anchor="middle" fill="#151515">ESXi cluster (target)</text>
+<rect x="70" y="410" width="130" height="48" rx="9" fill="#ffffff" stroke="#8a8f94" stroke-width="1.8"/>
+<text x="135.0" y="439" font-size="15" font-weight="600" text-anchor="middle" fill="#151515">master-1</text>
+<rect x="215" y="410" width="130" height="48" rx="9" fill="#ffffff" stroke="#8a8f94" stroke-width="1.8"/>
+<text x="280.0" y="439" font-size="15" font-weight="600" text-anchor="middle" fill="#151515">master-2</text>
+<rect x="365" y="400" width="150" height="110" rx="9" fill="#f7f8fa" stroke="#8a8f94" stroke-width="1.8"/>
+<text x="440.0" y="444" font-size="15" font-weight="600" text-anchor="middle" fill="#151515">API 6443</text>
+<text x="440.0" y="460" font-size="11" font-weight="500" text-anchor="middle" fill="#151515">MCS 22623</text>
+<text x="440.0" y="476" font-size="11" font-weight="500" text-anchor="middle" fill="#151515">etcd 2379-2380</text>
+<rect x="730" y="410" width="150" height="48" rx="9" fill="#fff1ee" stroke="#ee0000" stroke-width="1.8"/>
+<text x="805.0" y="431" font-size="15" font-weight="600" text-anchor="middle" fill="#151515">master-3</text>
+<text x="805.0" y="447" font-size="11" font-weight="500" text-anchor="middle" fill="#ee0000">migrated</text>
+<rect x="70" y="520" width="130" height="48" rx="9" fill="#ffffff" stroke="#8a8f94" stroke-width="1.8"/>
+<text x="135.0" y="549" font-size="15" font-weight="600" text-anchor="middle" fill="#151515">worker-1</text>
+<rect x="730" y="520" width="150" height="48" rx="9" fill="#fff1ee" stroke="#ee0000" stroke-width="1.8"/>
+<text x="805.0" y="541" font-size="15" font-weight="600" text-anchor="middle" fill="#151515">worker-2</text>
+<text x="805.0" y="557" font-size="11" font-weight="500" text-anchor="middle" fill="#ee0000">migrated</text>
+<text x="30" y="740" font-size="13" fill="#6a6e73">Dashed: must work between the two datacenters</text>
+<line x1="360" y1="736" x2="410" y2="736" stroke="#ee0000" stroke-width="2.2" marker-end="url(#ar)"/>
+<text x="422" y="740" font-size="13" fill="#6a6e73">introduced by the migration</text>
+<line x1="680" y1="736" x2="730" y2="736" stroke="#6a6e73" stroke-width="1.7" marker-end="url(#ag)"/>
+<text x="742" y="740" font-size="13" fill="#6a6e73">already required by the cluster</text>
+<text x="30" y="762" font-size="13" fill="#6a6e73">master-3 and worker-2 have already migrated; master-1, master-2 and worker-1 have not. One arrow stands for every node pair it describes.</text>
+</svg>

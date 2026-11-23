@@ -12,6 +12,7 @@ The operator reconciles the `VmwareCloudFoundationMigration` custom resource thr
   - [Install with Operator SDK](docs/user/install-with-operator-sdk.md)
   - [Install without OLM](docs/user/install-without-olm.md)
   - [Spec Examples](docs/user/spec-examples.md) — YAML examples of the migration spec
+  - [Firewall and Network Requirements](docs/user/firewall-requirements.md) — ports to open before `state: Running`, with a mid-migration diagram
 - **Developer Guide**
   - [API Reference](docs/dev/api.md) — CR spec, status, condition types
   - [Architecture](docs/dev/architecture.md) — package layout, reconciliation flow, requeue strategy
