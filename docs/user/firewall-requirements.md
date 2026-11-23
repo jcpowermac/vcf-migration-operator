@@ -34,9 +34,9 @@ between those two halves is where most mid-migration failures come from.
   have set the `managementState` of `ClusterCSIDriver/csi.vsphere.vmware.com` to `Removed`
   yourself. The operator does not remove the driver; preflight fails until the state is
   `Removed`. A `VMotion` selection skips this preflight check.
-- Setting `spec.migrateStorage` to `true` gives you storage **planning only**. The workflow stops
-  with `StorageExecutionUnsupported` before any storage execution, and section 2 does not enable
-  it.
+- With no VMotion selection, setting `spec.migrateStorage` to `true` gives you storage
+  **planning only**: the workflow stops with `StorageExecutionUnsupported` before any storage
+  execution, and section 2 does not enable it.
 
 ## Direction convention
 
